@@ -71,7 +71,7 @@ jobs:
       - name: Wait for MySQL
         run: |
           for i in {1..30}; do
-            if docker exec xignal-mysql mysqladmin ping -uroot -proot --silent; then
+            if docker exec xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot -e "SELECT 1" xignal >/dev/null 2>&1'; then
               exit 0
             fi
             sleep 2
@@ -81,12 +81,12 @@ jobs:
 
       - name: Apply schema and seed
         run: |
-          docker exec -i xignal-mysql mysql -uroot -proot xignal < infra/sql/001_init_placeholder.sql
-          docker exec -i xignal-mysql mysql -uroot -proot xignal < infra/sql/002_projection_support.sql
-          docker exec -i xignal-mysql mysql -uroot -proot xignal < infra/sql/010_local_smoke_seed.sql
+          docker exec -i xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal' < infra/sql/001_init_placeholder.sql
+          docker exec -i xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal' < infra/sql/002_projection_support.sql
+          docker exec -i xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal' < infra/sql/010_local_smoke_seed.sql
 
       - name: Verify seed row exists
-        run: docker exec xignal-mysql mysql -uroot -proot xignal -B -N -e "SELECT COUNT(*) FROM execution_units WHERE id = 9001;"
+        run: docker exec xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal -B -N -e "SELECT COUNT(*) FROM execution_units WHERE id = 9001;"'
 
       - name: Start backend
         run: |
@@ -113,13 +113,13 @@ jobs:
       - name: Capture same-dedupe evidence
         run: |
           curl -fsS "http://127.0.0.1:${PORT}/api/v1/internal/observability/transaction-retries" | tee observability-same.json
-          docker exec xignal-mysql mysql -uroot -proot xignal -B -N -e "SELECT id, dedupe_key, error_instance_seq, occurrence_count, IFNULL(DATE_FORMAT(resolved_at, '%Y-%m-%d %H:%i:%s.%f'), 'NULL') FROM notification_errors WHERE execution_unit_id = 9001 ORDER BY id ASC;" | tee notification-errors-same.txt
-          docker exec xignal-mysql mysql -uroot -proot xignal -B -N -e "SELECT execution_unit_id, context, last_event_type, health_status, IFNULL(last_error_code, 'NULL') FROM execution_unit_runtime_states WHERE execution_unit_id = 9001;" | tee runtime-same.txt
+          docker exec xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal -B -N -e "SELECT id, dedupe_key, error_instance_seq, occurrence_count, IFNULL(DATE_FORMAT(resolved_at, '\''%Y-%m-%d %H:%i:%s.%f'\''), '\''NULL'\'') FROM notification_errors WHERE execution_unit_id = 9001 ORDER BY id ASC;"' | tee notification-errors-same.txt
+          docker exec xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal -B -N -e "SELECT execution_unit_id, context, last_event_type, health_status, IFNULL(last_error_code, '\''NULL'\'') FROM execution_unit_runtime_states WHERE execution_unit_id = 9001;"' | tee runtime-same.txt
 
       - name: Reset DB and observability before resolve-race
         run: |
-          docker exec xignal-mysql mysql -uroot -proot xignal -e "DELETE FROM execution_unit_summaries WHERE execution_unit_id = 9001; DELETE FROM execution_unit_runtime_states WHERE execution_unit_id = 9001; DELETE FROM notification_errors WHERE execution_unit_id = 9001; DELETE FROM execution_events WHERE execution_unit_id = 9001; UPDATE execution_units SET context='live', status='active', activation_status='active', is_deleted=0 WHERE id = 9001;"
-          docker exec -i xignal-mysql mysql -uroot -proot xignal < infra/sql/010_local_smoke_seed.sql
+          docker exec xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal -e "DELETE FROM execution_unit_summaries WHERE execution_unit_id = 9001; DELETE FROM execution_unit_runtime_states WHERE execution_unit_id = 9001; DELETE FROM notification_errors WHERE execution_unit_id = 9001; DELETE FROM execution_events WHERE execution_unit_id = 9001; UPDATE execution_units SET context='\''live'\'', status='\''active'\'', activation_status='\''active'\'', is_deleted=0 WHERE id = 9001;"'
+          docker exec -i xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal' < infra/sql/010_local_smoke_seed.sql
           curl -fsS -X POST "http://127.0.0.1:${PORT}/api/v1/internal/observability/transaction-retries/reset"
 
       - name: Run resolve-race stress
@@ -128,8 +128,8 @@ jobs:
       - name: Capture resolve-race evidence
         run: |
           curl -fsS "http://127.0.0.1:${PORT}/api/v1/internal/observability/transaction-retries" | tee observability-race.json
-          docker exec xignal-mysql mysql -uroot -proot xignal -B -N -e "SELECT id, dedupe_key, error_instance_seq, occurrence_count, IFNULL(DATE_FORMAT(resolved_at, '%Y-%m-%d %H:%i:%s.%f'), 'NULL') FROM notification_errors WHERE execution_unit_id = 9001 ORDER BY id ASC;" | tee notification-errors-race.txt
-          docker exec xignal-mysql mysql -uroot -proot xignal -B -N -e "SELECT execution_unit_id, context, last_event_type, health_status, IFNULL(last_error_code, 'NULL') FROM execution_unit_runtime_states WHERE execution_unit_id = 9001;" | tee runtime-race.txt
+          docker exec xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal -B -N -e "SELECT id, dedupe_key, error_instance_seq, occurrence_count, IFNULL(DATE_FORMAT(resolved_at, '\''%Y-%m-%d %H:%i:%s.%f'\''), '\''NULL'\'') FROM notification_errors WHERE execution_unit_id = 9001 ORDER BY id ASC;"' | tee notification-errors-race.txt
+          docker exec xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal -B -N -e "SELECT execution_unit_id, context, last_event_type, health_status, IFNULL(last_error_code, '\''NULL'\'') FROM execution_unit_runtime_states WHERE execution_unit_id = 9001;"' | tee runtime-race.txt
 
       - name: Write run summary
         if: always()
