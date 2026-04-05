@@ -1,0 +1,14 @@
+{
+  "name": "xignal-rebuild-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/backend",
+    "apps/frontend"
+  ],
+  "scripts": {
+    "dev:backend": "npm --workspace apps/backend run dev",
+    "dev:frontend": "npm --workspace apps/frontend run dev",
+    "build": "npm run build --workspaces"
+  }
+}

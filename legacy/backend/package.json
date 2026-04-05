@@ -1,0 +1,43 @@
+{
+  "name": "backend",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node --max-old-space-size=8192 ./bin/www"
+  },
+  "dependencies": {
+    "@turf/turf": "^6.5.0",
+    "axios": "^1.3.4",
+    "body-parser": "^1.20.1",
+    "cookie-parser": "~1.4.4",
+    "coolsms-node-sdk": "^2.0.1",
+    "cors": "^2.8.5",
+    "dayjs": "^1.11.10",
+    "debug": "~2.6.9",
+    "dotenv": "^16.0.3",
+    "express": "^4.21.2",
+    "express-validator": "^6.15.0",
+    "geojson-stream-whatwg": "^1.0.1",
+    "http-errors": "~1.6.3",
+    "iconv-lite": "^0.6.3",
+    "jsonwebtoken": "^9.0.0",
+    "morgan": "~1.9.1",
+    "multer": "^1.4.5-lts.1",
+    "mysql": "^2.18.1",
+    "mysql2": "^3.2.0",
+    "node-binance-api": "^1.0.3",
+    "node-schedule": "^2.1.1",
+    "pug": "^2.0.4",
+    "redis": "^4.6.4",
+    "request": "^2.88.2",
+    "request-ip": "^3.3.0",
+    "selenium-webdriver": "^4.15.0",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
+    "technicalindicators": "^3.1.0",
+    "uuid": "^9.0.1",
+    "ws": "^8.18.0",
+    "xlsx": "^0.18.5",
+    "xml-js": "^1.6.11"
+  }
+}
