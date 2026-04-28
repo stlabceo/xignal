@@ -1,0 +1,122 @@
+{
+  "reportType": "qa-d-day-external-manual-close-grid-convergence-sprint",
+  "generatedAtKst": "2026-04-28 14:55:00 +09:00",
+  "finalClassification": "FIX_PASS_READY_FOR_18H_LIVE_QA",
+  "executiveSummary": [
+    "Current Binance clean gate passed for uid=147: PUMPUSDT/XRPUSDT LONG/SHORT positions are 0, openOrders are 0, openAlgoOrders/conditional orders are 0.",
+    "Current local state passed: local OPEN snapshots are 0, active reservations are 0, and run-all-live-readonly finalStatus is PASS.",
+    "Root cause was not reduced to PID18 only. The grid path lacked a conservative external/manual Binance liquidation convergence path: after user manual exchange close, grid could remain locally holding until OFF/truth-sync correction, while signal could already converge READY.",
+    "Implemented grid external manual close recovery with actual web_* fill attribution when single-owner safe; added strict blockers for multi-PID ambiguity and active/orphan protection.",
+    "Kept correction flatten available only under safe single-owner exchange-flat/no-protection conditions.",
+    "Integrated prior PID18 TIME exit recovery into full regression and fixed grid reservation-owned sibling cancellation replay regression.",
+    "Restarted 3079 after full PASS and confirmed new PID 7976 loaded modified runtime files."
+  ],
+  "currentBinanceCleanGate": [
+    { "symbol": "PUMPUSDT", "side": "LONG", "binanceQty": 0, "openOrders": 0, "openAlgoOrders": 0, "verdict": "PASS" },
+    { "symbol": "PUMPUSDT", "side": "SHORT", "binanceQty": 0, "openOrders": 0, "openAlgoOrders": 0, "verdict": "PASS" },
+    { "symbol": "XRPUSDT", "side": "LONG", "binanceQty": 0, "openOrders": 0, "openAlgoOrders": 0, "verdict": "PASS" },
+    { "symbol": "XRPUSDT", "side": "SHORT", "binanceQty": 0, "openOrders": 0, "openAlgoOrders": 0, "verdict": "PASS" }
+  ],
+  "manualCloseEvidence": [
+    { "timeKst": "2026-04-28 14:07:10.863 +09:00", "symbol": "PUMPUSDT", "side": "SELL", "positionSide": "LONG", "orderId": "4266851199", "clientOrderId": "web_5WlGqU7XxM88VSaWtvwQ", "qty": 14034, "avgPrice": 0.001779, "tradeIds": ["220621576"], "attribution": "manual Binance close evidence" },
+    { "timeKst": "2026-04-28 14:07:10.864 +09:00", "symbol": "PUMPUSDT", "side": "BUY", "positionSide": "SHORT", "orderId": "4266851200", "clientOrderId": "web_1TqITYMwGpiIRF797EjN", "qty": 28776, "avgPrice": 0.001780, "tradeIds": ["220621577"], "attribution": "manual Binance close evidence" },
+    { "timeKst": "2026-04-28 14:07:10.863 +09:00", "symbol": "XRPUSDT", "side": "BUY", "positionSide": "SHORT", "orderId": "147645933153", "clientOrderId": "web_BVcrIlskOUqKBBi18Vhv", "qty": 53.8, "avgPrice": 1.39430, "tradeIds": ["3096179910"], "attribution": "manual Binance close evidence" },
+    { "timeKst": "2026-04-28 14:07:10.864 +09:00", "symbol": "XRPUSDT", "side": "SELL", "positionSide": "LONG", "orderId": "147645933154", "clientOrderId": "web_IWcewD7uQPMV3PJ9FtLA", "qty": 53.7, "avgPrice": 1.39420, "tradeIds": ["3096179911"], "attribution": "manual Binance close evidence" }
+  ],
+  "currentLocalStalePidDiscovery": {
+    "openSnapshots": 0,
+    "activeReservations": 0,
+    "signalState": "enabled=N and READY/r_qty=0 for checked signal PIDs",
+    "gridState": "enabled=N, WAITING_WEBHOOK/MANUAL_OFF, IDLE legs, qty=0 for checked grid PIDs",
+    "controlledLiveConvergenceExecuted": false,
+    "reason": "No current stale grid/signal state remained after user manual close and OFF; live-readonly PASS."
+  },
+  "rootCauseClassification": [
+    { "rootCandidate": "GRID_EXTERNAL_MANUAL_CLOSE_RECOVERY_MISSING", "result": "YES", "affected": "grid external manual close path", "requiredFix": "actual web_* close fill recovery when single-owner safe" },
+    { "rootCandidate": "GRID_LEG_STATE_NOT_SYNCED_AFTER_EXTERNAL_CLOSE", "result": "YES", "affected": "grid truth sync / exchange-flat convergence", "requiredFix": "sync grid leg after recovered fill or safe correction" },
+    { "rootCandidate": "GRID_SNAPSHOT_SYNC_MISSING_AFTER_EXTERNAL_CLOSE", "result": "YES", "affected": "grid snapshot projection", "requiredFix": "apply exit fill + syncGridLegSnapshot" },
+    { "rootCandidate": "GRID_RESERVATION_FINALIZATION_MISSING_AFTER_EXTERNAL_CLOSE", "result": "YES", "affected": "reservation-owned CANCELED order replay", "requiredFix": "finalize CANCELED reservations when allOrders confirms CANCELED even without fills" },
+    { "rootCandidate": "SIGNAL_EXTERNAL_MANUAL_CLOSE_PATH_WORKING", "result": "YES_WITH_LIMIT", "affected": "signal exchange-flat convergence", "requiredFix": "QA scenario documents safe correction when actual manual web attribution is unavailable" },
+    { "rootCandidate": "EXTERNAL_CLOSE_TRADE_ATTRIBUTION_AMBIGUOUS", "result": "YES_RISK", "affected": "same symbol/side multi-PID cases", "requiredFix": "block automatic convergence and emit USER_ACTION_REQUIRED/BLOCKED audit" },
+    { "rootCandidate": "LIVE_READONLY_MISSED_GRID_EXTERNAL_CLOSE_STALE", "result": "NO_CURRENTLY", "affected": "current state", "requiredFix": "existing live-readonly now PASS; targeted scenarios added for stale coverage" }
+  ],
+  "modifiedFiles": [
+    "legacy/backend/coin.js",
+    "legacy/backend/grid-engine.js",
+    "legacy/backend/tools/qa/qa-scenarios.js",
+    "legacy/backend/tools/qa/run-all-data-replay.js",
+    "legacy/backend/tools/qa/data-replay-external-manual-close-convergence.js",
+    "legacy/backend/tools/qa/QA_ACCEPTANCE_MATRIX.md"
+  ],
+  "implementationSummary": [
+    "Added GRID_EXTERNAL_MANUAL_CLOSE_FILL recovery path for grid single-owner external manual close orders.",
+    "Preserves sourceClientOrderId, sourceOrderId, sourceTradeId, qty, price, realizedPnl.",
+    "Blocks grid exchange-flat correction when multiple same-symbol/side owners exist.",
+    "Blocks grid exchange-flat correction when active local protection/reservation remains.",
+    "Avoids irrelevant cancel path for legs with no local snapshot qty and no protection.",
+    "Finalizes reservation-owned CANCELED sibling order when Binance allOrders confirms CANCELED without trades."
+  ],
+  "qaResults": {
+    "nodeCheck": "PASS for modified runtime/QA files",
+    "targetedReplay": {
+      "script": "legacy/backend/tools/qa/data-replay-external-manual-close-convergence.js",
+      "finalStatus": "PASS",
+      "scenarios": [
+        "grid external manual close recovery with attributable fill",
+        "grid external manual close correction fallback",
+        "grid external manual close ambiguous multi-PID",
+        "signal external manual close then user OFF",
+        "grid external close with active orphan protection is blocked"
+      ],
+      "cleanupAfterCleanup": 0
+    },
+    "runAllDataReplay": {
+      "finalStatus": "PASS",
+      "reportJson": "C:\\Users\\tmdtk\\Xignal\\legacy\\backend\\tools\\qa\\reports\\qa-report-2026-04-28T05-51-40-518Z.json",
+      "reportMd": "C:\\Users\\tmdtk\\Xignal\\legacy\\backend\\tools\\qa\\reports\\qa-report-2026-04-28T05-51-40-518Z.md",
+      "cleanupAfterCleanup": 0
+    },
+    "runAllLiveReadonly": {
+      "finalStatus": "PASS",
+      "reportJson": "C:\\Users\\tmdtk\\Xignal\\legacy\\backend\\tools\\qa\\reports\\qa-live-readonly-report-2026-04-28T05-53-53-259Z.json",
+      "reportMd": "C:\\Users\\tmdtk\\Xignal\\legacy\\backend\\tools\\qa\\reports\\qa-live-readonly-report-2026-04-28T05-53-53-259Z.md"
+    }
+  },
+  "runtimeRestart": {
+    "oldPid": 12572,
+    "newPid": 7976,
+    "newProcessStartKst": "2026-04-28 14:52:37 +09:00",
+    "codeLoaded": "PASS",
+    "ngrokTarget": "http://localhost:3079",
+    "ngrokPublicUrl": "https://iguana-cedar-drilling.ngrok-free.dev",
+    "runMainHealth": "PASS",
+    "userStreamHealth": "PASS"
+  },
+  "smoke": {
+    "localSignal": { "httpStatus": 200, "response": true, "ledgerSnapshotReservationDelta": 0 },
+    "localGrid": { "httpStatus": 200, "matched": 0, "armed": 0, "ledgerSnapshotReservationDelta": 0 },
+    "ngrokSignal": { "httpStatus": 200, "response": true, "ledgerSnapshotReservationDelta": 0 },
+    "ngrokGrid": { "httpStatus": 200, "matched": 0, "armed": 0, "ledgerSnapshotReservationDelta": 0 }
+  },
+  "diffScopeReview": {
+    "classification": "DIFF_SCOPE_LARGE_BUT_EXPLAINED",
+    "note": "The working tree already contains a large accumulated coin.js diff from prior TIME exit and runtime work. This sprint's reviewed functional runtime scope is limited to grid external manual close recovery, reservation-owned canceled finalization, and grid exchange-flat guard logic."
+  },
+  "recommendationFor18hLiveQa": "READY: user may resume 18:00~10:00 Live QA after their own ON/preflight decision. Continue read-only observation during live window. If active protection or multi-PID ambiguous external close appears, do not auto-converge; report USER_ACTION_REQUIRED.",
+  "codexDidNotDo": [
+    "Binance 주문 생성 안 함",
+    "Binance 주문 취소 안 함",
+    "Binance 포지션 청산 안 함",
+    "보호주문 생성 안 함",
+    "실제 webhook 전송 안 함; receive-only unmatched smoke만 수행",
+    "TradingView alert 수정 안 함",
+    "전략 ON 변경 안 함",
+    "전략 설정 변경 안 함",
+    "raw SQL DB patch 안 함",
+    "DB schema 변경 안 함",
+    "migration 적용 안 함",
+    "stored procedure 변경 안 함",
+    "local-only controlled convergence 실행 안 함; 현재 stale state가 없어 필요 없었음",
+    "live recovery/reconcile 임의 실행 안 함"
+  ]
+}

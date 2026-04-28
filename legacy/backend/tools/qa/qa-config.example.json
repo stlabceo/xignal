@@ -1,0 +1,39 @@
+{
+  "mode": "data-replay",
+  "uid": 0,
+  "strategyCategory": "SIGNAL",
+  "strategyId": 0,
+  "pid": 0,
+  "symbol": "BTCUSDT",
+  "positionSide": "LONG",
+  "maxNotional": 100,
+  "maxLoss": 10,
+  "webhookEndpoint": "http://127.0.0.1:3079/user/api/hook",
+  "webhookPayload": {
+    "signal": "BUY",
+    "symbol": "BTCUSDT",
+    "bunbong": "1MIN"
+  },
+  "expectedTpSl": {
+    "takeProfitKinds": [
+      "PROFIT"
+    ],
+    "stopLossKinds": [
+      "STOP"
+    ]
+  },
+  "splitTpConfig": {
+    "enabled": false,
+    "count": 0,
+    "gap": 0.2
+  },
+  "compareSymbols": [
+    "BTCUSDT"
+  ],
+  "qaRunLabel": "QA_DRY_RUN",
+  "killSwitch": {
+    "manualCloseProcedure": "Document and confirm manual close steps before enabling live orders."
+  },
+  "dryRun": true,
+  "allowLiveOrders": false
+}

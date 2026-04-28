@@ -1,8 +1,4 @@
 var exports = module.exports = {};
-const SYMBOL = 'NQM25';
-
-exports.offerho = 0;
-exports.bidho = 0;
 
 exports.price = {}
 
@@ -15,6 +11,9 @@ exports.getPrice = (symbol) => {
             bestBidQty: exports.price[symbol].bestBidQty,
             bestAsk: parseFloat(exports.price[symbol].bestAsk),
             bestAskQty: exports.price[symbol].bestAskQty,
+            lastPrice: exports.price[symbol].lastPrice ? parseFloat(exports.price[symbol].lastPrice) : 0,
+            lastQty: exports.price[symbol].lastQty ? parseFloat(exports.price[symbol].lastQty) : 0,
+            lastTradeTime: exports.price[symbol].lastTradeTime || 0,
             st: true,
         }
     }else{
@@ -24,6 +23,9 @@ exports.getPrice = (symbol) => {
             bestBidQty: 0,
             bestAsk: 0,
             bestAskQty: 0,
+            lastPrice: 0,
+            lastQty: 0,
+            lastTradeTime: 0,
             st: false,
         }
     }

@@ -7,6 +7,49 @@
 var app = require('../app');
 var debug = require('debug')('backend:server');
 var http = require('http');
+const seon = require('../seon');
+
+const buildErrorPayload = (error) => ({
+  name: error?.name || 'Error',
+  message: error?.message || String(error || 'Unknown error'),
+  stack: error?.stack || null,
+});
+
+const logRuntimeProcess = (stage, payload = {}) => {
+  try {
+    console.log(`[RUNTIME_PROCESS][${stage}] ${JSON.stringify({
+      pid: process.pid,
+      port: String(process.env.PORT || '3000'),
+      runtimeOwnerPort: String(process.env.RUNTIME_OWNER_PORT || '3000'),
+      ...payload,
+    })}`);
+  } catch (error) {
+    console.log(`[RUNTIME_PROCESS][${stage}]`);
+  }
+};
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[UNHANDLED_REJECTION]', reason);
+  logRuntimeProcess('UNHANDLED_REJECTION', buildErrorPayload(reason));
+});
+process.on('uncaughtExceptionMonitor', (error, origin) => {
+  logRuntimeProcess('UNCAUGHT_EXCEPTION_MONITOR', {
+    origin: origin || null,
+    ...buildErrorPayload(error),
+  });
+});
+process.on('beforeExit', (code) => {
+  logRuntimeProcess('BEFORE_EXIT', { code });
+});
+process.on('exit', (code) => {
+  logRuntimeProcess('EXIT', { code });
+});
+process.on('SIGINT', () => {
+  logRuntimeProcess('SIGINT');
+});
+process.on('SIGTERM', () => {
+  logRuntimeProcess('SIGTERM');
+});
 const { createSocketServer } = require('../routes/socket');  // socket.js에서 가져오기
 
 /**
@@ -15,6 +58,8 @@ const { createSocketServer } = require('../routes/socket');  // socket.js에서 
 
 var port = normalizePort(process.env.PORT || '3000');
 app.set('port', port);
+const runtimeOwnerPort = String(process.env.RUNTIME_OWNER_PORT || '3000');
+const enableRuntime = String(port) === runtimeOwnerPort;
 
 /**
  * Create HTTP server.
@@ -38,9 +83,30 @@ const {io, users} = require('../routes/socket')(server); // socket.js 실행
 app.io = io;
 app.users = users;
 
+logRuntimeProcess('BOOTSTRAP', {
+  enableRuntime,
+});
+
+seon.startRuntime({
+  enabled: enableRuntime,
+  ownerLabel: String(port),
+}).catch((error) => {
+  console.error(`[SEON_RUNTIME_START_ERROR] port:${port}`, error);
+  logRuntimeProcess('RUNTIME_START_ERROR', buildErrorPayload(error));
+});
+
 server.listen(port, '0.0.0.0');
 server.on('error', onError);
 server.on('listening', onListening);
+server.on('close', () => {
+  logRuntimeProcess('SERVER_CLOSE');
+});
+server.on('clientError', (error, socket) => {
+  logRuntimeProcess('SERVER_CLIENT_ERROR', buildErrorPayload(error));
+  try {
+    socket?.destroy?.();
+  } catch (destroyError) {}
+});
 
 
 /**
@@ -68,6 +134,11 @@ function normalizePort(val) {
  */
 
 function onError(error) {
+  logRuntimeProcess('SERVER_ERROR', {
+    syscall: error?.syscall || null,
+    code: error?.code || null,
+    ...buildErrorPayload(error),
+  });
   if (error.syscall !== 'listen') {
     throw error;
   }
@@ -101,5 +172,6 @@ function onListening() {
     ? 'pipe ' + addr
     : 'port ' + addr.port;
   debug('Listening on ' + bind);
+  logRuntimeProcess('SERVER_LISTENING', { bind });
 }
 
