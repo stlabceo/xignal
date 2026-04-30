@@ -1,369 +1,303 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import OnOffToggle from '../../components/ui/toggle/OnOffToggle';
 import { comma, formatPrice } from '../../utils/comma';
 import { trading } from '../../services/trading';
+import { buildStrategyDeletePayload, confirmStrategyDelete, isTradingEnabled, stopTradingActionEvent } from './tradingState';
 
-const statusNameEnum = {
-	READY: 'Ready',
-	EXACT_WAIT: 'Entry Pending',
-	EXACT: 'Exit Pending',
-	CANCEL_WAIT: 'Entry Pending',
-	CANCEL: 'Ready',
-	PROFIT: 'Profit Closed',
-	STOP: 'Stop Closed',
-	FORCING: 'Force Exit',
-	FORCING_WAIT: 'Force Exit Pending',
-	CLOSE: 'Closed'
+const strategyLabelMap = {
+	'ATF+VIXFIX': 'ATF+VIXFIX',
+	'atf+vixfix': 'ATF+VIXFIX',
+	SQZGBRK: 'SQZGBRK'
 };
 
-const typeEnum = {
-	scalping: 'Scalping',
-	trend: 'Trend',
-	greenlight: 'GreenLight'
+const sideLabelMap = {
+	BUY: '매수',
+	SELL: '매도'
 };
 
-const signalTypeEnum = {
-	BUY: 'Buy',
-	SELL: 'Sell',
-	TWO: 'Combined'
+const toNumber = (value) => {
+	const numeric = Number(value);
+	return Number.isFinite(numeric) ? numeric : 0;
 };
 
-const aiTypeEnum = {
-	attack: 'Aggressive',
-	neutral: 'Neutral',
-	conser: 'Conservative'
+const getStrategyLabel = (item) => strategyLabelMap[item?.type] || item?.a_name || item?.type || '-';
+const getSignalTypeLabel = (item) => sideLabelMap[String(item?.signalType || '').toUpperCase()] || '-';
+const isEnabled = isTradingEnabled;
+const getUserStatusLabel = (item = {}) => item.userStatusLabel || (getOpenQty(item) > 0 ? '포지션 보유중' : isEnabled(item) ? '운용중' : '대기중');
+
+const formatDisplayPrice = (value) => {
+	const numeric = toNumber(value);
+	return numeric > 0 ? comma(formatPrice(numeric)) : '-';
 };
 
-const TradingListTable = ({ setTradingDetailId, listData: data, getListData }) => {
-	const [buySellDataList, setBuySellDataList] = useState({});
+const formatDisplayAmount = (value) => {
+	const numeric = toNumber(value);
+	return numeric > 0 ? `${comma(numeric)} USDT` : '-';
+};
+
+const formatDisplayPnl = (value) => {
+	const numeric = toNumber(value);
+	return `${numeric >= 0 ? '+' : ''}${comma(Number(numeric.toFixed(8)))} USDT`;
+};
+
+const formatDate = (value) => {
+	if (!value) return '-';
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) return '-';
+	return date.toLocaleString('ko-KR', { hour12: false });
+};
+
+const getTradeAmount = (item = {}) => {
+	const backendValue = toNumber(item.tradeAmount);
+	if (backendValue > 0) {
+		return backendValue;
+	}
+	return toNumber(item.margin) * toNumber(item.leverage);
+};
+
+const getEntryPrice = (item = {}) => {
+	const backendValue = toNumber(item.entryPrice);
+	if (backendValue > 0) return backendValue;
+	if (toNumber(item.r_exactPrice) > 0) return toNumber(item.r_exactPrice);
+	if (toNumber(item.r_signalPrice) > 0) return toNumber(item.r_signalPrice);
+	return 0;
+};
+
+const getOpenQty = (item = {}) => {
+	const backendValue = toNumber(item.openQty);
+	if (backendValue > 0) return backendValue;
+	return toNumber(item.r_qty);
+};
+
+const getUnrealizedPnl = (item = {}, currentPrice) => {
+	const entryPrice = getEntryPrice(item);
+	const qty = getOpenQty(item);
+	const normalizedCurrentPrice = toNumber(currentPrice);
+	if (!(entryPrice > 0) || !(qty > 0) || !(normalizedCurrentPrice > 0)) {
+		return 0;
+	}
+	return String(item.signalType || '').toUpperCase() === 'SELL'
+		? (entryPrice - normalizedCurrentPrice) * qty
+		: (normalizedCurrentPrice - entryPrice) * qty;
+};
+
+const getWinLossLabel = (item = {}) => {
+	const win = toNumber(item.r_win || item.winCount);
+	const loss = toNumber(item.r_loss || item.lossCount);
+	return `${comma(win)}승 / ${comma(loss)}패`;
+};
+
+const StatusChip = ({ label }) => (
+	<span className="inline-flex rounded-full border border-[#334155] bg-[#111827] px-2.5 py-1 text-xs font-semibold text-[#D8E0ED]">
+		{label}
+	</span>
+);
+
+const TradingListTable = ({ setTradingDetailId, listData: data = [], getListData }) => {
+	const [livePriceMap, setLivePriceMap] = useState({});
 	const [activeTab, setActiveTab] = useState('ON');
 	const reqIdRef = useRef(0);
 
 	useEffect(() => {
-		if (!data || data.length === 0) return;
+		if (!data || data.length === 0) {
+			setLivePriceMap({});
+			return;
+		}
 
-		const symbols = [...new Set(data.map((d) => d.symbol))];
-		const params = { symbols, live: 'Y' };
+		const symbols = [...new Set(data.map((item) => item.symbol).filter(Boolean))];
+		if (!symbols.length) return;
+
 		const reqId = ++reqIdRef.current;
-
-		trading.livePrice(params, (res) => {
-			if (reqId !== reqIdRef.current) return;
-			if (res === false) return;
-			setBuySellDataList((prev) => ({ ...prev, ...res }));
+		trading.livePrice({ symbols, live: 'Y' }, (res) => {
+			if (reqId !== reqIdRef.current || res === false) return;
+			setLivePriceMap((prev) => ({ ...prev, ...res }));
 		});
 	}, [data]);
 
-	const filteredData = useMemo(() => {
-		return data.filter((item) => {
-			if (activeTab === 'ON') return item.autoST === 'Y';
-			return item.autoST !== 'Y';
-		});
-	}, [data, activeTab]);
+	const filteredData = useMemo(
+		() => data.filter((item) => (activeTab === 'ON' ? isEnabled(item) : !isEnabled(item))),
+		[data, activeTab]
+	);
 
-	const sumRealizedProfit = useCallback(() => {
-		return filteredData.reduce((sum, item) => {
-			const pol = Number(item.r_pol_sum) || 0;
-			const charge = Number(item.r_charge) || 0;
-			return sum + (pol - charge);
-		}, 0);
-	}, [filteredData]);
-
-	const handleAutoToggle = (id, st) => {
-		const body = {
-			id,
-			st: st ? 'Y' : 'N'
-		};
-		const params = {
-			live: 'Y'
-		};
-
-		trading.liveAutoItem(body, params, () => {
-			getListData();
+	const handleAutoToggle = (id, enabled) => {
+		trading.liveAutoItem({ id, enabled: enabled ? 'Y' : 'N' }, { live: 'Y' }, () => {
+			getListData?.();
 		});
 	};
 
-	const handleDelete = (id) => {
-  console.log('Delete pending backend protocol:', id);
-};
-
-	const getEntryPrice = (item) => {
-		if (item.status === 'EXACT_WAIT') {
-			return comma(formatPrice(item.r_signalPrice));
-		}
-		if (item.status === 'EXACT' || item.status === 'FORCING' || item.status === 'FORCING_WAIT') {
-			return comma(formatPrice(item.r_exactPrice));
-		}
-		return '-';
+	const handleDelete = (id, event) => {
+		stopTradingActionEvent(event);
+		if (!confirmStrategyDelete(`algorithm PID ${id}`)) return;
+		trading.deleteLivePlayItems(buildStrategyDeletePayload(id), null, () => {
+			getListData?.();
+		});
 	};
 
-	const getSize = (item) => {
-		return item.r_qty ? comma(item.r_qty) : '-';
-	};
+	const renderMobileCard = (item) => {
+		const currentPrice = livePriceMap[item.symbol]?.lastPrice;
+		const unrealizedPnl = getUnrealizedPnl(item, currentPrice);
+		const lastTradeAt = item.lastTradeAt || item.r_exactTime || item.updatedAt || item.created_at;
 
-	const getTrailingStop = (item) => {
-		return item.t_chase ? `${item.t_chase}%` : '-';
-	};
+		return (
+			<div
+				key={`mobile_trading_list_item_${item.id}`}
+				className="rounded-xl border border-[#2d3340] bg-[#151A22] p-4 text-white"
+				onClick={() => setTradingDetailId(item.id)}
+			>
+				<div className="flex items-start justify-between gap-3">
+					<div>
+						<p className="text-[12px] text-[#8b94a3]">PID {item.id ?? '-'}</p>
+						<p className="mt-1 text-[16px] font-semibold">{getStrategyLabel(item)}</p>
+						<p className="mt-1 text-[12px] text-[#aeb7c6]">
+							{item.symbol || '-'} / {getSignalTypeLabel(item)}
+						</p>
+					</div>
+					<StatusChip label={getUserStatusLabel(item)} />
+				</div>
 
-	const getRoi = (item) => {
-		const roi = Number(item.r_pol_tick);
-		if (Number.isNaN(roi)) return '-';
-		return `${comma(roi)}%`;
-	};
+				<div className="mt-3 grid grid-cols-2 gap-2">
+					<div className="rounded-md bg-[#0F141B] px-3 py-2">
+						<p className="text-[11px] text-[#7f8898]">투자금</p>
+						<p className="mt-1 text-[14px]">{formatDisplayAmount(getTradeAmount(item))}</p>
+					</div>
+					<div className="rounded-md bg-[#0F141B] px-3 py-2">
+						<p className="text-[11px] text-[#7f8898]">현재 포지션</p>
+						<p className="mt-1 text-[14px]">{getOpenQty(item) > 0 ? `${comma(getOpenQty(item))}` : '-'}</p>
+					</div>
+					<div className="rounded-md bg-[#0F141B] px-3 py-2">
+						<p className="text-[11px] text-[#7f8898]">현재 미실현손익</p>
+						<p className="mt-1 text-[14px]">{formatDisplayPnl(unrealizedPnl)}</p>
+					</div>
+					<div className="rounded-md bg-[#0F141B] px-3 py-2">
+						<p className="text-[11px] text-[#7f8898]">누적 실현손익</p>
+						<p className="mt-1 text-[14px]">{formatDisplayPnl(item.realizedPnlTotal)}</p>
+					</div>
+					<div className="rounded-md bg-[#0F141B] px-3 py-2">
+						<p className="text-[11px] text-[#7f8898]">승/패</p>
+						<p className="mt-1 text-[14px]">{getWinLossLabel(item)}</p>
+					</div>
+					<div className="rounded-md bg-[#0F141B] px-3 py-2">
+						<p className="text-[11px] text-[#7f8898]">최근 거래</p>
+						<p className="mt-1 text-[14px]">{formatDate(lastTradeAt)}</p>
+					</div>
+				</div>
 
-	const getRealizedProfit = (item) => {
-		return `${comma((Number(item.r_pol_sum) || 0) - (Number(item.r_charge) || 0))}$`;
+				<div className="mt-3 flex items-center justify-between rounded-md bg-[#0F141B] px-3 py-3" onClick={(e) => e.stopPropagation()}>
+					<div className="text-[13px] text-[#cfd5df]">ON/OFF</div>
+					<OnOffToggle isOn={isEnabled(item)} setIsOn={(value) => handleAutoToggle(item.id, value)} disabled={false} />
+				</div>
+
+				{activeTab === 'OFF' && (
+					<div className="mt-2 flex justify-end gap-2" onClick={(e) => e.stopPropagation()}>
+						<button type="button" className="rounded-md border border-[#4b4b4b] bg-[#121212] px-4 py-2 text-xs text-white hover:bg-[#2a2a2a]" onClick={() => setTradingDetailId(item.id)}>
+							수정
+						</button>
+						<button type="button" className="rounded-md border border-[#4b4b4b] bg-[#121212] px-4 py-2 text-xs text-white hover:bg-[#2a2a2a]" onClick={(event) => handleDelete(item.id, event)}>
+							삭제
+						</button>
+					</div>
+				)}
+			</div>
+		);
 	};
 
 	return (
 		<div className="space-y-3">
 			<div className="flex items-center gap-2">
-				<button
-					type="button"
-					onClick={() => setActiveTab('ON')}
-					className={`px-4 py-2 rounded-md border text-sm cursor-pointer ${
-						activeTab === 'ON'
-							? 'bg-white text-black border-white'
-							: 'bg-[#1A1C22] text-[#b0b0b0] border-[#4E5766]'
-					}`}
-				>
-					ON
-				</button>
-				<button
-					type="button"
-					onClick={() => setActiveTab('OFF')}
-					className={`px-4 py-2 rounded-md border text-sm cursor-pointer ${
-						activeTab === 'OFF'
-							? 'bg-white text-black border-white'
-							: 'bg-[#1A1C22] text-[#b0b0b0] border-[#4E5766]'
-					}`}
-				>
-					OFF
-				</button>
+				{['ON', 'OFF'].map((tab) => (
+					<button
+						key={tab}
+						type="button"
+						onClick={() => setActiveTab(tab)}
+						className={`rounded-md border px-4 py-2 text-sm ${
+							activeTab === tab ? 'border-white bg-white text-black' : 'border-[#4E5766] bg-[#1A1C22] text-[#b0b0b0]'
+						}`}
+					>
+						{tab}
+					</button>
+				))}
 			</div>
 
 			<div className="space-y-3 md:hidden">
 				{filteredData.length === 0 ? (
-					<div className="rounded-lg border border-[#2d3340] bg-[#1A1C22] px-4 py-6 text-center text-sm text-[#9aa3b2]">
-						Empty Setup.
+					<div className="rounded-lg border border-[#2d3340] bg-[#151A22] px-4 py-6 text-center text-sm text-[#9aa3b2]">
+						표시할 알고리즘 전략이 없습니다.
 					</div>
 				) : (
-					filteredData.map((item) => (
-						<div
-							key={`mobile_trading_list_item_${item.id}`}
-							className="rounded-lg border border-[#2d3340] bg-[#1A1C22] p-4 text-white"
-							onClick={() => {
-								setTradingDetailId(item.id);
-							}}
-						>
-							<div className="flex items-start justify-between gap-3">
-								<div>
-									<p className="text-[12px] text-[#8b94a3]">Order No. {item.id ?? '-'}</p>
-									<p className="mt-1 text-[16px] font-semibold">{item.symbol || '-'}</p>
-								</div>
-								<div className="rounded-md bg-[#0F0F0F] px-2.5 py-1 text-[12px] text-[#d7dbe3]">
-									{statusNameEnum[item.status] || item.status}
-								</div>
-							</div>
-
-							<div className="mt-3 grid grid-cols-2 gap-2">
-								<div className="rounded-md bg-[#0F0F0F] px-3 py-2">
-									<p className="text-[11px] text-[#7f8898]">Direction</p>
-									<p className="mt-1 text-[14px]">{signalTypeEnum[item.signalType] || '-'}</p>
-								</div>
-								<div className="rounded-md bg-[#0F0F0F] px-3 py-2">
-									<p className="text-[11px] text-[#7f8898]">Strategy</p>
-									<p className="mt-1 text-[14px]">{typeEnum[item.type] || '-'}</p>
-								</div>
-								<div className="rounded-md bg-[#0F0F0F] px-3 py-2">
-									<p className="text-[11px] text-[#7f8898]">AI Type</p>
-									<p className="mt-1 text-[14px]">{aiTypeEnum[item.AI_ST] || '-'}</p>
-								</div>
-								<div className="rounded-md bg-[#0F0F0F] px-3 py-2">
-									<p className="text-[11px] text-[#7f8898]">Entry Price</p>
-									<p className="mt-1 text-[14px]">{getEntryPrice(item)}</p>
-								</div>
-								<div className="rounded-md bg-[#0F0F0F] px-3 py-2">
-									<p className="text-[11px] text-[#7f8898]">Bid / Ask</p>
-									<p className="mt-1 text-[14px]">
-										{comma(buySellDataList[item.symbol]?.bestBid)} / {comma(buySellDataList[item.symbol]?.bestAsk)}
-									</p>
-								</div>
-								<div className="rounded-md bg-[#0F0F0F] px-3 py-2">
-									<p className="text-[11px] text-[#7f8898]">Margin / Lev</p>
-									<p className="mt-1 text-[14px]">
-										{comma(item.margin)}$ / {item.leverage}X
-									</p>
-								</div>
-								<div className="rounded-md bg-[#0F0F0F] px-3 py-2">
-									<p className="text-[11px] text-[#7f8898]">TP / SL</p>
-									<p className="mt-1 text-[14px]">
-										{item.profit ? `${item.profit}%` : '-'} / {item.stopLoss ? `${item.stopLoss}%` : '-'}
-									</p>
-								</div>
-								<div className="rounded-md bg-[#0F0F0F] px-3 py-2">
-									<p className="text-[11px] text-[#7f8898]">Trailing Stop</p>
-									<p className="mt-1 text-[14px]">{getTrailingStop(item)}</p>
-								</div>
-								<div className="rounded-md bg-[#0F0F0F] px-3 py-2">
-									<p className="text-[11px] text-[#7f8898]">Size</p>
-									<p className="mt-1 text-[14px]">{getSize(item)}</p>
-								</div>
-								<div className="rounded-md bg-[#0F0F0F] px-3 py-2">
-									<p className="text-[11px] text-[#7f8898]">ROI / Profit</p>
-									<p className="mt-1 text-[14px]">
-										{getRoi(item)} / {getRealizedProfit(item)}
-									</p>
-								</div>
-							</div>
-
-							<div
-								className="mt-3 flex items-center justify-between rounded-md bg-[#0F0F0F] px-3 py-3"
-								onClick={(e) => {
-									e.stopPropagation();
-								}}
-							>
-								<div className="text-[13px] text-[#cfd5df]">Order On/Off</div>
-								<OnOffToggle
-									isOn={item.autoST === 'Y'}
-									setIsOn={(value) => handleAutoToggle(item.id, value)}
-									disabled={item.status === 'CLOSE'}
-								/>
-							</div>
-
-							{activeTab === 'OFF' && (
-								<div
-									className="mt-2 flex justify-end"
-									onClick={(e) => {
-										e.stopPropagation();
-									}}
-								>
-									<button
-										type="button"
-										className="px-4 py-2 text-xs bg-[#121212] border border-[#4b4b4b] text-white rounded-md hover:bg-[#2a2a2a] cursor-pointer"
-										onClick={() => handleDelete(item.id)}
-									>
-										Delete
-									</button>
-								</div>
-							)}
-						</div>
-					))
+					filteredData.map(renderMobileCard)
 				)}
-
-				<tr className="rounded-lg bg-[#321F21] px-4 py-3 text-white">
-					<td className="flex items-center justify-between">
-						<span className="text-[13px] text-[#d5d5d5]">Total</span>
-						<span className="text-[16px] font-bold">{comma(sumRealizedProfit())}$</span>
-					</td>
-				</tr>
 			</div>
 
-			<div className="hidden md:block w-full overflow-x-auto rounded-lg shadow-[0_0_5px_rgba(0,0,0,0.1)]">
-				<table className="table-fixed min-w-[2200px] text-sm text-center whitespace-nowrap">
-					<thead className="bg-[#1A1C22] border-b border-[#4E5766] text-[#828DA0] font-bold">
+			<div className="hidden w-full overflow-x-auto rounded-xl border border-[#27313D] bg-[#151A22] md:block">
+				<table className="table-fixed min-w-[1660px] whitespace-nowrap text-center text-sm">
+					<thead className="border-b border-[#2D3746] bg-[#10151C] font-bold text-[#8B96A8]">
 						<tr>
-							<th className="px-4 py-4">Order No.</th>
-							<th className="px-4 py-4">Symbol</th>
-							<th className="px-4 py-4">Long / Short</th>
-							<th className="px-4 py-4">Strategy</th>
-							<th className="px-4 py-4">AI Type</th>
-							<th className="px-4 py-4">Bid Price</th>
-							<th className="px-4 py-4">Ask Price</th>
-							<th className="px-4 py-4">Entry Price</th>
-							<th className="px-4 py-4">Status</th>
-							<th className="px-4 py-4">Margin</th>
-							<th className="px-4 py-4">Leverage</th>
-							<th className="px-4 py-4">Size</th>
-							<th className="px-4 py-4">Trailing Stop</th>
-							<th className="px-4 py-4">Take Profit</th>
-							<th className="px-4 py-4">Stop Loss</th>
-							<th className="px-4 py-4">PnL (ROI%)</th>
-							<th className="px-4 py-4">Realized Profit</th>
-							{activeTab === 'OFF' && <th className="px-4 py-4">Delete</th>}
-							<th className="px-4 py-4">Order On/Off</th>
+							<th className="px-4 py-4">전략</th>
+							<th className="px-4 py-4">종목 / 방향</th>
+							<th className="px-4 py-4">투자금</th>
+							<th className="px-4 py-4">현재 포지션</th>
+							<th className="px-4 py-4">현재가 / 진입가</th>
+							<th className="px-4 py-4">현재 미실현손익</th>
+							<th className="px-4 py-4">누적 실현손익</th>
+							<th className="px-4 py-4">승/패</th>
+							<th className="px-4 py-4">최근 거래</th>
+							<th className="px-4 py-4">상태</th>
+							<th className="px-4 py-4">ON/OFF</th>
+							<th className="px-4 py-4">수정</th>
+							{activeTab === 'OFF' && <th className="px-4 py-4">삭제</th>}
 						</tr>
 					</thead>
-
 					<tbody>
-						{filteredData.map((item, idx) => (
-							<tr
-								key={`trading_list_item_${idx}`}
-								className="border-b border-[#4E5766] cursor-pointer text-[#ffffff] hover:bg-[#14161b]"
-								onClick={() => {
-									setTradingDetailId(item.id);
-								}}
-							>
-								<td className="px-4 py-4">{item.id ?? '-'}</td>
-								<td className="px-4 py-4">{item.symbol}</td>
-								<td className="px-4 py-4">{signalTypeEnum[item.signalType] || '-'}</td>
-								<td className="px-4 py-4">{typeEnum[item.type] || '-'}</td>
-								<td className="px-4 py-4">{aiTypeEnum[item.AI_ST] || '-'}</td>
-								<td className="px-4 py-4">{comma(buySellDataList[item.symbol]?.bestBid)}</td>
-								<td className="px-4 py-4">{comma(buySellDataList[item.symbol]?.bestAsk)}</td>
-								<td className="px-4 py-4">{getEntryPrice(item)}</td>
-								<td className="px-4 py-4">{statusNameEnum[item.status] || item.status}</td>
-								<td className="px-4 py-4">{comma(item.margin)}$</td>
-								<td className="px-4 py-4">{item.leverage}X</td>
-								<td className="px-4 py-4">{getSize(item)}</td>
-								<td className="px-4 py-4">{getTrailingStop(item)}</td>
-								<td className="px-4 py-4">{item.profit ? `${item.profit}%` : '-'}</td>
-								<td className="px-4 py-4">{item.stopLoss ? `${item.stopLoss}%` : '-'}</td>
-								<td className="px-4 py-4">{getRoi(item)}</td>
-								<td className="px-4 py-4">{getRealizedProfit(item)}</td>
-
-								{activeTab === 'OFF' && (
-									<td
-										className="px-4 py-4"
-										onClick={(e) => {
-											e.stopPropagation();
-										}}
-									>
-										<button
-											type="button"
-											className="px-4 py-1.5 text-xs bg-[#121212] border border-[#4b4b4b] text-white rounded-md hover:bg-[#2a2a2a] cursor-pointer"
-											onClick={() => handleDelete(item.id)}
-										>
-											Delete
-										</button>
-									</td>
-								)}
-
-								<td
-									className="px-4 py-4"
-									onClick={(e) => {
-										e.stopPropagation();
-									}}
-								>
-									<OnOffToggle
-										isOn={item.autoST === 'Y'}
-										setIsOn={(value) => handleAutoToggle(item.id, value)}
-										disabled={item.status === 'CLOSE'}
-									/>
+						{filteredData.length === 0 ? (
+							<tr>
+								<td className="px-4 py-8 text-[#9aa3b2]" colSpan={activeTab === 'OFF' ? 13 : 12}>
+									표시할 알고리즘 전략이 없습니다.
 								</td>
 							</tr>
-						))}
+						) : (
+							filteredData.map((item) => {
+								const currentPrice = livePriceMap[item.symbol]?.lastPrice;
+								const unrealizedPnl = getUnrealizedPnl(item, currentPrice);
+								const lastTradeAt = item.lastTradeAt || item.r_exactTime || item.updatedAt || item.created_at;
 
-						<tr className="bg-[#321F21] font-normal text-[#FFFFFF]">
-							<td className="px-4 py-4">Total</td>
-							<td className="px-4 py-4"></td>
-							<td className="px-4 py-4"></td>
-							<td className="px-4 py-4"></td>
-							<td className="px-4 py-4"></td>
-							<td className="px-4 py-4"></td>
-							<td className="px-4 py-4"></td>
-							<td className="px-4 py-4"></td>
-							<td className="px-4 py-4"></td>
-							<td className="px-4 py-4"></td>
-							<td className="px-4 py-4"></td>
-							<td className="px-4 py-4"></td>
-							<td className="px-4 py-4"></td>
-							<td className="px-4 py-4"></td>
-							<td className="px-4 py-4"></td>
-							<td className="px-4 py-4"></td>
-							<td className="px-4 py-4 font-bold text-[16px]">{comma(sumRealizedProfit())}$</td>
-							{activeTab === 'OFF' && <td className="px-4 py-4"></td>}
-							<td className="px-4 py-4"></td>
-						</tr>
+								return (
+									<tr
+										key={`trading_list_item_${item.id}`}
+										className="cursor-pointer border-b border-[#27313D] text-[#ffffff] hover:bg-[#101820]"
+										onClick={() => setTradingDetailId(item.id)}
+									>
+										<td className="px-4 py-4">
+											<div className="font-semibold">{getStrategyLabel(item)}</div>
+											<div className="mt-1 text-xs text-[#8B96A8]">PID {item.id ?? '-'}</div>
+										</td>
+										<td className="px-4 py-4">{item.symbol || '-'} / {getSignalTypeLabel(item)}</td>
+										<td className="px-4 py-4">{formatDisplayAmount(getTradeAmount(item))}</td>
+										<td className="px-4 py-4">{getOpenQty(item) > 0 ? comma(getOpenQty(item)) : '-'}</td>
+										<td className="px-4 py-4">{formatDisplayPrice(currentPrice)} / {formatDisplayPrice(getEntryPrice(item))}</td>
+										<td className={`px-4 py-4 ${unrealizedPnl >= 0 ? 'text-[#8EE6B5]' : 'text-[#FF8E8E]'}`}>{formatDisplayPnl(unrealizedPnl)}</td>
+										<td className={`px-4 py-4 ${toNumber(item.realizedPnlTotal) >= 0 ? 'text-[#8EE6B5]' : 'text-[#FF8E8E]'}`}>{formatDisplayPnl(item.realizedPnlTotal)}</td>
+										<td className="px-4 py-4">{getWinLossLabel(item)}</td>
+										<td className="px-4 py-4">{formatDate(lastTradeAt)}</td>
+										<td className="px-4 py-4"><StatusChip label={getUserStatusLabel(item)} /></td>
+										<td className="px-4 py-4" onClick={(e) => e.stopPropagation()}>
+											<OnOffToggle isOn={isEnabled(item)} setIsOn={(value) => handleAutoToggle(item.id, value)} disabled={false} />
+										</td>
+										<td className="px-4 py-4" onClick={(e) => e.stopPropagation()}>
+											<button type="button" className="rounded-md border border-[#4b4b4b] px-3 py-1.5 text-xs text-white hover:bg-[#2a2a2a]" onClick={() => setTradingDetailId(item.id)}>
+												수정
+											</button>
+										</td>
+										{activeTab === 'OFF' && (
+											<td className="px-4 py-4" onClick={(e) => e.stopPropagation()}>
+												<button type="button" className="rounded-md border border-[#4b4b4b] px-3 py-1.5 text-xs text-white hover:bg-[#2a2a2a]" onClick={(event) => handleDelete(item.id, event)}>
+													삭제
+												</button>
+											</td>
+										)}
+									</tr>
+								);
+							})
+						)}
 					</tbody>
 				</table>
 			</div>

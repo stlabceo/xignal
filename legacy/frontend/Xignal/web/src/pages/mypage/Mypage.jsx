@@ -1,42 +1,289 @@
-import React from 'react';
-import HeaderComponent from '../../components/header/HeaderComponent';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useAuthStore } from '../../store/authState';
+import { auth } from '../../services/auth';
+import AccountBalancePanel from '../../components/account/AccountBalancePanel';
+
+const authRequest = (requester, ...args) =>
+	new Promise((resolve) => {
+		requester(...args, (response) => resolve(response));
+	});
+
+const formatDateTime = (value) => {
+	if (!value) return '-';
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) return String(value);
+	return date.toLocaleString('ko-KR', { hour12: false });
+};
+
+const formatMetric = (value, digits = 4) => {
+	const numeric = Number(value);
+	if (!Number.isFinite(numeric)) return '-';
+	return numeric.toLocaleString('ko-KR', {
+		minimumFractionDigits: digits,
+		maximumFractionDigits: digits
+	});
+};
+
+const getReadinessTone = (status) => {
+	const normalized = String(status || '').toUpperCase();
+	if (normalized === 'READY' || normalized === 'OK' || normalized === 'CONNECTED') {
+		return 'border-emerald-200 bg-emerald-50 text-emerald-700';
+	}
+	if (normalized === 'ACTION_REQUIRED' || normalized === 'CHECK_RUNTIME_HEALTH') {
+		return 'border-amber-200 bg-amber-50 text-amber-700';
+	}
+	return 'border-red-200 bg-red-50 text-red-700';
+};
+
+const ReadinessBadge = ({ value, label }) => (
+	<span className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${getReadinessTone(value)}`}>
+		{label || value || '-'}
+	</span>
+);
+
+const ReadinessItem = ({ label, value, status, action }) => (
+	<div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
+		<div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+			<div>
+				<p className="text-sm font-semibold text-slate-900">{label}</p>
+				<p className="mt-1 text-sm text-slate-600">{value || '-'}</p>
+			</div>
+			<ReadinessBadge value={status} label={status === 'OK' ? '정상' : status === 'READY' ? '정상' : '확인 필요'} />
+		</div>
+		{action ? <p className="mt-2 text-xs text-amber-700">{action}</p> : null}
+	</div>
+);
 
 const Mypage = () => {
-	const { userInfo, setIsLoggedIn } = useAuthStore();
+	const { userInfo, setIsLoggedIn, setIsAdminSession } = useAuthStore();
+	const [memberInfo, setMemberInfo] = useState(null);
+	const [runtimeHealth, setRuntimeHealth] = useState(null);
+	const [readiness, setReadiness] = useState(null);
+	const [riskHistory, setRiskHistory] = useState([]);
+	const [appKey, setAppKey] = useState('');
+	const [appSecret, setAppSecret] = useState('');
+	const [saveMessage, setSaveMessage] = useState('');
+	const [validateMessage, setValidateMessage] = useState('');
+	const [pageMessage, setPageMessage] = useState('');
+	const [isSaving, setIsSaving] = useState(false);
+	const [isValidating, setIsValidating] = useState(false);
+	const [isRefreshing, setIsRefreshing] = useState(false);
 
 	const signout = () => {
+		auth.logout();
 		setIsLoggedIn(false);
+		setIsAdminSession(false);
+		window.location.href = '/signin';
 	};
 
+	const loadMemberInfo = async () => {
+		const response = await authRequest(auth.member.bind(auth));
+		setMemberInfo(response || null);
+	};
+
+	const loadRuntimeInfo = async () => {
+		try {
+			const [health, readinessPayload, history] = await Promise.all([
+				authRequest(auth.binanceRuntimeHealth.bind(auth)),
+				authRequest(auth.accountReadiness.bind(auth), {}),
+				authRequest(auth.accountRiskHistory.bind(auth), { hours: 24, limit: 12 })
+			]);
+
+			setRuntimeHealth(health && !health.errors ? health : null);
+			setReadiness(readinessPayload && !readinessPayload.errors ? readinessPayload : null);
+			setRiskHistory(Array.isArray(history) ? history : []);
+			setPageMessage('');
+		} catch (error) {
+			setPageMessage('계정 상태 데이터를 불러오지 못했습니다.');
+		}
+	};
+
+	const refreshAll = async () => {
+		setIsRefreshing(true);
+		await Promise.all([loadMemberInfo(), loadRuntimeInfo()]);
+		setIsRefreshing(false);
+	};
+
+	useEffect(() => {
+		refreshAll();
+	}, []);
+
+	const maskedKeyInfo = useMemo(() => {
+		if (!memberInfo?.appKey) return '미등록';
+		return `${String(memberInfo.appKey).slice(0, 6)}******`;
+	}, [memberInfo]);
+
+	const handleSave = () => {
+		setIsSaving(true);
+		setSaveMessage('');
+
+		auth.saveMemberKeys({ appKey, appSecret }, (res) => {
+			if (res?.success) {
+				setSaveMessage(res.message || 'API 정보가 저장되었습니다.');
+				setAppKey('');
+				setAppSecret('');
+				refreshAll();
+			} else {
+				setSaveMessage(res?.msg || 'API 정보를 저장하지 못했습니다.');
+			}
+			setIsSaving(false);
+		});
+	};
+
+	const handleValidate = () => {
+		setIsValidating(true);
+		setValidateMessage('');
+
+		auth.validateMemberKeys({ appKey, appSecret }, (res) => {
+			setValidateMessage(res?.message || res?.msg || 'API 검증에 실패했습니다.');
+			setIsValidating(false);
+			loadRuntimeInfo();
+		});
+	};
+
+	const futuresBalanceIssue = readiness?.issues?.find((issue) => issue.code === 'FUTURES_BALANCE_USDT_EMPTY');
+
 	return (
-		<>
-			<HeaderComponent />
-			<div className="inner-container">
-				<div className="mb-6 flex flex-col gap-3 sm:mb-8 sm:flex-row sm:items-center sm:justify-between">
+		<div className="inner-container">
+			<div className="mb-6 flex flex-col gap-3 sm:mb-8 sm:flex-row sm:items-center sm:justify-between">
+				<div>
 					<h3 className="text-[22px] font-medium text-white sm:text-xl">My Page</h3>
-					<div>
-						<button
-							className="cursor-pointer rounded-md border border-red-600 px-3 py-2 text-sm text-red-500"
-							onClick={signout}
-						>
-							Log Out
-						</button>
+					<p className="mt-2 text-sm text-slate-300">Binance 연결과 자동매매 준비 상태를 확인합니다.</p>
+				</div>
+				<div className="flex flex-wrap gap-2">
+					<button type="button" className="rounded-md border border-white/20 px-3 py-2 text-sm text-white" onClick={refreshAll} disabled={isRefreshing}>
+						{isRefreshing ? '새로고침 중...' : '상태 새로고침'}
+					</button>
+					<button className="rounded-md border border-red-600 px-3 py-2 text-sm text-red-500" onClick={signout}>
+						로그아웃
+					</button>
+				</div>
+			</div>
+
+			<div className="grid gap-4 lg:grid-cols-[1.05fr_1.2fr]">
+				<div className="rounded-lg bg-white p-4 shadow sm:p-6">
+					<div className="border-b border-slate-200 pb-4">
+						<h4 className="text-[18px] font-semibold text-black">회원 정보</h4>
+					</div>
+					<div className="divide-y divide-slate-200 text-sm">
+						<div className="flex flex-col gap-1 py-4 sm:flex-row sm:gap-4">
+							<p className="w-full font-medium text-slate-500 sm:w-[160px]">회원 아이디</p>
+							<p className="w-full break-all text-black">{memberInfo?.mem_id || userInfo.loginId || '-'}</p>
+						</div>
+						<div className="flex flex-col gap-1 py-4 sm:flex-row sm:gap-4">
+							<p className="w-full font-medium text-slate-500 sm:w-[160px]">이름</p>
+							<p className="w-full break-all text-black">{memberInfo?.mem_name || '-'}</p>
+						</div>
+						<div className="flex flex-col gap-1 py-4 sm:flex-row sm:gap-4">
+							<p className="w-full font-medium text-slate-500 sm:w-[160px]">연락처</p>
+							<p className="w-full break-all text-black">{memberInfo?.mem_mobile || '-'}</p>
+						</div>
+						<div className="flex flex-col gap-1 py-4 sm:flex-row sm:gap-4">
+							<p className="w-full font-medium text-slate-500 sm:w-[160px]">이메일</p>
+							<p className="w-full break-all text-black">{memberInfo?.email || '-'}</p>
+						</div>
 					</div>
 				</div>
 
-				<div className="rounded-md bg-white p-4 shadow sm:p-6">
-					<div className="flex flex-col gap-1 border-b border-slate-200 pb-4 sm:flex-row sm:items-center sm:gap-4">
-						<p className="w-full text-sm font-medium text-slate-500 sm:w-[210px]">User ID</p>
-						<p className="w-full break-all text-black">{userInfo.loginId}</p>
+				<div className="rounded-lg bg-white p-4 shadow sm:p-6">
+					<div className="border-b border-slate-200 pb-4">
+						<h4 className="text-[18px] font-semibold text-black">Binance API 연결</h4>
+						<p className="mt-2 text-sm text-slate-500">자동매매를 실행하려면 Binance Futures 권한이 있는 API Key가 필요합니다.</p>
 					</div>
-					<div className="flex flex-col gap-1 pt-4 sm:flex-row sm:items-center sm:gap-4">
-						<p className="w-full text-sm font-medium text-slate-500 sm:w-[210px]">Nickname</p>
-						<p className="w-full break-all text-black">{userInfo.loginId}</p>
+
+					<div className="mt-4 rounded-md bg-slate-100 px-4 py-3 text-sm text-slate-600">
+						<p>현재 등록된 API Key: <span className="font-medium text-black">{maskedKeyInfo}</span></p>
+						<p className="mt-1">현재 등록된 Secret Key: <span className="font-medium text-black">{memberInfo?.appSecret ? '등록됨' : '미등록'}</span></p>
+					</div>
+
+					<div className="mt-4 space-y-3">
+						<div>
+							<label className="mb-1 block text-sm font-medium text-slate-600">API Key</label>
+							<input type="text" value={appKey} onChange={(event) => setAppKey(event.target.value)} placeholder="새 API Key를 입력하세요. 비워두고 저장하면 기존 값을 유지합니다." className="w-full rounded-md border border-slate-300 px-3 py-3 text-black focus:outline-none" />
+						</div>
+						<div>
+							<label className="mb-1 block text-sm font-medium text-slate-600">Secret Key</label>
+							<input type="password" value={appSecret} onChange={(event) => setAppSecret(event.target.value)} placeholder="새 Secret Key를 입력하세요. 비워두고 저장하면 기존 값을 유지합니다." className="w-full rounded-md border border-slate-300 px-3 py-3 text-black focus:outline-none" />
+						</div>
+					</div>
+
+					<div className="mt-4 flex flex-wrap gap-2">
+						<button type="button" onClick={handleSave} disabled={isSaving} className="rounded-md bg-black px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
+							{isSaving ? '저장 중...' : 'API 정보 저장'}
+						</button>
+						<button type="button" onClick={handleValidate} disabled={isValidating} className="rounded-md border border-black px-4 py-2 text-sm font-medium text-black disabled:opacity-50">
+							{isValidating ? '검증 중...' : 'API 연결 검증'}
+						</button>
+					</div>
+
+					{saveMessage && <div className="mt-4 rounded-md bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{saveMessage}</div>}
+					{validateMessage && <div className="mt-3 rounded-md bg-slate-100 px-4 py-3 text-sm text-slate-700">{validateMessage}</div>}
+				</div>
+			</div>
+
+			<div className="mt-6 rounded-lg bg-white p-4 shadow sm:p-6">
+				<div className="flex flex-col gap-3 border-b border-slate-200 pb-4 sm:flex-row sm:items-center sm:justify-between">
+					<div>
+						<h4 className="text-[18px] font-semibold text-black">자동매매 준비 상태</h4>
+						<p className="mt-1 text-sm text-slate-500">지금 운용을 켜도 되는지 API, 권한, 선물 지갑 상태를 확인합니다.</p>
+					</div>
+					<ReadinessBadge value={readiness?.readinessStatus} label={readiness?.readinessStatus === 'READY' ? '운용 가능' : '조치 필요'} />
+				</div>
+
+				{futuresBalanceIssue ? (
+					<div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+						선물 지갑에 사용 가능한 USDT가 없습니다. Binance에서 현물 지갑 → 선물 지갑으로 USDT를 이동한 뒤 다시 운용을 켜주세요.
+					</div>
+				) : null}
+
+				<div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+					<ReadinessItem label="API 연결" value={readiness?.apiConnection === 'OK' ? 'API Key 등록됨' : 'API Key 확인 필요'} status={readiness?.apiConnection} action={readiness?.apiConnection === 'OK' ? '' : 'API Key를 등록해주세요.'} />
+					<ReadinessItem label="API 권한" value={readiness?.apiPermission === 'OK' ? '선물 읽기/주문 권한 정상' : '런타임 health에서 최종 확인'} status={readiness?.apiPermission} action={readiness?.apiPermission === 'OK' ? '' : 'Futures 권한과 IP 허용 목록을 확인해주세요.'} />
+					<ReadinessItem label="선물 지갑 USDT" value={readiness?.futuresBalanceUsdt == null ? '데이터 준비중' : `${formatMetric(readiness.futuresBalanceUsdt, 2)} USDT`} status={readiness?.futuresBalanceUsdt > 0 ? 'OK' : 'ACTION_REQUIRED'} action={readiness?.futuresBalanceUsdt > 0 ? '' : '현물 지갑에서 선물 지갑으로 USDT를 이동해주세요.'} />
+					<ReadinessItem label="최소 주문 가능 금액" value={readiness?.canTradeFutures ? '주문 가능' : '잔고 또는 권한 확인 필요'} status={readiness?.canTradeFutures ? 'OK' : 'ACTION_REQUIRED'} action={readiness?.canTradeFutures ? '' : '거래금액을 높이거나 선물 지갑 잔고를 보충해주세요.'} />
+					<ReadinessItem label="포지션 모드" value="헤지 모드 필요" status="CHECK_RUNTIME_HEALTH" action="Binance Futures가 Hedge Mode인지 확인해주세요." />
+					<ReadinessItem label="자산 모드" value="USDT 선물 지원" status="OK" />
+					<ReadinessItem label="마지막 동기화" value={formatDateTime(readiness?.lastSyncedAt)} status={readiness?.lastSyncedAt ? 'OK' : 'ACTION_REQUIRED'} action={readiness?.lastSyncedAt ? '' : '새로고침 또는 API 연결 확인이 필요합니다.'} />
+					<ReadinessItem label="User Stream" value={runtimeHealth?.statusLabel || runtimeHealth?.status || '미확인'} status={runtimeHealth?.status || 'ACTION_REQUIRED'} action={runtimeHealth?.lastErrorMessage || ''} />
+				</div>
+			</div>
+
+			<div className="mt-6 grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+				<AccountBalancePanel />
+
+				<div className="rounded-lg bg-white p-4 shadow sm:p-6">
+					<div className="border-b border-slate-200 pb-4">
+						<h4 className="text-[18px] font-semibold text-black">최근 리스크 스냅샷</h4>
+						<p className="mt-1 text-sm text-slate-500">관리 참고용 계정 리스크 이력입니다. 사용자 조치가 필요한 항목은 위 준비 상태에 표시됩니다.</p>
+					</div>
+
+					<div className="mt-4 space-y-3">
+						{riskHistory.length ? (
+							riskHistory.map((item) => (
+								<div key={item.id} className="rounded-md border border-slate-200 p-4">
+									<div className="flex flex-wrap items-center gap-2">
+										<span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${getReadinessTone(item.riskLevel)}`}>
+											{item.riskLevelLabel || item.riskLevel || 'UNKNOWN'}
+										</span>
+										<span className="text-sm font-semibold text-black">{formatDateTime(item.createdAt)}</span>
+									</div>
+									<div className="mt-3 grid gap-2 text-xs text-slate-500 sm:grid-cols-2 xl:grid-cols-4">
+										<div>Equity: {formatMetric(item.accountEquity)}</div>
+										<div>Maint Margin: {formatMetric(item.accountMaintMargin)}</div>
+										<div>Margin Ratio: {formatMetric(item.accountMarginRatio, 2)}%</div>
+										<div>Position Count: {Number(item.positionCount || 0).toLocaleString('ko-KR')}</div>
+									</div>
+								</div>
+							))
+						) : (
+							<div className="rounded-md bg-slate-50 px-4 py-3 text-sm text-slate-600">최근 24시간 리스크 스냅샷이 없습니다.</div>
+						)}
 					</div>
 				</div>
 			</div>
-		</>
+
+			{pageMessage && <div className="mt-4 rounded-md bg-amber-50 px-4 py-3 text-sm text-amber-700">{pageMessage}</div>}
+		</div>
 	);
 };
 

@@ -2,19 +2,31 @@ import React, { useEffect, useRef, memo } from 'react';
 
 const symbolMap = {
 	'BTCUSDT.P': 'BINANCE:BTCUSDT',
+	BTCUSDT: 'BINANCE:BTCUSDT',
 	'ETHUSDT.P': 'BINANCE:ETHUSDT',
+	ETHUSDT: 'BINANCE:ETHUSDT',
 	'XRPUSDT.P': 'BINANCE:XRPUSDT',
+	XRPUSDT: 'BINANCE:XRPUSDT',
 	'SOLUSDT.P': 'BINANCE:SOLUSDT',
-	'DOGEUSDT.P': 'BINANCE:DOGEUSDT'
+	SOLUSDT: 'BINANCE:SOLUSDT',
+	'DOGEUSDT.P': 'BINANCE:DOGEUSDT',
+	DOGEUSDT: 'BINANCE:DOGEUSDT',
+	'PUMPUSDT.P': 'BINANCE:PUMPUSDT',
+	PUMPUSDT: 'BINANCE:PUMPUSDT'
 };
 
 const intervalMap = {
-	'1분': '1',
-	'3분': '3',
-	'5분': '5',
-	'10분': '10',
-	'15분': '15',
-	'30분': '30',
+	'1MIN': '1',
+	'2MIN': '2',
+	'3MIN': '3',
+	'5MIN': '5',
+	'10MIN': '10',
+	'15MIN': '15',
+	'30MIN': '30',
+	'1H': '60',
+	'2H': '120',
+	'4H': '240',
+	'1D': 'D',
 	'1Hour': '60',
 	'4Hour': '240',
 	'1Day': 'D'

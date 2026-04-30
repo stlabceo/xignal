@@ -29,6 +29,36 @@ export const trading = {
 			callback(res);
 		});
 	},
+	performanceSummary(params, callback) {
+		api.get('/admin/live/performance-summary', {
+			params
+		}).then((res) => {
+			callback(res);
+		}).catch((res) => {
+			callback(res.response?.data || false);
+		});
+	},
+	symbolRules(params, callback) {
+		api.get('/admin/exchange/symbol-rules', {
+			params
+		}).then((res) => {
+			callback(res);
+		}).catch((res) => {
+			callback(res.response?.data || { ok: false, rules: null });
+		});
+	},
+	strategyCatalogOptions(params, callback) {
+		api
+			.get('/admin/trading/catalog-options', {
+				params
+			})
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data || false);
+			});
+	},
 	testDetail(params, callback) {
 		api.get('/admin/test/detail', {
 			params
@@ -114,11 +144,147 @@ export const trading = {
 				callback(res.response.data.errors[0]);
 			});
 	},
+	gridLiveList(params, callback) {
+		api.get('/admin/grid/live/list', {
+			params
+		}).then((res) => {
+			callback(res);
+		});
+	},
+	gridTestList(params, callback) {
+		api.get('/admin/grid/test/list', {
+			params
+		}).then((res) => {
+			callback(res);
+		});
+	},
+	gridLiveDetail(params, callback) {
+		api.get('/admin/grid/live/detail', {
+			params
+		}).then((res) => {
+			callback(res);
+		});
+	},
+	gridTestDetail(params, callback) {
+		api.get('/admin/grid/test/detail', {
+			params
+		}).then((res) => {
+			callback(res);
+		});
+	},
+	gridLiveDetailUpload(body, params, callback) {
+		api.post('/admin/grid/live/add', body, { params })
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data?.errors?.[0] || false);
+			});
+	},
+	gridLiveDetailEdit(body, params, callback) {
+		api.post('/admin/grid/live/edit', body, { params })
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data?.errors?.[0] || false);
+			});
+	},
+	gridTestDetailUpload(body, params, callback) {
+		api.post('/admin/grid/test/add', body, { params })
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data?.errors?.[0] || false);
+			});
+	},
+	gridTestDetailEdit(body, params, callback) {
+		api.post('/admin/grid/test/edit', body, { params })
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data?.errors?.[0] || false);
+			});
+	},
+	gridLiveAutoItem(body, params, callback) {
+		api.post('/admin/grid/live/auto', body, { params })
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data?.errors?.[0] || false);
+			});
+	},
+	gridTestAutoItem(body, params, callback) {
+		api.post('/admin/grid/test/auto', body, { params })
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data?.errors?.[0] || false);
+			});
+	},
+	deleteLivePlayItems(body, params, callback) {
+		api.post('/admin/live/del', body, { params })
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data?.errors?.[0] || false);
+			});
+	},
+	deleteTestPlayItems(body, params, callback) {
+		api.post('/admin/test/del', body, { params })
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data?.errors?.[0] || false);
+			});
+	},
+	gridLiveDeleteItem(body, params, callback) {
+		api.post('/admin/grid/live/del', body, { params })
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data?.errors?.[0] || false);
+			});
+	},
+	gridTestDeleteItem(body, params, callback) {
+		api.post('/admin/grid/test/del', body, { params })
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data?.errors?.[0] || false);
+			});
+	},
+	deletePlayItems(body, params, callback) {
+		api.post('/admin/play/del', body, { params })
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data?.errors?.[0] || false);
+			});
+	},
 	msg(params, callback) {
 		api.get('/admin/msg', {
 			params
 		}).then((res) => {
 			callback(res);
+		});
+	},
+	userFacingMessages(params, callback) {
+		api.get('/admin/msg/user-facing', {
+			params
+		}).then((res) => {
+			callback(res);
+		}).catch((res) => {
+			callback(res.response?.data || []);
 		});
 	},
 	liveRate(callback) {
@@ -142,6 +308,42 @@ export const trading = {
 			params
 		}).then((res) => {
 			callback(res);
+		});
+	},
+	getRuntimeTrackRecord(params, callback) {
+		api.get('/admin/live/track-record/runtime/recent', {
+			params
+		}).then((res) => {
+			callback(res);
+		}).catch((res) => {
+			callback(res.response?.data || false);
+		});
+	},
+	getRuntimeTrackRecordItem(params, callback) {
+		api.get('/admin/live/track-record/runtime/item', {
+			params
+		}).then((res) => {
+			callback(res);
+		}).catch((res) => {
+			callback(res.response?.data || false);
+		});
+	},
+	getTestRuntimeTrackRecord(params, callback) {
+		api.get('/admin/test/track-record/runtime/recent', {
+			params
+		}).then((res) => {
+			callback(res);
+		}).catch((res) => {
+			callback(res.response?.data || false);
+		});
+	},
+	getTestRuntimeTrackRecordItem(params, callback) {
+		api.get('/admin/test/track-record/runtime/item', {
+			params
+		}).then((res) => {
+			callback(res);
+		}).catch((res) => {
+			callback(res.response?.data || false);
 		});
 	},
 	getExactTrackRecord(callback) {
@@ -203,6 +405,15 @@ export const trading = {
 			})
 			.catch((res) => {
 				callback(res.response?.data.errors[0]);
+			});
+	},
+	getBacktestStats(params, callback) {
+		api.get('/admin/backtest/stats', { params })
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data || false);
 			});
 	},
 	getTrending(params, callback) {
@@ -288,16 +499,4 @@ export const trading = {
 	// 		callback(res);
 	// 	});
 	// },
-	// line(params, callback) {
-	// 	api.get('admin/zzar/line', {
-	// 		params
-	// 	}).then((res) => {
-	// 		callback(res);
-	// 	});
-	// },
-	// lineDataSave(body, callback) {
-	// 	api.post('admin/zzar/line', body).then((res) => {
-	// 		callback(res);
-	// 	});
-	// }
 };
