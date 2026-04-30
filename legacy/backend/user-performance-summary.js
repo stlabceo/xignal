@@ -69,6 +69,11 @@ const summarizeLedgerRows = (rows = []) => {
     todayRealizedPnl: 0,
     sevenDayRealizedPnl: 0,
     thirtyDayRealizedPnl: 0,
+    totalCommission: 0,
+    todayCommission: 0,
+    sevenDayCommission: 0,
+    thirtyDayCommission: 0,
+    hasCommissionEvidence: false,
     lastTradeAt: null,
     incidentExcludedCount: 0,
   };
@@ -80,16 +85,24 @@ const summarizeLedgerRows = (rows = []) => {
     }
 
     const pnl = toNumber(row.realizedPnl);
+    const fee = Math.abs(toNumber(row.fee));
     const eventTime = getEventTime(row);
     totals.totalRealizedPnl += pnl;
+    if (row.fee !== null && row.fee !== undefined && row.fee !== "") {
+      totals.totalCommission += fee;
+      totals.hasCommissionEvidence = true;
+    }
     if (isAtOrAfter(eventTime, todayStart)) {
       totals.todayRealizedPnl += pnl;
+      totals.todayCommission += fee;
     }
     if (isAtOrAfter(eventTime, sevenDayStart)) {
       totals.sevenDayRealizedPnl += pnl;
+      totals.sevenDayCommission += fee;
     }
     if (isAtOrAfter(eventTime, thirtyDayStart)) {
       totals.thirtyDayRealizedPnl += pnl;
+      totals.thirtyDayCommission += fee;
     }
     if (eventTime && (!totals.lastTradeAt || new Date(eventTime).getTime() > new Date(totals.lastTradeAt).getTime())) {
       totals.lastTradeAt = eventTime;
@@ -132,7 +145,7 @@ const summarizeLedgerRows = (rows = []) => {
 const getUserPerformanceSummary = async (uid) => {
   const [[ledgerRows], [strategyCounts], [openSnapshotRows]] = await Promise.all([
     db.query(
-      `SELECT id, pid, strategyCategory, eventType, sourceClientOrderId, sourceOrderId, sourceTradeId, dedupeKey, realizedPnl, tradeTime, createdAt
+      `SELECT id, pid, strategyCategory, eventType, sourceClientOrderId, sourceOrderId, sourceTradeId, dedupeKey, fee, realizedPnl, tradeTime, createdAt
          FROM live_pid_position_ledger
         WHERE uid = ?`,
       [uid]
@@ -167,22 +180,40 @@ const getUserPerformanceSummary = async (uid) => {
   const counts = strategyCounts[0] || {};
   const completedCycleCount = toNumber(totals.completedCycleCount);
   const activeStrategyCount = toNumber(counts.activeSignalCount) + toNumber(counts.activeGridCount);
+  const totalRealizedPnlNet = totals.hasCommissionEvidence
+    ? totals.totalRealizedPnl - totals.totalCommission
+    : null;
+  const todayRealizedPnlNet = totals.hasCommissionEvidence
+    ? totals.todayRealizedPnl - totals.todayCommission
+    : null;
+  const sevenDayRealizedPnlNet = totals.hasCommissionEvidence
+    ? totals.sevenDayRealizedPnl - totals.sevenDayCommission
+    : null;
+  const thirtyDayRealizedPnlNet = totals.hasCommissionEvidence
+    ? totals.thirtyDayRealizedPnl - totals.thirtyDayCommission
+    : null;
 
   return {
     source: "live-ledger-readonly",
     dataAvailability: {
       realizedPnl: "AVAILABLE",
+      realizedPnlSource: "LIVE_LEDGER",
+      realizedPnlNet: totals.hasCommissionEvidence ? "LIVE_LEDGER_MINUS_FEE" : "UNAVAILABLE",
       unrealizedPnl: "PRICE_REQUIRED",
       winRate: completedCycleCount > 0 ? "AVAILABLE" : "INSUFFICIENT_COMPLETED_TRADES",
-      fee: "LEDGER_FEE_IF_RECORDED",
+      fee: totals.hasCommissionEvidence ? "LIVE_LEDGER_FEE" : "UNAVAILABLE",
+      fundingFee: "EXCLUDED",
       incidentHandling: totals.incidentExcludedCount > 0 ? "QA_REPLAY_ACCIDENT_EXCLUDED" : "NONE",
     },
     cards: {
-      totalRealizedPnl: toNumber(totals.totalRealizedPnl),
+      totalRealizedPnl: toNumber(totalRealizedPnlNet ?? totals.totalRealizedPnl),
+      totalRealizedPnlGross: toNumber(totals.totalRealizedPnl),
+      totalCommission: totals.hasCommissionEvidence ? toNumber(totals.totalCommission) : null,
+      totalRealizedPnlNet: totals.hasCommissionEvidence ? toNumber(totalRealizedPnlNet) : null,
       currentUnrealizedPnl: null,
-      todayPnl: toNumber(totals.todayRealizedPnl),
-      sevenDayPnl: toNumber(totals.sevenDayRealizedPnl),
-      thirtyDayPnl: toNumber(totals.thirtyDayRealizedPnl),
+      todayPnl: toNumber(todayRealizedPnlNet ?? totals.todayRealizedPnl),
+      sevenDayPnl: toNumber(sevenDayRealizedPnlNet ?? totals.sevenDayRealizedPnl),
+      thirtyDayPnl: toNumber(thirtyDayRealizedPnlNet ?? totals.thirtyDayRealizedPnl),
       runningStrategyCount: activeStrategyCount,
       openPositionCount: openSnapshotRows.length,
       recentWinRate: completedCycleCount > 0 ? (totals.winCount / completedCycleCount) * 100 : null,

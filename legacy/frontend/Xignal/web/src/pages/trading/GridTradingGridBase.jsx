@@ -3,6 +3,7 @@ import { trading } from '../../services/trading';
 import { useMessageModal } from '../../hooks/useMessageModal';
 import { comma, formatPrice } from '../../utils/comma';
 import { buildStrategyDeletePayload, confirmStrategyDelete, isTradingEnabled, stopTradingActionEvent } from './tradingState';
+import { estimateGridUnrealizedPnl } from './estimatedPnl';
 
 const cardClass = 'rounded-xl border border-[#27313D] bg-[#151A22]';
 
@@ -54,26 +55,22 @@ const getConfiguredNotional = (item = {}) =>
 	getMetricValue(item, ['configuredNotional', 'tradeAmount', 'tradeValue'], toNumber(item.margin) * toNumber(item.leverage));
 
 const getActualEntryNotional = (item = {}) => getMetricValue(item, ['actualEntryNotional'], 0);
+const getRealizedPnl = (item = {}) =>
+	item.realizedPnlNet !== null && item.realizedPnlNet !== undefined && item.realizedPnlNet !== ''
+		? item.realizedPnlNet
+		: getMetricValue(item, ['realizedPnlTotal', 'cumulativePnl', 'totalRealizedPnl', 'r_pol_sum']);
 
-const getGridUnrealizedPnl = (item = {}, currentPrice) => {
-	if (item.unrealizedPnl !== null && item.unrealizedPnl !== undefined && item.unrealizedPnl !== '') {
-		return toNumber(item.unrealizedPnl);
-	}
-	const price = toNumber(currentPrice);
-	if (!(price > 0)) return getMetricValue(item, ['openQty'], 0) > 0 ? null : 0;
-	const longQty = toNumber(item.longQty);
-	const shortQty = toNumber(item.shortQty);
-	const longEntryPrice = toNumber(item.longEntryPrice);
-	const shortEntryPrice = toNumber(item.shortEntryPrice);
-	const longPnl = longQty > 0 && longEntryPrice > 0 ? (price - longEntryPrice) * longQty : 0;
-	const shortPnl = shortQty > 0 && shortEntryPrice > 0 ? (shortEntryPrice - price) * shortQty : 0;
-	return longPnl + shortPnl;
+const getMarkPrice = (priceRow = {}) => priceRow?.markPrice ?? priceRow?.lastPrice ?? priceRow?.price;
+
+const formatEstimatedPnl = (estimate) => {
+	if (!estimate || estimate.status === 'FLAT') return '-';
+	if (estimate.status === 'PRICE_UNAVAILABLE') return '가격 수신 중';
+	if (estimate.status === 'ENTRY_PRICE_UNAVAILABLE' || estimate.status === 'SIDE_UNAVAILABLE') return '집계 불가';
+	return formatDisplayPnl(estimate.value);
 };
 
-const formatGridUnrealizedPnl = (value) => {
-	if (value === null || value === undefined) return '집계 불가';
-	return formatDisplayPnl(value);
-};
+const estimateTooltip = '실시간 가격 기준의 추정 손익입니다. 최종 손익은 Binance 체결 내역 기준으로 확정됩니다.';
+const entryTooltip = '설정금액은 전략 생성 시 입력한 값입니다. 실제 진입금액은 Binance에서 실제 체결된 수량과 가격 기준입니다.';
 
 const StatusChip = ({ label }) => (
 	<span className="inline-flex rounded-full border border-[#334155] bg-[#111827] px-2.5 py-1 text-xs font-semibold text-[#D8E0ED]">
@@ -150,10 +147,10 @@ const GridTradingGridBase = ({ mode = 'live', listData = [], setTradingDetailId,
 	);
 
 	const renderMobileCard = (item) => {
-		const currentPrice = livePriceMap[item.symbol]?.lastPrice;
-		const unrealizedPnl = getGridUnrealizedPnl(item, currentPrice);
+		const currentPrice = getMarkPrice(livePriceMap[item.symbol]);
+		const estimatedPnl = estimateGridUnrealizedPnl(item, currentPrice);
 		const currentRegimeTakeProfitCount = getMetricValue(item, ['currentRegimeTakeProfitCount', 'regimeTakeProfitCount', 'currentTpCount']);
-		const cumulativePnl = getMetricValue(item, ['realizedPnlTotal', 'cumulativePnl', 'totalRealizedPnl', 'r_pol_sum']);
+		const cumulativePnl = getRealizedPnl(item);
 		const cumulativeTakeProfitCount = getMetricValue(item, ['cumulativeTakeProfitCount', 'totalTakeProfitCount', 'profitCount']);
 		const cumulativeStopLossCount = getMetricValue(item, ['cumulativeStopLossCount', 'totalStopLossCount', 'stopCount']);
 
@@ -186,8 +183,8 @@ const GridTradingGridBase = ({ mode = 'live', listData = [], setTradingDetailId,
 						<p className="mt-1 text-[14px]">{getShortStatusLabel(item)}</p>
 					</div>
 					<div className="rounded-md bg-[#0F141B] px-3 py-2">
-						<p className="text-[11px] text-[#7f8898]">현재 미실현손익</p>
-						<p className="mt-1 text-[14px]">{formatDisplayPnl(unrealizedPnl)}</p>
+						<p className="text-[11px] text-[#7f8898]" title={estimateTooltip}>현재 추정 손익 <span className="text-[#8EE6B5]">추정</span></p>
+						<p className="mt-1 text-[14px]">{formatEstimatedPnl(estimatedPnl)}</p>
 					</div>
 					<div className="rounded-md bg-[#0F141B] px-3 py-2">
 						<p className="text-[11px] text-[#7f8898]">누적 실현손익</p>
@@ -231,13 +228,13 @@ const GridTradingGridBase = ({ mode = 'live', listData = [], setTradingDetailId,
 						<tr>
 							<th className="px-4 py-3">전략 / 타임프레임</th>
 							<th className="px-4 py-3">종목</th>
-							<th className="px-4 py-3">설정금액</th>
-							<th className="px-4 py-3">실제 진입금액</th>
+							<th className="px-4 py-3" title={entryTooltip}>설정금액</th>
+							<th className="px-4 py-3" title={entryTooltip}>실제 진입금액</th>
 							<th className="px-4 py-3">현재 레짐</th>
 							<th className="px-4 py-3">LONG 상태</th>
 							<th className="px-4 py-3">SHORT 상태</th>
 							<th className="px-4 py-3">현재가</th>
-							<th className="px-4 py-3">현재 미실현손익</th>
+							<th className="px-4 py-3" title={estimateTooltip}>현재 추정 손익</th>
 							<th className="px-4 py-3">누적 실현손익</th>
 							<th className="px-4 py-3">현재 회차 익절</th>
 							<th className="px-4 py-3">누적 익절/손절</th>
@@ -256,12 +253,12 @@ const GridTradingGridBase = ({ mode = 'live', listData = [], setTradingDetailId,
 							</tr>
 						) : (
 							rows.map((item) => {
-								const currentPrice = livePriceMap[item.symbol]?.lastPrice;
+								const currentPrice = getMarkPrice(livePriceMap[item.symbol]);
 								const currentRegimeTakeProfitCount = getMetricValue(item, ['currentRegimeTakeProfitCount', 'regimeTakeProfitCount', 'currentTpCount']);
-								const cumulativePnl = getMetricValue(item, ['realizedPnlTotal', 'cumulativePnl', 'totalRealizedPnl', 'r_pol_sum']);
+								const cumulativePnl = getRealizedPnl(item);
 								const cumulativeTakeProfitCount = getMetricValue(item, ['cumulativeTakeProfitCount', 'totalTakeProfitCount', 'profitCount']);
 								const cumulativeStopLossCount = getMetricValue(item, ['cumulativeStopLossCount', 'totalStopLossCount', 'stopCount']);
-								const unrealizedPnl = getGridUnrealizedPnl(item, currentPrice);
+								const estimatedPnl = estimateGridUnrealizedPnl(item, currentPrice);
 
 								return (
 									<tr key={`grid_item_${item.id}`} className="cursor-pointer border-b border-[#27313D] text-white last:border-b-0 hover:bg-[#101820]" onClick={() => setTradingDetailId?.(item.id)}>
@@ -276,7 +273,12 @@ const GridTradingGridBase = ({ mode = 'live', listData = [], setTradingDetailId,
 										<td className="px-4 py-3">{getLongStatusLabel(item)}</td>
 										<td className="px-4 py-3">{getShortStatusLabel(item)}</td>
 										<td className="px-4 py-3">{formatDisplayPrice(currentPrice)}</td>
-										<td className={`px-4 py-3 ${unrealizedPnl == null || unrealizedPnl >= 0 ? 'text-[#8EE6B5]' : 'text-[#FF8E8E]'}`}>{formatGridUnrealizedPnl(unrealizedPnl)}</td>
+										<td className={`px-4 py-3 ${estimatedPnl.value == null || estimatedPnl.value >= 0 ? 'text-[#8EE6B5]' : 'text-[#FF8E8E]'}`} title={estimateTooltip}>
+											<div className="flex items-center justify-center gap-1">
+												<span>{formatEstimatedPnl(estimatedPnl)}</span>
+												{estimatedPnl.status === 'ESTIMATED' && <span className="rounded-full border border-[#8EE6B5]/50 px-1.5 py-0.5 text-[10px] text-[#8EE6B5]">추정</span>}
+											</div>
+										</td>
 										<td className={`px-4 py-3 ${cumulativePnl >= 0 ? 'text-[#8EE6B5]' : 'text-[#FF8E8E]'}`}>{formatDisplayPnl(cumulativePnl)}</td>
 										<td className="px-4 py-3">{formatDisplayNumber(currentRegimeTakeProfitCount)}</td>
 										<td className="px-4 py-3">{formatDisplayNumber(cumulativeTakeProfitCount)} / {formatDisplayNumber(cumulativeStopLossCount)}</td>

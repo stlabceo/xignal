@@ -3,6 +3,7 @@ import OnOffToggle from '../../components/ui/toggle/OnOffToggle';
 import { comma, formatPrice } from '../../utils/comma';
 import { trading } from '../../services/trading';
 import { buildStrategyDeletePayload, confirmStrategyDelete, isTradingEnabled, stopTradingActionEvent } from './tradingState';
+import { buildEstimatedUnrealizedPnl } from './estimatedPnl';
 
 const strategyLabelMap = {
 	'ATF+VIXFIX': 'ATF+VIXFIX',
@@ -56,6 +57,10 @@ const getTradeAmount = (item = {}) => {
 };
 
 const getActualEntryNotional = (item = {}) => toNumber(item.actualEntryNotional);
+const getRealizedPnl = (item = {}) =>
+	item.realizedPnlNet !== null && item.realizedPnlNet !== undefined && item.realizedPnlNet !== ''
+		? item.realizedPnlNet
+		: item.realizedPnlTotal;
 
 const getEntryPrice = (item = {}) => {
 	const backendValue = toNumber(item.avgEntryPrice ?? item.entryPrice);
@@ -71,25 +76,26 @@ const getOpenQty = (item = {}) => {
 	return toNumber(item.r_qty);
 };
 
-const getUnrealizedPnl = (item = {}, currentPrice) => {
-	if (item.unrealizedPnl !== null && item.unrealizedPnl !== undefined && item.unrealizedPnl !== '') {
-		return toNumber(item.unrealizedPnl);
-	}
-	const entryPrice = getEntryPrice(item);
-	const qty = getOpenQty(item);
-	const normalizedCurrentPrice = toNumber(currentPrice);
-	if (!(entryPrice > 0) || !(qty > 0) || !(normalizedCurrentPrice > 0)) {
-		return qty > 0 ? null : 0;
-	}
-	return String(item.signalType || '').toUpperCase() === 'SELL'
-		? (entryPrice - normalizedCurrentPrice) * qty
-		: (normalizedCurrentPrice - entryPrice) * qty;
+const getMarkPrice = (priceRow = {}) => priceRow?.markPrice ?? priceRow?.lastPrice ?? priceRow?.price;
+
+const getEstimatedPnl = (item = {}, currentPrice) =>
+	buildEstimatedUnrealizedPnl({
+		side: item.signalType,
+		positionSide: item.positionSide,
+		openQty: getOpenQty(item),
+		avgEntryPrice: getEntryPrice(item),
+		markPrice: currentPrice
+	});
+
+const formatEstimatedPnl = (estimate) => {
+	if (!estimate || estimate.status === 'FLAT') return '-';
+	if (estimate.status === 'PRICE_UNAVAILABLE') return '가격 수신 중';
+	if (estimate.status === 'ENTRY_PRICE_UNAVAILABLE' || estimate.status === 'SIDE_UNAVAILABLE') return '집계 불가';
+	return formatDisplayPnl(estimate.value);
 };
 
-const formatUnrealizedPnl = (value) => {
-	if (value === null || value === undefined) return '집계 불가';
-	return formatDisplayPnl(value);
-};
+const estimateTooltip = '실시간 가격 기준의 추정 손익입니다. 최종 손익은 Binance 체결 내역 기준으로 확정됩니다.';
+const entryTooltip = '설정금액은 전략 생성 시 입력한 값입니다. 실제 진입금액은 Binance에서 실제 체결된 수량과 가격 기준입니다.';
 
 const getWinLossLabel = (item = {}) => {
 	const win = toNumber(item.r_win || item.winCount);
@@ -144,8 +150,8 @@ const TradingListTable = ({ setTradingDetailId, listData: data = [], getListData
 	};
 
 	const renderMobileCard = (item) => {
-		const currentPrice = livePriceMap[item.symbol]?.lastPrice;
-		const unrealizedPnl = getUnrealizedPnl(item, currentPrice);
+		const currentPrice = getMarkPrice(livePriceMap[item.symbol]);
+		const estimatedPnl = getEstimatedPnl(item, currentPrice);
 		const lastTradeAt = item.lastTradeAt || item.r_exactTime || item.updatedAt || item.created_at;
 
 		return (
@@ -175,12 +181,12 @@ const TradingListTable = ({ setTradingDetailId, listData: data = [], getListData
 						<p className="mt-1 text-[14px]">{getOpenQty(item) > 0 ? `${comma(getOpenQty(item))}` : '-'}</p>
 					</div>
 					<div className="rounded-md bg-[#0F141B] px-3 py-2">
-						<p className="text-[11px] text-[#7f8898]">현재 미실현손익</p>
-						<p className="mt-1 text-[14px]">{formatDisplayPnl(unrealizedPnl)}</p>
+						<p className="text-[11px] text-[#7f8898]" title={estimateTooltip}>현재 추정 손익 <span className="text-[#8EE6B5]">추정</span></p>
+						<p className="mt-1 text-[14px]">{formatEstimatedPnl(estimatedPnl)}</p>
 					</div>
 					<div className="rounded-md bg-[#0F141B] px-3 py-2">
 						<p className="text-[11px] text-[#7f8898]">누적 실현손익</p>
-						<p className="mt-1 text-[14px]">{formatDisplayPnl(item.realizedPnlTotal)}</p>
+						<p className="mt-1 text-[14px]">{formatDisplayPnl(getRealizedPnl(item))}</p>
 					</div>
 					<div className="rounded-md bg-[#0F141B] px-3 py-2">
 						<p className="text-[11px] text-[#7f8898]">승/패</p>
@@ -244,11 +250,11 @@ const TradingListTable = ({ setTradingDetailId, listData: data = [], getListData
 						<tr>
 							<th className="px-4 py-4">전략</th>
 							<th className="px-4 py-4">종목 / 방향</th>
-							<th className="px-4 py-4">설정금액</th>
-							<th className="px-4 py-4">실제 진입금액</th>
+							<th className="px-4 py-4" title={entryTooltip}>설정금액</th>
+							<th className="px-4 py-4" title={entryTooltip}>실제 진입금액</th>
 							<th className="px-4 py-4">현재 포지션</th>
 							<th className="px-4 py-4">평균 진입가</th>
-							<th className="px-4 py-4">현재 미실현손익</th>
+							<th className="px-4 py-4" title={estimateTooltip}>현재 추정 손익</th>
 							<th className="px-4 py-4">누적 실현손익</th>
 							<th className="px-4 py-4">승/패</th>
 							<th className="px-4 py-4">최근 거래</th>
@@ -267,8 +273,8 @@ const TradingListTable = ({ setTradingDetailId, listData: data = [], getListData
 							</tr>
 						) : (
 							filteredData.map((item) => {
-								const currentPrice = livePriceMap[item.symbol]?.lastPrice;
-								const unrealizedPnl = getUnrealizedPnl(item, currentPrice);
+								const currentPrice = getMarkPrice(livePriceMap[item.symbol]);
+								const estimatedPnl = getEstimatedPnl(item, currentPrice);
 								const lastTradeAt = item.lastTradeAt || item.r_exactTime || item.updatedAt || item.created_at;
 
 								return (
@@ -286,8 +292,13 @@ const TradingListTable = ({ setTradingDetailId, listData: data = [], getListData
 										<td className="px-4 py-4">{getActualEntryNotional(item) > 0 ? formatDisplayAmount(getActualEntryNotional(item)) : '-'}</td>
 										<td className="px-4 py-4">{getOpenQty(item) > 0 ? comma(getOpenQty(item)) : '-'}</td>
 										<td className="px-4 py-4">{formatDisplayPrice(getEntryPrice(item))}</td>
-										<td className={`px-4 py-4 ${unrealizedPnl == null || unrealizedPnl >= 0 ? 'text-[#8EE6B5]' : 'text-[#FF8E8E]'}`}>{formatUnrealizedPnl(unrealizedPnl)}</td>
-										<td className={`px-4 py-4 ${toNumber(item.realizedPnlTotal) >= 0 ? 'text-[#8EE6B5]' : 'text-[#FF8E8E]'}`}>{formatDisplayPnl(item.realizedPnlTotal)}</td>
+										<td className={`px-4 py-4 ${estimatedPnl.value == null || estimatedPnl.value >= 0 ? 'text-[#8EE6B5]' : 'text-[#FF8E8E]'}`} title={estimateTooltip}>
+											<div className="flex items-center justify-center gap-1">
+												<span>{formatEstimatedPnl(estimatedPnl)}</span>
+												{estimatedPnl.status === 'ESTIMATED' && <span className="rounded-full border border-[#8EE6B5]/50 px-1.5 py-0.5 text-[10px] text-[#8EE6B5]">추정</span>}
+											</div>
+										</td>
+										<td className={`px-4 py-4 ${toNumber(getRealizedPnl(item)) >= 0 ? 'text-[#8EE6B5]' : 'text-[#FF8E8E]'}`}>{formatDisplayPnl(getRealizedPnl(item))}</td>
 										<td className="px-4 py-4">{getWinLossLabel(item)}</td>
 										<td className="px-4 py-4">{formatDate(lastTradeAt)}</td>
 										<td className="px-4 py-4"><StatusChip label={getUserStatusLabel(item)} /></td>

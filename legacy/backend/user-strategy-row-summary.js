@@ -85,6 +85,27 @@ const getLeverage = (row = {}) => {
   return leverage > 0 ? leverage : null;
 };
 
+const normalizePositionSide = (value) => {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "LONG" || normalized === "BUY") {
+    return "LONG";
+  }
+  if (normalized === "SHORT" || normalized === "SELL") {
+    return "SHORT";
+  }
+  return null;
+};
+
+const getPositionSide = (row = {}, openSnapshots = []) => {
+  const snapshotSide = openSnapshots
+    .map((snapshot) => normalizePositionSide(snapshot.positionSide))
+    .find(Boolean);
+  if (snapshotSide) {
+    return snapshotSide;
+  }
+  return normalizePositionSide(row.positionSide || row.signalType || row.r_signalType || row.side);
+};
+
 const groupByPid = (rows = []) => {
   const map = new Map();
   rows.forEach((row) => {
@@ -154,11 +175,17 @@ const summarizePid = ({ row = {}, category, snapshots = [], ledgers = [] }) => {
   let realizedPnlToday = 0;
   let realizedPnl7d = 0;
   let realizedPnl30d = 0;
+  let commission = 0;
+  let hasCommissionEvidence = false;
   let lastTradeAt = null;
   const exitCycles = new Map();
 
   cleanLedgers.forEach((ledger) => {
     const pnl = toNumber(ledger.realizedPnl);
+    if (ledger.fee !== null && ledger.fee !== undefined && ledger.fee !== "") {
+      commission += Math.abs(toNumber(ledger.fee));
+      hasCommissionEvidence = true;
+    }
     const eventTime = getEventTime(ledger);
     realizedPnlTotal += pnl;
     if (isAtOrAfter(eventTime, periodStarts.today)) {
@@ -210,17 +237,31 @@ const summarizePid = ({ row = {}, category, snapshots = [], ledgers = [] }) => {
           : "OFF / 대기중";
 
   const leverage = getLeverage(row);
+  const realizedPnlGross = realizedPnlTotal;
+  const realizedPnlNet = hasCommissionEvidence ? realizedPnlGross - commission : null;
+  const actualEntryNotionalSource =
+    openQty > 0
+      ? actualEntryNotional > 0
+        ? "OPEN_SNAPSHOT_REMAINING_COST"
+        : "UNAVAILABLE"
+      : "FLAT_NONE";
 
   return {
     pid,
     category,
+    positionSide: getPositionSide(row, openSnapshots),
     configuredNotional: toNullableFixed(getConfiguredNotional(row)),
     actualEntryNotional: openQty > 0 ? toNullableFixed(actualEntryNotional) : null,
     actualMarginUsed: openQty > 0 && leverage ? toNullableFixed(actualEntryNotional / leverage) : null,
+    nominalMarginUsed: openQty > 0 && leverage ? toNullableFixed(actualEntryNotional / leverage) : null,
     leverage,
     openQty: toNullableFixed(openQty),
     avgEntryPrice: openQty > 0 ? toNullableFixed(avgEntryPrice) : null,
     unrealizedPnl: openQty > 0 ? null : "0.00000000",
+    unrealizedPnlEstimatePolicy: openQty > 0 ? "FRONTEND_MARK_PRICE_ESTIMATE_ONLY" : "FLAT_ZERO",
+    realizedPnlGross: toNullableFixed(realizedPnlGross),
+    commission: hasCommissionEvidence ? toNullableFixed(commission) : null,
+    realizedPnlNet: hasCommissionEvidence ? toNullableFixed(realizedPnlNet) : null,
     realizedPnlTotal: toNullableFixed(realizedPnlTotal),
     realizedPnlToday: toNullableFixed(realizedPnlToday),
     realizedPnl7d: toNullableFixed(realizedPnl7d),
@@ -233,10 +274,15 @@ const summarizePid = ({ row = {}, category, snapshots = [], ledgers = [] }) => {
     userStatusLabel: displayStatus,
     requiresUserAction,
     incidentExcluded: cleanLedgers.length !== ledgers.length,
+    actualEntryNotionalSource,
+    realizedPnlSource: cleanLedgers.length > 0 ? "LIVE_LEDGER" : "UNAVAILABLE",
+    commissionSource: hasCommissionEvidence ? "LIVE_LEDGER_FEE" : "UNAVAILABLE",
     dataAvailability: {
-      unrealizedPnlSource: openQty > 0 ? "UNAVAILABLE" : "FLAT_ZERO",
+      unrealizedPnlSource: openQty > 0 ? "FRONTEND_MARK_PRICE_ESTIMATE_ONLY" : "FLAT_ZERO",
       realizedPnlSource: cleanLedgers.length > 0 ? "LIVE_LEDGER" : "UNAVAILABLE",
-      actualEntryNotionalSource: openQty > 0 ? "OPEN_SNAPSHOT" : "FLAT_NONE",
+      realizedPnlNetSource: hasCommissionEvidence ? "LIVE_LEDGER_MINUS_FEE" : "UNAVAILABLE",
+      commissionSource: hasCommissionEvidence ? "LIVE_LEDGER_FEE" : "UNAVAILABLE",
+      actualEntryNotionalSource,
       incidentHandling: cleanLedgers.length !== ledgers.length ? "QA_REPLAY_ACCIDENT_EXCLUDED" : "NONE",
     },
   };
@@ -261,7 +307,7 @@ const loadSummaryContext = async ({ uid, category, items = [] } = {}) => {
       [uid, normalizedCategory, ...pids]
     ),
     db.query(
-      `SELECT id, pid, strategyCategory, eventType, sourceClientOrderId, sourceOrderId, sourceTradeId, dedupeKey, realizedPnl, tradeTime, createdAt
+      `SELECT id, pid, strategyCategory, eventType, sourceClientOrderId, sourceOrderId, sourceTradeId, fillQty, fillPrice, fillValue, fee, dedupeKey, realizedPnl, tradeTime, createdAt
          FROM live_pid_position_ledger
         WHERE uid = ? AND LOWER(strategyCategory) = ? AND pid IN (${placeholders})`,
       [uid, normalizedCategory, ...pids]

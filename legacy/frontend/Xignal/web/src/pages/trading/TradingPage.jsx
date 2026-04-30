@@ -7,6 +7,7 @@ import { trading } from '../../services/trading';
 import TradingViewWidget from './TradingViewWidget';
 import { useChartStore } from '../../store/useChartStore';
 import { comma } from '../../utils/comma';
+import { buildEstimatedUnrealizedPnl, estimateGridUnrealizedPnl } from './estimatedPnl';
 
 const STRATEGY_CATEGORY = {
 	SIGNAL: 'SIGNAL',
@@ -30,28 +31,21 @@ const formatCount = (value) => `${comma(toNumber(value))}개`;
 const formatWinRate = (value) => (value === null || value === undefined ? '집계 불가' : `${toNumber(value).toFixed(1)}%`);
 
 const getSignalOpenQty = (item = {}) => toNumber(item.openQty || item.r_qty);
-const getSignalEntryPrice = (item = {}) => toNumber(item.entryPrice || item.r_exactPrice || item.r_signalPrice);
+const getSignalEntryPrice = (item = {}) => toNumber(item.avgEntryPrice || item.entryPrice || item.r_exactPrice || item.r_signalPrice);
+const getMarkPrice = (priceRow = {}) => priceRow?.markPrice ?? priceRow?.lastPrice ?? priceRow?.price;
 
 const getSignalUnrealizedPnl = (item = {}, marketPrices = {}) => {
-	const currentPrice = toNumber(marketPrices?.[item.symbol]?.lastPrice);
-	const entryPrice = getSignalEntryPrice(item);
-	const qty = getSignalOpenQty(item);
-	if (!(currentPrice > 0) || !(entryPrice > 0) || !(qty > 0)) return 0;
-	return String(item.signalType || '').toUpperCase() === 'SELL'
-		? (entryPrice - currentPrice) * qty
-		: (currentPrice - entryPrice) * qty;
+	return buildEstimatedUnrealizedPnl({
+		side: item.signalType,
+		positionSide: item.positionSide,
+		openQty: getSignalOpenQty(item),
+		avgEntryPrice: getSignalEntryPrice(item),
+		markPrice: getMarkPrice(marketPrices?.[item.symbol])
+	});
 };
 
 const getGridUnrealizedPnl = (item = {}, marketPrices = {}) => {
-	const currentPrice = toNumber(marketPrices?.[item.symbol]?.lastPrice);
-	if (!(currentPrice > 0)) return 0;
-	const longQty = toNumber(item.longQty);
-	const shortQty = toNumber(item.shortQty);
-	const longEntryPrice = toNumber(item.longEntryPrice);
-	const shortEntryPrice = toNumber(item.shortEntryPrice);
-	const longPnl = longQty > 0 && longEntryPrice > 0 ? (currentPrice - longEntryPrice) * longQty : 0;
-	const shortPnl = shortQty > 0 && shortEntryPrice > 0 ? (shortEntryPrice - currentPrice) * shortQty : 0;
-	return longPnl + shortPnl;
+	return estimateGridUnrealizedPnl(item, getMarkPrice(marketPrices?.[item.symbol]));
 };
 
 const SummaryCard = ({ label, value, tone = 'neutral', helper }) => {
@@ -173,10 +167,16 @@ const TradingPage = () => {
 
 	const summaryCards = useMemo(() => {
 		const cards = performanceSummary?.cards || {};
-		const computedUnrealized =
-			signalListData.reduce((sum, item) => sum + getSignalUnrealizedPnl(item, marketPrices), 0) +
-			gridListData.reduce((sum, item) => sum + getGridUnrealizedPnl(item, marketPrices), 0);
-		const currentUnrealized = computedUnrealized || cards.currentUnrealizedPnl;
+		const unrealizedEstimates = [
+			...signalListData.map((item) => getSignalUnrealizedPnl(item, marketPrices)),
+			...gridListData.map((item) => getGridUnrealizedPnl(item, marketPrices))
+		];
+		const openEstimates = unrealizedEstimates.filter((estimate) => estimate.status !== 'FLAT');
+		const currentUnrealized = openEstimates.length
+			? openEstimates.every((estimate) => estimate.status === 'ESTIMATED')
+				? openEstimates.reduce((sum, estimate) => sum + toNumber(estimate.value), 0)
+				: null
+			: 0;
 		const totalRealized = toNumber(cards.totalRealizedPnl);
 		const todayPnl = toNumber(cards.todayPnl);
 		const sevenDayPnl = toNumber(cards.sevenDayPnl);
@@ -184,7 +184,7 @@ const TradingPage = () => {
 
 		return [
 			{ label: '총 누적 실현손익', value: formatPnl(totalRealized), tone: totalRealized >= 0 ? 'profit' : 'loss' },
-			{ label: '현재 미실현손익', value: formatPnl(currentUnrealized), tone: toNumber(currentUnrealized) >= 0 ? 'profit' : 'loss', helper: '현재가 기반 추정' },
+			{ label: '현재 추정 손익', value: formatPnl(currentUnrealized), tone: toNumber(currentUnrealized) >= 0 ? 'profit' : 'loss', helper: '실시간 가격 기준 추정' },
 			{ label: '오늘 손익', value: formatPnl(todayPnl), tone: todayPnl >= 0 ? 'profit' : 'loss' },
 			{ label: '7일 손익', value: formatPnl(sevenDayPnl), tone: sevenDayPnl >= 0 ? 'profit' : 'loss' },
 			{ label: '30일 손익', value: formatPnl(thirtyDayPnl), tone: thirtyDayPnl >= 0 ? 'profit' : 'loss' },
