@@ -431,6 +431,31 @@ const findRecordedFill = async ({
     return null;
   }
 
+  if (identity.sourceTradeId) {
+    const executor = connection || db;
+    const [rows] = await executor.query(
+      `SELECT *
+         FROM live_pid_position_ledger
+        WHERE uid = ?
+          AND pid = ?
+          AND strategyCategory = ?
+          AND symbol = ?
+          AND positionSide = ?
+          AND sourceTradeId = ?
+        ORDER BY id DESC
+        LIMIT 1`,
+      [
+        identity.uid,
+        identity.pid,
+        identity.strategyCategory,
+        identity.symbol,
+        identity.positionSide,
+        identity.sourceTradeId,
+      ]
+    );
+    return rows?.[0] || null;
+  }
+
   const clauses = [];
   const params = [
     identity.uid,
@@ -442,10 +467,6 @@ const findRecordedFill = async ({
     identity.fillQty,
     identity.fillPrice,
   ];
-  if (identity.sourceTradeId) {
-    clauses.push(`sourceTradeId = ?`);
-    params.push(identity.sourceTradeId);
-  }
   if (identity.sourceClientOrderId) {
     clauses.push(`sourceClientOrderId = ?`);
     params.push(identity.sourceClientOrderId);
@@ -467,7 +488,7 @@ const findRecordedFill = async ({
         AND tradeTime = ?
         AND ABS(fillQty - ?) < 0.000000001
         AND ABS(fillPrice - ?) < 0.000000001
-        AND (${clauses.join(" OR ")})
+        AND ${clauses.join(" AND ")}
       ORDER BY id DESC
       LIMIT 1`,
     params
