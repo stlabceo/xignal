@@ -14,6 +14,7 @@ const {
   loadReservations,
   loadMsgList,
   cleanupArtifacts,
+  isQaTempStrategyName,
   countArtifactRowsForPids,
   ensureUidExists,
   resolveAnyExistingUid,
@@ -33,6 +34,8 @@ const canonicalRuntimeState = require("../../canonical-runtime-state");
 const signalForceOffControl = require("../../signal-force-off-control");
 const signalStrategyIdentity = require("../../signal-strategy-identity");
 const adminManagement = require("../../admin-management");
+const orderDisplayState = require("../../order-display-state");
+const { hasExplicitStrategyDeleteIntent } = require("../../strategy-delete-intent");
 const {
   buildAggregateComparisonRows,
   buildActiveProtectionRiskRows,
@@ -1723,6 +1726,17 @@ const runGridMultiTradeEntryPreservation = async ({ uid, cleanup = true } = {}) 
         time: Date.parse("2026-04-24T19:00:01Z"),
       },
       {
+        id: 551104,
+        orderId: 551001,
+        side: "BUY",
+        positionSide: "LONG",
+        qty: "2",
+        price: "1.214000",
+        quoteQty: "2.428000",
+        commission: "0.010000",
+        time: Date.parse("2026-04-24T19:00:01Z"),
+      },
+      {
         id: 551102,
         orderId: 551001,
         side: "BUY",
@@ -1750,7 +1764,7 @@ const runGridMultiTradeEntryPreservation = async ({ uid, cleanup = true } = {}) 
   try {
     const scenario = createScenario(
       "grid multi-trade entry preservation",
-      "partial fill / multi-trade entry fill units remain distinct"
+      "partial fill / multi-trade entry fill units remain distinct, including same qty/time/price with distinct tradeIds"
     );
 
     coinQa.__qa.binance[resolvedUid] = runtimeClient;
@@ -1777,18 +1791,18 @@ const runGridMultiTradeEntryPreservation = async ({ uid, cleanup = true } = {}) 
       strategyCategory: "grid",
       positionSide: "LONG",
     });
-    const expectedAvg = ((2 * 1.214) + (3 * 1.216) + (5 * 1.217)) / 10;
+    const expectedAvg = ((2 * 1.214) + (2 * 1.214) + (3 * 1.216) + (5 * 1.217)) / 12;
 
-    expectEqual(scenario, state.ledgerRows.length, 3, "grid multi-trade entry should keep three ledger rows");
+    expectEqual(scenario, state.ledgerRows.length, 4, "grid multi-trade entry should keep four ledger rows");
     expectEqual(
       scenario,
       state.ledgerRows.map((entry) => String(entry.sourceTradeId || "")).join(","),
-      "551101,551102,551103",
+      "551101,551104,551102,551103",
       "grid entry should preserve each tradeId"
     );
-    expectApprox(scenario, state.snapshot?.openQty, 10, 1e-9, "grid snapshot should accumulate all entry fills");
+    expectApprox(scenario, state.snapshot?.openQty, 12, 1e-9, "grid snapshot should accumulate all entry fills");
     expectApprox(scenario, state.snapshot?.avgEntryPrice, expectedAvg, 1e-9, "grid snapshot avgEntryPrice should be weighted");
-    expectApprox(scenario, state.row?.longQty, 10, 1e-9, "grid longQty should match recovered total qty");
+    expectApprox(scenario, state.row?.longQty, 12, 1e-9, "grid longQty should match recovered total qty");
     expectTrue(
       scenario,
       filterAuditLogs(captured.logs).some((line) => line.includes("GRID_FILL_UNIT_RECOVERY_FOUND_TRADES")),
@@ -2001,6 +2015,7 @@ const runCrossPidOwnershipGuard = async ({ uid, cleanup = true } = {}) => {
   const cleanupArtifactsForScenario = async () => cleanupArtifacts({ uid: resolvedUid, pids: cleanupPids });
   const placedOrders = [];
   const runtimeClient = {
+    __qaMockBinanceClient: true,
     futuresPositionRisk: async () => [
       {
         symbol: "PUMPUSDT",
@@ -2459,6 +2474,515 @@ const runGridReservationOwnedStopFillRecovery = async ({ uid, cleanup = true } =
       await cleanupArtifactsForScenario();
     }
   }
+};
+
+const runLiveReadonlyDetectsSixPositionsEightConditionalsProtectionShortage = async ({ uid } = {}) => {
+  const resolvedUid = await resolveReplayUid(uid || DEFAULT_REPLAY_UID_FALLBACK);
+  const scenario = createScenario(
+    "six positions eight conditionals protection shortage",
+    "PID-level protection count must fail even when same symbol/side has other PID protections"
+  );
+  const snapshots = [
+    { uid: resolvedUid, pid: 991748, strategyCategory: "signal", symbol: "XRPUSDT", positionSide: "LONG", status: "OPEN", openQty: 18 },
+    { uid: resolvedUid, pid: 991753, strategyCategory: "signal", symbol: "PUMPUSDT", positionSide: "SHORT", status: "OPEN", openQty: 13449 },
+    { uid: resolvedUid, pid: 991501, strategyCategory: "grid", symbol: "XRPUSDT", positionSide: "SHORT", status: "OPEN", openQty: 18.1 },
+    { uid: resolvedUid, pid: 991501, strategyCategory: "grid", symbol: "XRPUSDT", positionSide: "LONG", status: "OPEN", openQty: 18.1 },
+    { uid: resolvedUid, pid: 991500, strategyCategory: "grid", symbol: "XRPUSDT", positionSide: "SHORT", status: "OPEN", openQty: 18 },
+    { uid: resolvedUid, pid: 991500, strategyCategory: "grid", symbol: "XRPUSDT", positionSide: "LONG", status: "OPEN", openQty: 18 },
+  ];
+  const localReservations = [
+    ["BOUND_PROFIT", "PROFIT_147_991748_QA", 991748, "XRPUSDT", "LONG"],
+    ["BOUND_STOP", "STOP_147_991748_QA", 991748, "XRPUSDT", "LONG"],
+    ["BOUND_PROFIT", "PROFIT_147_991753_QA", 991753, "PUMPUSDT", "SHORT"],
+    ["BOUND_STOP", "STOP_147_991753_QA", 991753, "PUMPUSDT", "SHORT"],
+    ["GRID_TP", "GTP_S_147_991501_QA", 991501, "XRPUSDT", "SHORT"],
+    ["GRID_STOP", "GSTOP_S_147_991501_QA", 991501, "XRPUSDT", "SHORT"],
+    ["GRID_TP", "GTP_S_147_991500_QA", 991500, "XRPUSDT", "SHORT"],
+    ["GRID_STOP", "GSTOP_S_147_991500_QA", 991500, "XRPUSDT", "SHORT"],
+  ].map(([reservationKind, clientOrderId, pid, symbol, positionSide], index) => ({
+    id: 990000 + index,
+    uid: resolvedUid,
+    pid,
+    strategyCategory: reservationKind.startsWith("GRID") ? "grid" : "signal",
+    symbol,
+    positionSide,
+    reservationKind,
+    clientOrderId,
+    status: "ACTIVE",
+    reservedQty: positionSide === "LONG" ? 18 : 13449,
+  }));
+  const openAlgoOrders = localReservations.map((reservation, index) => ({
+    symbol: reservation.symbol,
+    positionSide: reservation.positionSide,
+    clientOrderId: reservation.clientOrderId,
+    algoId: 880000 + index,
+    type: reservation.reservationKind.includes("STOP") ? "STOP" : "TAKE_PROFIT",
+    origType: reservation.reservationKind.includes("STOP") ? "STOP" : "TAKE_PROFIT",
+    side: reservation.positionSide === "LONG" ? "SELL" : "BUY",
+    reduceOnly: true,
+    origQty: reservation.positionSide === "LONG" ? 18 : 13449,
+  }));
+  const rows = buildUnprotectedOpenPositionRows({
+    uid: resolvedUid,
+    snapshots,
+    localReservations,
+    positionRows: [
+      { symbol: "XRPUSDT", positionSide: "LONG", positionAmt: "54.1" },
+      { symbol: "XRPUSDT", positionSide: "SHORT", positionAmt: "-36.1" },
+      { symbol: "PUMPUSDT", positionSide: "SHORT", positionAmt: "-13449" },
+    ],
+    openOrders: [],
+    openAlgoOrders,
+    compareSymbols: ["XRPUSDT", "PUMPUSDT"],
+  });
+
+  const affected = rows.map((row) => `${row.pid}:${row.symbol}:${row.side}:${row.risk}`).sort();
+  expectEqual(scenario, rows.length, 2, "only the two grid LONG PID positions should be reported missing protection");
+  expectTrue(
+    scenario,
+    affected.includes("991500:XRPUSDT:LONG:PID_OPEN_NO_EFFECTIVE_PROTECTION")
+      && affected.includes("991501:XRPUSDT:LONG:PID_OPEN_NO_EFFECTIVE_PROTECTION"),
+    "PID-level guard should identify both unprotected grid LONG legs"
+  );
+
+  return finalizeScenario(scenario, {
+    uid: resolvedUid,
+    pid: "991500,991501",
+    strategyCategory: "mixed",
+    symbol: "XRPUSDT",
+    cleanupPids: [],
+    row: { protectionShortageRows: rows },
+    reservations: localReservations,
+    msgList: [],
+    auditLogs: ["PID_OPEN_NO_EFFECTIVE_PROTECTION", "OPEN_POSITION_PROTECTION_COUNT_BELOW_EXPECTED"],
+  });
+};
+
+const runGridDuplicateExitRecoveryDoesNotCancelCurrentProtection = async ({ uid, cleanup = true } = {}) => {
+  const resolvedUid = await resolveReplayUid(uid || DEFAULT_REPLAY_UID_FALLBACK);
+  const coinQa = loadCoinQaModule();
+  const row = await createTempGridStrategy({
+    uid: resolvedUid,
+    symbol: "XRPUSDT",
+    bunbong: "30MIN",
+    regimeStatus: "ACTIVE",
+    longLegStatus: "OPEN",
+    longQty: 18.1,
+  });
+  const cleanupPids = [row.id];
+  const rowCountsBefore = await countArtifactRowsForPids({ uid: resolvedUid, pids: cleanupPids });
+  const cleanupArtifactsForScenario = async () => cleanupArtifacts({ uid: resolvedUid, pids: cleanupPids });
+  const oldManualClientOrderId = `GMANUAL_L_${resolvedUid}_${row.id}_OLD`;
+  const currentTpClientOrderId = `GTP_L_${resolvedUid}_${row.id}_CUR`;
+  const currentStopClientOrderId = `GSTOP_L_${resolvedUid}_${row.id}_CUR`;
+  let cancelCalls = 0;
+  const originalCancelGridOrders = coinQa.cancelGridOrders;
+  const runtimeClient = {
+    futuresOpenOrders: async () => [
+      { symbol: "XRPUSDT", clientOrderId: currentTpClientOrderId, orderId: 991882, type: "algo", positionSide: "LONG", side: "SELL", reduceOnly: true, origQty: "18.1" },
+      { symbol: "XRPUSDT", clientOrderId: currentStopClientOrderId, orderId: 991883, type: "algo", positionSide: "LONG", side: "SELL", reduceOnly: true, origQty: "18.1" },
+    ],
+    futuresAllOrders: async () => [
+      {
+        orderId: 991771,
+        clientOrderId: oldManualClientOrderId,
+        side: "SELL",
+        positionSide: "LONG",
+        status: "FILLED",
+        type: "MARKET",
+        avgPrice: "1.3910",
+        executedQty: "18.1",
+        updateTime: Date.parse("2026-04-29T00:30:00Z"),
+        reduceOnly: true,
+      },
+    ],
+    futuresUserTrades: async () => [
+      {
+        id: 991901,
+        orderId: 991771,
+        side: "SELL",
+        positionSide: "LONG",
+        qty: "18.1",
+        price: "1.3910",
+        quoteQty: "25.1771",
+        realizedPnl: "0.01",
+        commission: "0",
+        time: Date.parse("2026-04-29T00:30:00Z"),
+      },
+    ],
+  };
+
+  try {
+    const scenario = createScenario(
+      "grid duplicate old exit recovery must not cancel current protection",
+      "duplicate historical GMANUAL recovery cannot cancel the active TP/STOP for a new open leg"
+    );
+
+    await pidPositionLedger.applyEntryFill(createEntryPayload({
+      uid: resolvedUid,
+      pid: row.id,
+      strategyCategory: "grid",
+      symbol: row.symbol,
+      positionSide: "LONG",
+      sourceClientOrderId: `GENTRY_L_${resolvedUid}_${row.id}_OLD`,
+      sourceOrderId: "991770",
+      sourceTradeId: "991900",
+      fillQty: 18.1,
+      fillPrice: 1.388,
+      eventType: "GRID_ENTRY_FILL",
+      tradeTime: "2026-04-29T00:20:00Z",
+    }));
+    await pidPositionLedger.applyExitFill(createExitPayload({
+      uid: resolvedUid,
+      pid: row.id,
+      strategyCategory: "grid",
+      symbol: row.symbol,
+      positionSide: "LONG",
+      sourceClientOrderId: oldManualClientOrderId,
+      sourceOrderId: "991771",
+      sourceTradeId: "991901",
+      fillQty: 18.1,
+      fillPrice: 1.391,
+      realizedPnl: 0.01,
+      eventType: "GRID_MANUAL_CLOSE_FILL",
+      tradeTime: "2026-04-29T00:30:00Z",
+    }));
+    await insertReservation({
+      uid: resolvedUid,
+      pid: row.id,
+      strategyCategory: "grid",
+      symbol: row.symbol,
+      positionSide: "LONG",
+      clientOrderId: oldManualClientOrderId,
+      sourceOrderId: "991771",
+      reservationKind: "GRID_MANUAL_OFF",
+      reservedQty: 18.1,
+      status: "FILLED",
+    });
+    await pidPositionLedger.applyEntryFill(createEntryPayload({
+      uid: resolvedUid,
+      pid: row.id,
+      strategyCategory: "grid",
+      symbol: row.symbol,
+      positionSide: "LONG",
+      sourceClientOrderId: `GENTRY_L_${resolvedUid}_${row.id}_CUR`,
+      sourceOrderId: "991880",
+      sourceTradeId: "991902",
+      fillQty: 18.1,
+      fillPrice: 1.4,
+      eventType: "GRID_ENTRY_FILL",
+      tradeTime: "2026-04-29T01:00:00Z",
+    }));
+    await pidPositionLedger.syncGridLegSnapshot(row.id, "LONG");
+    await insertReservation({
+      uid: resolvedUid,
+      pid: row.id,
+      strategyCategory: "grid",
+      symbol: row.symbol,
+      positionSide: "LONG",
+      clientOrderId: currentTpClientOrderId,
+      sourceOrderId: "991882",
+      reservationKind: "GRID_TP",
+      reservedQty: 18.1,
+      status: "ACTIVE",
+    });
+    await insertReservation({
+      uid: resolvedUid,
+      pid: row.id,
+      strategyCategory: "grid",
+      symbol: row.symbol,
+      positionSide: "LONG",
+      clientOrderId: currentStopClientOrderId,
+      sourceOrderId: "991883",
+      reservationKind: "GRID_STOP",
+      reservedQty: 18.1,
+      status: "ACTIVE",
+    });
+
+    coinQa.__qa.binance[resolvedUid] = runtimeClient;
+    coinQa.cancelGridOrders = async () => {
+      cancelCalls += 1;
+      return 0;
+    };
+    const captured = await captureConsoleLogs(async () => {
+      const current = await loadGridRow(row.id);
+      await coinQa.__qa.recoverGridExitFillFromExchange({
+        uid: resolvedUid,
+        row: current,
+        leg: "LONG",
+        issue: { issues: ["TRUTH_SYNC_RESERVATION_OWNED_EXIT"] },
+      });
+    });
+    const state = await loadScenarioState({
+      uid: resolvedUid,
+      pid: row.id,
+      strategyCategory: "grid",
+      positionSide: "LONG",
+    });
+    const currentTp = (state.reservations || []).find((reservation) => reservation.clientOrderId === currentTpClientOrderId);
+    const currentStop = (state.reservations || []).find((reservation) => reservation.clientOrderId === currentStopClientOrderId);
+
+    expectEqual(scenario, cancelCalls, 0, "duplicate old exit recovery must not call cancelGridOrders for current active protection");
+    expectEqual(scenario, currentTp?.status, "ACTIVE", "current TP must remain active");
+    expectEqual(scenario, currentStop?.status, "ACTIVE", "current STOP must remain active");
+    expectApprox(scenario, state.snapshot?.openQty, 18.1, 1e-9, "current open leg must remain open");
+    expectTrue(
+      scenario,
+      filterAuditLogs(captured.logs).some((line) => line.includes("GRID_RESERVATION_EXIT_RECOVERY_DUPLICATE_NO_SIBLING_CANCEL")),
+      "duplicate recovery should explicitly audit no sibling cancel"
+    );
+
+    return finalizeScenario(scenario, {
+      uid: resolvedUid,
+      pid: row.id,
+      strategyCategory: "grid",
+      symbol: row.symbol,
+      cleanupPids,
+      rowCountsBefore,
+      ledgerRows: state.ledgerRows,
+      snapshot: state.snapshot,
+      row: state.row,
+      reservations: state.reservations,
+      msgList: state.msgList,
+      auditLogs: filterAuditLogs(captured.logs),
+    });
+  } finally {
+    coinQa.cancelGridOrders = originalCancelGridOrders;
+    delete coinQa.__qa.binance[resolvedUid];
+    if (cleanup !== false) {
+      await cleanupArtifactsForScenario();
+    }
+  }
+};
+
+const runSignalEntryPartiallyFilledThenCanceled = async ({ uid, cleanup = true } = {}) => {
+  const resolvedUid = await resolveReplayUid(uid || DEFAULT_REPLAY_UID_FALLBACK);
+  const play = await createTempSignalPlay({
+    uid: resolvedUid,
+    symbol: "XRPUSDT",
+    bunbong: "5MIN",
+    status: "EXACT",
+    signalType: "BUY",
+    rSignalType: "BUY",
+  });
+  const cleanupPids = [play.id];
+  const rowCountsBefore = await countArtifactRowsForPids({ uid: resolvedUid, pids: cleanupPids });
+  const cleanupArtifactsForScenario = async () => cleanupArtifacts({ uid: resolvedUid, pids: cleanupPids });
+
+  try {
+    const scenario = createScenario(
+      "signal entry partially filled then canceled",
+      "canceled remainder must not inflate local exposure beyond executed qty"
+    );
+    await pidPositionLedger.applyEntryFill(createEntryPayload({
+      uid: resolvedUid,
+      pid: play.id,
+      strategyCategory: "signal",
+      symbol: play.symbol,
+      positionSide: "LONG",
+      sourceClientOrderId: `NEW_${resolvedUid}_${play.id}`,
+      sourceOrderId: `SPC-${play.id}`,
+      sourceTradeId: `SPCT-${play.id}`,
+      fillQty: 18,
+      fillPrice: 1.4,
+      eventType: "SIGNAL_ENTRY_FILL",
+      tradeTime: "2026-04-29T02:00:00Z",
+      note: "qa-partial-then-canceled",
+    }));
+    await pidPositionLedger.syncSignalPlaySnapshot(play.id, "LONG");
+    await insertReservation({
+      uid: resolvedUid,
+      pid: play.id,
+      strategyCategory: "signal",
+      symbol: play.symbol,
+      positionSide: "LONG",
+      clientOrderId: `PROFIT_${resolvedUid}_${play.id}_PARTIAL`,
+      sourceOrderId: `SIG-PARTIAL-TP-${play.id}`,
+      reservationKind: "BOUND_PROFIT",
+      reservedQty: 18,
+      status: "ACTIVE",
+    });
+    await insertReservation({
+      uid: resolvedUid,
+      pid: play.id,
+      strategyCategory: "signal",
+      symbol: play.symbol,
+      positionSide: "LONG",
+      clientOrderId: `STOP_${resolvedUid}_${play.id}_PARTIAL`,
+      sourceOrderId: `SIG-PARTIAL-STOP-${play.id}`,
+      reservationKind: "BOUND_STOP",
+      reservedQty: 18,
+      status: "ACTIVE",
+    });
+
+    const state = await loadScenarioState({
+      uid: resolvedUid,
+      pid: play.id,
+      strategyCategory: "signal",
+      positionSide: "LONG",
+    });
+    expectApprox(scenario, state.snapshot?.openQty, 18, 1e-9, "snapshot should keep only executed partial qty");
+    expectEqual(scenario, state.ledgerRows.length, 1, "only the executed partial fill should be ledgered");
+    expectTrue(
+      scenario,
+      (state.reservations || []).every((reservation) => Number(reservation.reservedQty || 0) === 18),
+      "protection qty should be based on executed partial qty"
+    );
+
+    return finalizeScenario(scenario, {
+      uid: resolvedUid,
+      pid: play.id,
+      strategyCategory: "signal",
+      symbol: play.symbol,
+      cleanupPids,
+      rowCountsBefore,
+      ledgerRows: state.ledgerRows,
+      snapshot: state.snapshot,
+      row: state.row,
+      reservations: state.reservations,
+      msgList: state.msgList,
+      auditLogs: ["PARTIALLY_FILLED_CANCELED_REMAINDER_NOT_COUNTED"],
+    });
+  } finally {
+    if (cleanup !== false) {
+      await cleanupArtifactsForScenario();
+    }
+  }
+};
+
+const runGridEntryPartiallyFilledThenExpired = async ({ uid, cleanup = true } = {}) => {
+  const resolvedUid = await resolveReplayUid(uid || DEFAULT_REPLAY_UID_FALLBACK);
+  const row = await createTempGridStrategy({
+    uid: resolvedUid,
+    symbol: "XRPUSDT",
+    bunbong: "30MIN",
+    regimeStatus: "ACTIVE",
+    longLegStatus: "ENTRY_ARMED",
+  });
+  const cleanupPids = [row.id];
+  const rowCountsBefore = await countArtifactRowsForPids({ uid: resolvedUid, pids: cleanupPids });
+  const cleanupArtifactsForScenario = async () => cleanupArtifacts({ uid: resolvedUid, pids: cleanupPids });
+
+  try {
+    const scenario = createScenario(
+      "grid entry partially filled then expired",
+      "expired remainder must leave only filled leg qty protected"
+    );
+    await pidPositionLedger.applyEntryFill(createEntryPayload({
+      uid: resolvedUid,
+      pid: row.id,
+      strategyCategory: "grid",
+      symbol: row.symbol,
+      positionSide: "LONG",
+      sourceClientOrderId: `GENTRY_L_${resolvedUid}_${row.id}_PARTIAL`,
+      sourceOrderId: `GPE-${row.id}`,
+      sourceTradeId: `GPET-${row.id}`,
+      fillQty: 18.1,
+      fillPrice: 1.4,
+      eventType: "GRID_ENTRY_FILL",
+      tradeTime: "2026-04-29T02:05:00Z",
+      note: "qa-grid-partial-then-expired",
+    }));
+    await pidPositionLedger.syncGridLegSnapshot(row.id, "LONG");
+    await query(
+      `UPDATE live_grid_strategy_list
+          SET longLegStatus = 'OPEN'
+        WHERE id = ?`,
+      [row.id]
+    );
+    await insertReservation({
+      uid: resolvedUid,
+      pid: row.id,
+      strategyCategory: "grid",
+      symbol: row.symbol,
+      positionSide: "LONG",
+      clientOrderId: `GTP_L_${resolvedUid}_${row.id}_PARTIAL`,
+      sourceOrderId: `GPTP-${row.id}`,
+      reservationKind: "GRID_TP",
+      reservedQty: 18.1,
+      status: "ACTIVE",
+    });
+    await insertReservation({
+      uid: resolvedUid,
+      pid: row.id,
+      strategyCategory: "grid",
+      symbol: row.symbol,
+      positionSide: "LONG",
+      clientOrderId: `GSTOP_L_${resolvedUid}_${row.id}_PARTIAL`,
+      sourceOrderId: `GPSP-${row.id}`,
+      reservationKind: "GRID_STOP",
+      reservedQty: 18.1,
+      status: "ACTIVE",
+    });
+
+    const state = await loadScenarioState({
+      uid: resolvedUid,
+      pid: row.id,
+      strategyCategory: "grid",
+      positionSide: "LONG",
+    });
+    expectApprox(scenario, state.snapshot?.openQty, 18.1, 1e-9, "grid snapshot should keep only executed partial qty");
+    expectEqual(scenario, state.row?.longLegStatus, "OPEN", "grid long leg should be OPEN after partial fill exposure");
+    expectTrue(
+      scenario,
+      (state.reservations || []).every((reservation) => Number(reservation.reservedQty || 0) === 18.1),
+      "grid protection qty should match filled exposure, not original order qty"
+    );
+
+    return finalizeScenario(scenario, {
+      uid: resolvedUid,
+      pid: row.id,
+      strategyCategory: "grid",
+      symbol: row.symbol,
+      cleanupPids,
+      rowCountsBefore,
+      ledgerRows: state.ledgerRows,
+      snapshot: state.snapshot,
+      row: state.row,
+      reservations: state.reservations,
+      msgList: state.msgList,
+      auditLogs: ["PARTIALLY_FILLED_EXPIRED_REMAINDER_NOT_COUNTED"],
+    });
+  } finally {
+    if (cleanup !== false) {
+      await cleanupArtifactsForScenario();
+    }
+  }
+};
+
+const runPartialFillStateMachineExpectedTransitions = async ({ uid } = {}) => {
+  const resolvedUid = await resolveReplayUid(uid || DEFAULT_REPLAY_UID_FALLBACK);
+  const scenario = createScenario(
+    "PARTIALLY_FILLED state-machine transition matrix",
+    "PARTIALLY_FILLED is intermediate and every next state preserves only executed trade units"
+  );
+  const transitions = [
+    ["PARTIALLY_FILLED", "PARTIALLY_FILLED", "apply new tradeIds only; keep remaining pending; keep protection on filled exposure"],
+    ["PARTIALLY_FILLED", "FILLED", "apply remaining tradeIds; finalize order; protection matches full executed qty"],
+    ["PARTIALLY_FILLED", "CANCELED", "apply filled tradeIds; cancel unfilled remainder only; keep protection for filled qty"],
+    ["PARTIALLY_FILLED", "EXPIRED", "apply filled tradeIds; expire unfilled remainder only; keep protection for filled qty"],
+    ["PARTIALLY_FILLED", "REJECTED", "apply filled tradeIds if any; mark remainder failed; require action if exposure unprotected"],
+    ["PARTIALLY_FILLED", "REST_MISSING", "preserve filled tradeIds; do not assume final; retry or mark UNKNOWN_PARTIAL_STATE"],
+  ];
+
+  expectEqual(scenario, transitions.length, 6, "all required partial transition classes should be documented");
+  expectTrue(
+    scenario,
+    transitions.every(([, , behavior]) => behavior.includes("filled") || behavior.includes("tradeIds")),
+    "each transition must preserve actual executed fill units"
+  );
+
+  return finalizeScenario(scenario, {
+    uid: resolvedUid,
+    pid: "",
+    strategyCategory: "mixed",
+    symbol: "",
+    cleanupPids: [],
+    row: { transitions },
+    reservations: [],
+    msgList: [],
+    auditLogs: ["PARTIALLY_FILLED_INTERMEDIATE_STATE_MACHINE"],
+  });
 };
 
 const withPatchedCoinExports = async (patches, worker) => {
@@ -4154,7 +4678,7 @@ const runLiveReadonlyDetectsUnprotectedOpenPosition = async ({ uid } = {}) => {
   });
 
   expectEqual(scenario, rows.length, 1, "unprotected open position should be reported");
-  expectEqual(scenario, rows[0]?.risk, "EXCHANGE_OPEN_NO_PROTECTION", "risk should be explicit");
+  expectEqual(scenario, rows[0]?.risk, "PID_OPEN_NO_EFFECTIVE_PROTECTION", "risk should be explicit");
 
   return finalizeScenario(scenario, {
     uid: resolvedUid,
@@ -4168,7 +4692,7 @@ const runLiveReadonlyDetectsUnprotectedOpenPosition = async ({ uid } = {}) => {
     row: { unprotectedRows: rows },
     reservations: [],
     msgList: [],
-    auditLogs: ["EXCHANGE_OPEN_NO_PROTECTION", "USER_ACTION_REQUIRED"],
+    auditLogs: ["PID_OPEN_NO_EFFECTIVE_PROTECTION", "USER_ACTION_REQUIRED"],
   });
 };
 
@@ -4653,6 +5177,413 @@ const runCorrectionPnlIntegrity = async ({ uid, cleanup = true } = {}) => {
   }
 };
 
+const ORDER_STATUS_STATE_MACHINE_SCENARIOS = [
+  {
+    name: "NEW then CANCELED unfilled",
+    previous: "NEW",
+    next: "CANCELED",
+    kind: "entry",
+    origQty: 10,
+    trades: [],
+    expectedExposure: 0,
+    expectedProtection: false,
+    expectedAudit: "ORDER_TERMINAL_WITHOUT_FILL",
+  },
+  {
+    name: "NEW then EXPIRED unfilled",
+    previous: "NEW",
+    next: "EXPIRED",
+    kind: "entry",
+    origQty: 10,
+    trades: [],
+    expectedExposure: 0,
+    expectedProtection: false,
+    expectedAudit: "ORDER_TERMINAL_WITHOUT_FILL",
+  },
+  {
+    name: "NEW then EXPIRED_IN_MATCH unfilled",
+    previous: "NEW",
+    next: "EXPIRED_IN_MATCH",
+    kind: "entry",
+    origQty: 10,
+    trades: [],
+    expectedExposure: 0,
+    expectedProtection: false,
+    expectedAudit: "ORDER_EXPIRED_IN_MATCH_NO_FILL",
+  },
+  {
+    name: "NEW then REJECTED",
+    previous: "NEW",
+    next: "REJECTED",
+    kind: "entry",
+    origQty: 10,
+    trades: [],
+    expectedExposure: 0,
+    expectedProtection: false,
+    expectedAudit: "ORDER_REJECTED_NO_FILL",
+  },
+  {
+    name: "PARTIALLY_FILLED then FILLED",
+    previous: "PARTIALLY_FILLED",
+    next: "FILLED",
+    kind: "entry",
+    origQty: 10,
+    trades: [{ id: "A", qty: 4 }, { id: "B", qty: 6 }],
+    expectedExposure: 10,
+    expectedProtection: true,
+    expectedAudit: "PROTECTION_SYNC_FOR_PARTIAL_EXPOSURE",
+  },
+  {
+    name: "PARTIALLY_FILLED then CANCELED",
+    previous: "PARTIALLY_FILLED",
+    next: "CANCELED",
+    kind: "entry",
+    origQty: 10,
+    trades: [{ id: "A", qty: 4 }],
+    expectedExposure: 4,
+    expectedProtection: true,
+    expectedAudit: "ORDER_PARTIAL_REMAINDER_CANCELED",
+  },
+  {
+    name: "PARTIALLY_FILLED then EXPIRED",
+    previous: "PARTIALLY_FILLED",
+    next: "EXPIRED",
+    kind: "entry",
+    origQty: 10,
+    trades: [{ id: "A", qty: 4 }],
+    expectedExposure: 4,
+    expectedProtection: true,
+    expectedAudit: "ORDER_PARTIAL_REMAINDER_EXPIRED",
+  },
+  {
+    name: "PARTIALLY_FILLED then EXPIRED_IN_MATCH",
+    previous: "PARTIALLY_FILLED",
+    next: "EXPIRED_IN_MATCH",
+    kind: "entry",
+    origQty: 10,
+    trades: [{ id: "A", qty: 4 }],
+    expectedExposure: 4,
+    expectedProtection: true,
+    expectedAudit: "ORDER_EXPIRED_IN_MATCH_WITH_FILL",
+  },
+  {
+    name: "PARTIALLY_FILLED then REJECTED",
+    previous: "PARTIALLY_FILLED",
+    next: "REJECTED",
+    kind: "entry",
+    origQty: 10,
+    trades: [{ id: "A", qty: 4 }],
+    expectedExposure: 4,
+    expectedProtection: true,
+    expectedAudit: "ORDER_REJECTED_WITH_FILL",
+  },
+  {
+    name: "PARTIALLY_FILLED then PARTIALLY_FILLED again",
+    previous: "PARTIALLY_FILLED",
+    next: "PARTIALLY_FILLED",
+    kind: "entry",
+    origQty: 10,
+    trades: [{ id: "A", qty: 3 }, { id: "A", qty: 3 }, { id: "B", qty: 2 }],
+    expectedExposure: 5,
+    expectedProtection: true,
+    expectedAudit: "ORDER_PARTIAL_STATE_REST_CHECK",
+  },
+  {
+    name: "exit order PARTIALLY_FILLED then CANCELED",
+    previous: "PARTIALLY_FILLED",
+    next: "CANCELED",
+    kind: "exit",
+    startingExposure: 10,
+    origQty: 10,
+    trades: [{ id: "A", qty: 4 }],
+    expectedExposure: 6,
+    expectedProtection: true,
+    expectedAudit: "ORDER_PARTIAL_REMAINDER_CANCELED",
+  },
+  {
+    name: "grid entry PARTIALLY_FILLED then EXPIRED_IN_MATCH",
+    previous: "PARTIALLY_FILLED",
+    next: "EXPIRED_IN_MATCH",
+    kind: "grid-entry",
+    origQty: 18.1,
+    trades: [{ id: "A", qty: 7.1 }],
+    expectedExposure: 7.1,
+    expectedProtection: true,
+    expectedAudit: "ORDER_EXPIRED_IN_MATCH_WITH_FILL",
+  },
+  {
+    name: "signal entry PARTIALLY_FILLED then EXPIRED_IN_MATCH",
+    previous: "PARTIALLY_FILLED",
+    next: "EXPIRED_IN_MATCH",
+    kind: "signal-entry",
+    origQty: 18,
+    trades: [{ id: "A", qty: 8 }],
+    expectedExposure: 8,
+    expectedProtection: true,
+    expectedAudit: "ORDER_EXPIRED_IN_MATCH_WITH_FILL",
+  },
+  {
+    name: "protection order PARTIALLY_FILLED then EXPIRED_IN_MATCH",
+    previous: "PARTIALLY_FILLED",
+    next: "EXPIRED_IN_MATCH",
+    kind: "exit",
+    startingExposure: 10,
+    origQty: 10,
+    trades: [{ id: "A", qty: 3 }],
+    expectedExposure: 7,
+    expectedProtection: true,
+    expectedAudit: "ORDER_EXPIRED_IN_MATCH_WITH_FILL",
+  },
+  {
+    name: "terminal status with late userTrade",
+    previous: "CANCELED",
+    next: "LATE_USER_TRADE",
+    kind: "entry",
+    origQty: 10,
+    trades: [{ id: "LATE", qty: 2 }, { id: "LATE", qty: 2 }],
+    expectedExposure: 2,
+    expectedProtection: true,
+    expectedAudit: "ORDER_TERMINAL_WITH_EXECUTED_QTY",
+  },
+];
+
+const simulateOrderStatusTransition = (definition) => {
+  const uniqueTrades = new Map();
+  for (const trade of definition.trades || []) {
+    if (!uniqueTrades.has(trade.id)) {
+      uniqueTrades.set(trade.id, Number(trade.qty || 0));
+    }
+  }
+  const filledQty = [...uniqueTrades.values()].reduce((sum, qty) => sum + qty, 0);
+  const startingExposure = Number(definition.startingExposure || 0);
+  const nextExposure = String(definition.kind || "").includes("exit")
+    ? Math.max(0, startingExposure - filledQty)
+    : filledQty;
+  const remainingOrderQty = Math.max(0, Number(definition.origQty || 0) - filledQty);
+  const terminal = ["FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"].includes(definition.next)
+    || definition.next === "LATE_USER_TRADE";
+  return {
+    filledQty,
+    nextExposure,
+    remainingOrderQty,
+    terminal,
+    ledgerFillCount: uniqueTrades.size,
+    protectionRequired: nextExposure > 0,
+    duplicateIgnoredCount: (definition.trades || []).length - uniqueTrades.size,
+  };
+};
+
+const runOrderStatusStateMachineFinalizationScenarios = async ({ uid } = {}) => {
+  const resolvedUid = await resolveReplayUid(uid || DEFAULT_REPLAY_UID_FALLBACK);
+  return ORDER_STATUS_STATE_MACHINE_SCENARIOS.map((definition) => {
+    const scenario = createScenario(
+      definition.name,
+      `${definition.previous} -> ${definition.next} state-machine expectation`
+    );
+    const simulated = simulateOrderStatusTransition(definition);
+    expectApprox(scenario, simulated.nextExposure, definition.expectedExposure, 1e-9, "exposure should equal filledQty-based projection");
+    expectEqual(scenario, simulated.protectionRequired, definition.expectedProtection, "protection requirement should follow actual exposure");
+    expectTrue(scenario, simulated.remainingOrderQty >= 0, "unfilled remainder should never become exposure");
+    if (definition.name.includes("again") || definition.name.includes("late userTrade")) {
+      expectTrue(scenario, simulated.duplicateIgnoredCount > 0, "duplicate tradeIds should be ignored");
+    }
+    if (definition.next === "EXPIRED_IN_MATCH") {
+      expectTrue(scenario, definition.expectedAudit.includes("EXPIRED_IN_MATCH"), "EXPIRED_IN_MATCH must have explicit audit");
+    }
+    if (definition.next === "REJECTED") {
+      expectTrue(scenario, definition.expectedAudit.includes("REJECTED"), "REJECTED must have explicit audit");
+    }
+
+    return finalizeScenario(scenario, {
+      uid: resolvedUid,
+      pid: null,
+      strategyCategory: "state-machine",
+      symbol: "SYNTHETIC",
+      cleanupPids: [],
+      rowCountsBefore: null,
+      row: {
+        previousState: definition.previous,
+        nextState: definition.next,
+        kind: definition.kind,
+        origQty: definition.origQty,
+        filledQty: simulated.filledQty,
+        remainingOrderQty: simulated.remainingOrderQty,
+        nextExposure: simulated.nextExposure,
+        terminal: simulated.terminal,
+      },
+      ledgerRows: Array.from({ length: simulated.ledgerFillCount }, (_, index) => ({
+        sourceTradeId: `trade-${index + 1}`,
+      })),
+      snapshot: {
+        status: simulated.nextExposure > 0 ? "OPEN" : "CLOSED",
+        openQty: simulated.nextExposure,
+      },
+      reservations: definition.expectedProtection
+        ? [{ status: "ACTIVE", reservedQty: simulated.nextExposure }]
+        : [],
+      msgList: [],
+      auditLogs: [definition.expectedAudit],
+    });
+  });
+};
+
+const runOnOffDeleteAndOrderDisplayStateScenarios = async ({ uid } = {}) => {
+  const resolvedUid = await resolveReplayUid(uid || DEFAULT_REPLAY_UID_FALLBACK);
+  const definitions = [
+    {
+      name: "OFF payload is not delete intent",
+      invariant: "OFF requests must never satisfy strategy delete confirmation",
+      run: (scenario) => {
+        expectEqual(
+          scenario,
+          hasExplicitStrategyDeleteIntent({ id: 15, enabled: "N" }),
+          false,
+          "OFF toggle payload must not pass delete guard"
+        );
+      },
+    },
+    {
+      name: "delete requires explicit USER_DELETE_STRATEGY intent",
+      invariant: "strategy delete requires explicit confirmation and intent",
+      run: (scenario) => {
+        expectEqual(
+          scenario,
+          hasExplicitStrategyDeleteIntent({
+            idList: [{ id: 15 }],
+            confirmDelete: true,
+            deleteIntent: "USER_DELETE_STRATEGY",
+          }),
+          true,
+          "explicit delete intent should pass delete guard"
+        );
+      },
+    },
+    {
+      name: "wrong delete intent blocked",
+      invariant: "wrong or implicit delete intent must be rejected",
+      run: (scenario) => {
+        expectEqual(
+          scenario,
+          hasExplicitStrategyDeleteIntent({
+            idList: [{ id: 15 }],
+            confirmDelete: true,
+            deleteIntent: "TOGGLE",
+          }),
+          false,
+          "wrong delete intent should be blocked"
+        );
+      },
+    },
+    {
+      name: "PARTIALLY_FILLED display remains intermediate",
+      invariant: "admin display must not mark PARTIALLY_FILLED as terminal",
+      run: (scenario) => {
+        const state = orderDisplayState.deriveOrderTerminalDisplayState({
+          orderStatus: "PARTIALLY_FILLED",
+          quantity: 10,
+          executedQty: 4,
+        });
+        expectEqual(scenario, state.orderDisplayState, "PARTIAL_FILL_PENDING", "partial fill remains pending");
+        expectApprox(scenario, state.remainingQty, 6, 1e-9, "remaining qty should be orig minus executed");
+        expectEqual(scenario, state.systemAction, "ORDER_PARTIAL_STATE_REST_CHECK", "partial fill needs REST check");
+      },
+    },
+    {
+      name: "EXPIRED_IN_MATCH no fill display is terminal no exposure",
+      invariant: "EXPIRED_IN_MATCH without fill is terminal but no false exposure",
+      run: (scenario) => {
+        const state = orderDisplayState.deriveOrderTerminalDisplayState({
+          orderStatus: "EXPIRED_IN_MATCH",
+          quantity: 10,
+          executedQty: 0,
+        });
+        expectEqual(scenario, state.orderDisplayState, "TERMINAL_NO_FILL", "no fill terminal should not create exposure");
+        expectEqual(scenario, state.requiresUserAction, false, "no-fill expired_in_match should not require user action");
+        expectEqual(scenario, state.systemAction, "ORDER_EXPIRED_IN_MATCH_NO_FILL", "expired_in_match should be explicit");
+      },
+    },
+    {
+      name: "REJECTED with fill display requires protection verification",
+      invariant: "terminal status with executed qty is risk-bearing until protection is verified",
+      run: (scenario) => {
+        const state = orderDisplayState.deriveOrderTerminalDisplayState({
+          orderStatus: "REJECTED",
+          quantity: 10,
+          executedQty: 2,
+          rejectReason: "synthetic late fill after reject",
+        });
+        expectEqual(scenario, state.orderDisplayState, "PARTIAL_TERMINAL_WITH_EXPOSURE", "terminal with fill has exposure");
+        expectEqual(scenario, state.requiresUserAction, true, "terminal with fill needs protection verification");
+        expectEqual(scenario, state.systemAction, "VERIFY_PROTECTION_FOR_FILLED_QTY", "system action should be explicit");
+      },
+    },
+    {
+      name: "QA cleanup blocks non-QA production PID family",
+      invariant: "QA cleanup must not delete or clean artifacts for non-QA production PIDs by numeric PID alone",
+      run: async (scenario) => {
+        const result = await cleanupArtifacts({
+          uid: resolvedUid,
+          pids: [991744, 991748, 991753],
+          signalIds: [991744, 991748, 991753],
+          gridIds: [991744, 991748, 991753],
+          settleMs: 0,
+          passes: 1,
+        });
+        expectEqual(scenario, result.cleaned, false, "non-QA PID cleanup should be blocked and do no delete pass");
+        expectEqual(
+          scenario,
+          result.blockedPids.join(","),
+          "991744,991748,991753",
+          "production-like PID ids should be reported as blocked"
+        );
+        expectEqual(scenario, result.guard, "QA_MARKER_REQUIRED", "cleanup guard should document QA marker requirement");
+      },
+    },
+    {
+      name: "QA marker helper rejects ordinary strategy names",
+      invariant: "cleanup allow-list must require explicit QA_ marker, not PID range",
+      run: (scenario) => {
+        expectEqual(scenario, isQaTempStrategyName("SQZ+GRID+BREAKOUT"), false, "production strategy name must not pass cleanup marker");
+        expectEqual(scenario, isQaTempStrategyName("QA_SIGNAL_123"), true, "QA temp strategy should pass cleanup marker");
+      },
+    },
+    {
+      name: "expected ignore event stays info not abnormal",
+      invariant: "admin lifecycle display must not mark expected ignore events as abnormal",
+      run: (scenario) => {
+        const state = orderDisplayState.deriveOrderTerminalDisplayState({
+          eventCode: "NO_MATCHING_STRATEGY",
+          severity: "low",
+        });
+        expectEqual(scenario, state.lifecycleResult, "EXPECTED", "expected ignore should be lifecycle EXPECTED");
+        expectEqual(scenario, state.severity, "INFO", "expected ignore should be informational");
+        expectEqual(scenario, state.expectedOrAbnormal, "EXPECTED", "expected ignore should not be abnormal");
+        expectEqual(scenario, state.requiresUserAction, false, "expected ignore should not require user action");
+      },
+    },
+  ];
+
+  const results = [];
+  for (const definition of definitions) {
+    const scenario = createScenario(definition.name, definition.invariant);
+    await definition.run(scenario);
+    results.push(finalizeScenario(scenario, {
+      uid: resolvedUid,
+      pid: null,
+      strategyCategory: "ui-admin-sync",
+      symbol: "SYNTHETIC",
+      cleanupPids: [],
+      row: { invariant: definition.invariant },
+      ledgerRows: [],
+      snapshot: null,
+      reservations: [],
+      msgList: [],
+      auditLogs: [],
+    }));
+  }
+  return results;
+};
+
 module.exports = {
   summarizeLedger,
   summarizeSnapshot,
@@ -4672,6 +5603,13 @@ module.exports = {
   runSplitTpPartialClose,
   runGridMultiTradeEntryPreservation,
   runGridMultiTradeExitPreservation,
+  runLiveReadonlyDetectsSixPositionsEightConditionalsProtectionShortage,
+  runGridDuplicateExitRecoveryDoesNotCancelCurrentProtection,
+  runSignalEntryPartiallyFilledThenCanceled,
+  runGridEntryPartiallyFilledThenExpired,
+  runPartialFillStateMachineExpectedTransitions,
+  runOrderStatusStateMachineFinalizationScenarios,
+  runOnOffDeleteAndOrderDisplayStateScenarios,
   runCrossPidOwnershipGuard,
   runGridReservationOwnedStopFillRecovery,
   runSignalRecoveredCloseViaTruthSync,

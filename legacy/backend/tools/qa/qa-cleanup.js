@@ -15,6 +15,9 @@ const run = async () => {
 
   const result = await cleanupArtifacts({ uid, pids });
   console.log(JSON.stringify(result, null, 2));
+  if ((result.blockedPids || []).length > 0) {
+    throw new Error(`QA_CLEANUP_BLOCKED_NON_QA_PIDS:${result.blockedPids.join(",")}`);
+  }
 };
 
 if (require.main === module) {

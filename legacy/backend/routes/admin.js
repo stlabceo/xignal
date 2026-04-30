@@ -20,6 +20,11 @@ const adminManagement = require("../admin-management");
 const strategyControlAudit = require("../strategy-control-audit");
 const strategyControlState = require("../strategy-control-state");
 const signalForceOffControl = require("../signal-force-off-control");
+const orderDisplayState = require("../order-display-state");
+const { hasExplicitStrategyDeleteIntent } = require("../strategy-delete-intent");
+const userPerformanceSummary = require("../user-performance-summary");
+const messageFilter = require("../message-filter");
+const accountReadiness = require("../account-readiness");
 
 const dt = require("../data");
 const dayjs = require("dayjs");
@@ -99,6 +104,14 @@ const sendRouteError = (res, status, message) =>
       },
     ],
   });
+
+const ensureExplicitStrategyDeleteIntent = (res, body = {}) => {
+  if (hasExplicitStrategyDeleteIntent(body)) {
+    return true;
+  }
+  sendRouteError(res, 400, "Explicit USER_DELETE_STRATEGY confirmation is required for strategy deletion.");
+  return false;
+};
 
 const loadOwnedPlayItem = async (detailProcedure, id, userId) => {
   const item = await dbcon.DBOneCall(`CALL ${detailProcedure}(?)`, [id]);
@@ -959,35 +972,22 @@ const decorateBinanceRuntimeEventRow = (row = {}) => ({
     row.severity ||
     null,
   eventCodeLabel: prettifyBinanceRuntimeEventCode(row.eventCode),
+  ...orderDisplayState.deriveOrderTerminalDisplayState(row),
 });
 
 const decorateBinanceRuntimeEventRows = (rows = []) =>
   Array.isArray(rows) ? rows.map((row) => decorateBinanceRuntimeEventRow(row)) : rows;
 
 const isBinanceOrderEventAbnormal = (row = {}) => {
-  const severity = String(row.severity || "").trim().toLowerCase();
-  const orderStatus = String(row.orderStatus || "").trim().toUpperCase();
-  const algoStatus = String(row.algoStatus || "").trim().toUpperCase();
-  const executionType = String(row.executionType || "").trim().toUpperCase();
-  const eventCode = String(row.eventCode || "").trim().toUpperCase();
+  const derived = row.lifecycleResult ? row : orderDisplayState.deriveAdminLifecycleSeverity(row);
+  const lifecycleResult = String(derived.lifecycleResult || "").trim().toUpperCase();
+  const expectedOrAbnormal = String(derived.expectedOrAbnormal || "").trim().toUpperCase();
 
-  if (["high", "medium"].includes(severity)) {
-    return true;
+  if (derived.isExpectedIgnore || lifecycleResult === "EXPECTED" || expectedOrAbnormal === "EXPECTED") {
+    return false;
   }
 
-  if (["PARTIALLY_FILLED", "CANCELED", "EXPIRED", "REJECTED"].includes(orderStatus)) {
-    return true;
-  }
-
-  if (["PARTIALLY_FILLED", "CANCELED", "EXPIRED", "REJECTED"].includes(algoStatus)) {
-    return true;
-  }
-
-  if (["PARTIALLY_FILLED", "CANCELED", "EXPIRED"].includes(executionType)) {
-    return true;
-  }
-
-  if (eventCode.includes("REJECT") || eventCode.includes("EXPIRED")) {
+  if (derived.requiresUserAction || lifecycleResult === "CRITICAL" || expectedOrAbnormal === "ABNORMAL") {
     return true;
   }
 
@@ -995,11 +995,16 @@ const isBinanceOrderEventAbnormal = (row = {}) => {
 };
 
 const decorateBinanceOrderMonitorRows = (rows = []) =>
-  decorateBinanceRuntimeEventRows(rows).map((row) => ({
-    ...row,
-    attentionRequired: isBinanceOrderEventAbnormal(row),
-    normalityLabel: isBinanceOrderEventAbnormal(row) ? "비정상" : "정상",
-  }));
+  decorateBinanceRuntimeEventRows(rows).map((row) => {
+    const abnormal = isBinanceOrderEventAbnormal(row);
+    const review = !abnormal && String(row.expectedOrAbnormal || "").trim().toUpperCase() === "REVIEW";
+    return {
+      ...row,
+      attentionRequired: abnormal,
+      reviewRequired: review,
+      normalityLabel: abnormal ? "비정상" : review ? "검토" : "예상/정상",
+    };
+  });
 
 const ORDER_PROCESS_STAGE_STATE_LABELS = {
   NORMAL: "정상",
@@ -2153,6 +2158,7 @@ const buildOrderProcessRow = async (targetRow, options = {}) => {
     processStatus: normalizedStages.processStatus,
     normalityLabel: normalizedStages.processStatusLabel,
     isAbnormal: normalizedStages.abnormal,
+    isExpectedIgnore: suppressLifecycleAttribution,
     completed: normalizedStages.completed,
     completionLabel: normalizedStages.completionLabel,
     currentStepLabel: normalizedStages.currentStepLabel,
@@ -2242,6 +2248,9 @@ const normalizeTrackRecordStatusFilter = (value) => {
   if (normalized === "active" || normalized === "inprogress") {
     return "active";
   }
+  if (normalized === "review" || normalized === "needsreview") {
+    return "review";
+  }
   if (normalized === "all") {
     return "all";
   }
@@ -2256,6 +2265,9 @@ const buildTrackRecordDateRange = ({ sDate = "", eDate = "" } = {}) => ({
 const matchesTrackRecordCompletion = (processRow, statusFilter) => {
   if (statusFilter === "all") {
     return true;
+  }
+  if (statusFilter === "review") {
+    return Boolean(processRow?.isAbnormal && !processRow?.isExpectedIgnore);
   }
 
   return statusFilter === "active" ? !processRow?.completed : Boolean(processRow?.completed);
@@ -2317,8 +2329,11 @@ const buildTrackRecordListItem = (processRow = {}) => {
     signalType: processRow.signalType || meta.direction || null,
     directionLabel: getTrackRecordDirectionLabel(processRow),
     completed: Boolean(processRow.completed),
+    needsReview: Boolean(processRow.isAbnormal && !processRow.isExpectedIgnore),
     overallResultLabel: processRow.overallResultLabel || (processRow.completed ? "완료" : "진행중"),
-    summaryStatusLabel: processRow.summaryStatusLabel || (processRow.isAbnormal ? "비정상" : "정상"),
+    summaryStatusLabel:
+      processRow.summaryStatusLabel ||
+      (processRow.isAbnormal && !processRow.isExpectedIgnore ? "확인 필요" : processRow.completed ? "성과 기록" : "진행중"),
     summaryText: processRow.summaryText || "-",
     statusLabel,
     statusSubLabel,
@@ -2326,7 +2341,21 @@ const buildTrackRecordListItem = (processRow = {}) => {
     buyStatusLabel: meta.buyStatusLabel || null,
     sellStatusLabel: meta.sellStatusLabel || null,
     tradeAmount: toNumber(meta.tradeAmount, 0),
+    entryAvgPrice: toNumber(meta.entryPrice || meta.avgEntryPrice, 0) || null,
+    exitAvgPrice: toNumber(meta.exitPrice || meta.avgExitPrice, 0) || null,
     realizedPnl: cycleRealizedPnl,
+    returnPct: toNumber(meta.tradeAmount, 0) > 0 ? (cycleRealizedPnl / toNumber(meta.tradeAmount, 0)) * 100 : null,
+    result:
+      !processRow.completed
+        ? "OPEN"
+        : processRow.isAbnormal && !processRow.isExpectedIgnore
+          ? "REVIEW"
+          : cycleRealizedPnl > 0
+            ? "WIN"
+            : cycleRealizedPnl < 0
+              ? "LOSS"
+              : "BREAKEVEN",
+    source: "live-ledger",
     issueCategoryLabel: processRow.issueCategoryLabel || null,
     issueSourceLabel: processRow.issueSourceLabel || null,
     issueLabel: processRow.issueLabel || null,
@@ -2350,15 +2379,30 @@ const buildTrackRecordSummary = (processRows = []) => {
     (row) => getTrackRecordCycleRealizedPnl(row) < 0
   ).length;
   const completedCount = completedRows.length;
+  const winningValues = completedRows
+    .map((row) => getTrackRecordCycleRealizedPnl(row))
+    .filter((value) => value > 0);
+  const losingValues = completedRows
+    .map((row) => getTrackRecordCycleRealizedPnl(row))
+    .filter((value) => value < 0);
 
   return {
     totalRealizedPnl,
     completedCount,
     activeCount: (processRows || []).filter((row) => !row?.completed).length,
-    abnormalCount: (processRows || []).filter((row) => row?.isAbnormal).length,
+    reviewCount: (processRows || []).filter((row) => row?.isAbnormal && !row?.isExpectedIgnore).length,
+    abnormalCount: (processRows || []).filter((row) => row?.isAbnormal && !row?.isExpectedIgnore).length,
     winCount,
     loseCount,
     winRate: completedCount > 0 ? (winCount / completedCount) * 100 : 0,
+    averageWin:
+      winningValues.length > 0
+        ? winningValues.reduce((sum, value) => sum + value, 0) / winningValues.length
+        : null,
+    averageLoss:
+      losingValues.length > 0
+        ? losingValues.reduce((sum, value) => sum + value, 0) / losingValues.length
+        : null,
   };
 };
 
@@ -2993,7 +3037,7 @@ const handlePlayAutoRoute = async (req, res, prefix) => {
     actorUserId: userId,
     targetUserId: item.uid,
     requestIp: getRequestIp(req),
-    actionCode: "TOGGLE",
+    actionCode: nextEnabled ? "USER_ON" : "USER_OFF",
     previousEnabled,
     nextEnabled: allST,
     note: nextEnabled
@@ -3008,6 +3052,7 @@ const handlePlayAutoRoute = async (req, res, prefix) => {
       closeRequiredPositionSide: closeRequirement.positionSide,
       activeReservationCount: closeRequirement.activeReservationCount,
       protectionAction: protectionPlan.action,
+      controlIntent: nextEnabled ? "USER_ON" : "USER_OFF",
     },
   };
 
@@ -3612,7 +3657,7 @@ const handleGridAutoRoute = async (req, res, prefix) => {
         actorUserId: userId,
         targetUserId: item.uid,
         requestIp: getRequestIp(req),
-        actionCode: "TOGGLE",
+        actionCode: isOn ? "USER_ON" : "USER_OFF",
         previousEnabled,
         nextEnabled,
         note: isOn ? "grid-on" : "grid-off",
@@ -3620,6 +3665,7 @@ const handleGridAutoRoute = async (req, res, prefix) => {
           legacyRegimeStatus: item.regimeStatus || null,
           longLegStatus: item.longLegStatus || null,
           shortLegStatus: item.shortLegStatus || null,
+          controlIntent: isOn ? "USER_ON" : "USER_OFF",
         },
       },
     });
@@ -3840,32 +3886,19 @@ router.get("/strategy-control-audit/recent", async (req, res) => {
 });
 
 router.post("/play/del", async (req, res) => {
-  const userId = req.decoded.userId;
-  const idList = req.body.idList;
-
-  const owned = await ensureOwnedPlayItems(
+  return sendRouteError(
     res,
-    "SP_A_PLAY_DETAIL_ITEM",
-    idList,
-    userId
+    410,
+    "Deprecated unaudited delete endpoint is disabled. Use /admin/live/del or /admin/test/del with USER_DELETE_STRATEGY confirmation."
   );
-
-  if (!owned) {
-    return;
-  }
-
-  for(let i=0;i<idList.length;i++){
-    await dbcon.DBCall(`CALL SP_A_PLAY_DEL(?)`, [
-      idList[i].id
-    ]);
-  }
-
-  return res.send(true);
 });
 
 router.post("/live/del", async (req, res) => {
   const userId = req.decoded.userId;
   const idList = Array.isArray(req.body.idList) ? req.body.idList : [];
+  if (!ensureExplicitStrategyDeleteIntent(res, req.body)) {
+    return;
+  }
 
   for (const target of idList) {
     const id = target && typeof target === "object" ? target.id : target;
@@ -3897,7 +3930,7 @@ router.post("/live/del", async (req, res) => {
         strategyCategory: "signal",
         strategyMode: "live",
         pid: id,
-        actionCode: "DELETE",
+        actionCode: "USER_DELETE_STRATEGY",
         previousEnabled: normalizeEnabledValue(item.enabled),
         nextEnabled: "N",
         note: "algorithm-deleted",
@@ -3919,6 +3952,9 @@ router.post("/live/del", async (req, res) => {
 router.post("/test/del", async (req, res) => {
   const userId = req.decoded.userId;
   const idList = Array.isArray(req.body.idList) ? req.body.idList : [];
+  if (!ensureExplicitStrategyDeleteIntent(res, req.body)) {
+    return;
+  }
 
   for (const target of idList) {
     const id = target && typeof target === "object" ? target.id : target;
@@ -3950,7 +3986,7 @@ router.post("/test/del", async (req, res) => {
         strategyCategory: "signal",
         strategyMode: "test",
         pid: id,
-        actionCode: "DELETE",
+        actionCode: "USER_DELETE_STRATEGY",
         previousEnabled: normalizeEnabledValue(item.enabled),
         nextEnabled: "N",
         note: "algorithm-deleted",
@@ -5653,6 +5689,18 @@ router.get("/runtime/binance/reconcile", async (req, res) => {
   return res.send(decorateBinanceRuntimeReconciliation(payload));
 });
 
+router.get("/live/performance-summary", async (req, res) => {
+  const userId = req.decoded.userId;
+  const payload = await userPerformanceSummary.getUserPerformanceSummary(userId);
+  return res.send(payload);
+});
+
+router.get("/account/readiness", async (req, res) => {
+  const userId = req.decoded.userId;
+  const payload = await accountReadiness.getAccountReadiness(userId);
+  return res.send(payload);
+});
+
 router.get("/runtime/account-risk/current", async (req, res) => {
   const userId = req.decoded.userId;
   const payload = await coin.getBinanceAccountRiskCurrent(userId, {
@@ -6709,18 +6757,8 @@ router.get("/runtime/binance/order-monitor/recent", async (req, res) => {
     where.push("severity = ?");
     params.push(severity);
   }
-  if (abnormalOnly) {
-    where.push(`(
-      severity IN ('high','medium')
-      OR order_status IN ('PARTIALLY_FILLED','CANCELED','EXPIRED','REJECTED')
-      OR algo_status IN ('PARTIALLY_FILLED','CANCELED','EXPIRED','REJECTED')
-      OR execution_type IN ('PARTIALLY_FILLED','CANCELED','EXPIRED')
-      OR event_code LIKE '%REJECT%'
-      OR event_code LIKE '%EXPIRED%'
-    )`);
-  }
-
-  params.push(limit);
+  const fetchLimit = abnormalOnly ? Math.min(limit * 5, 1000) : limit;
+  params.push(fetchLimit);
 
   const [rows] = await db.query(
     `SELECT
@@ -6762,7 +6800,8 @@ router.get("/runtime/binance/order-monitor/recent", async (req, res) => {
   );
 
   const withStrategyMeta = await attachStrategyMetaToBinanceEventRows(rows);
-  return res.send(decorateBinanceOrderMonitorRows(withStrategyMeta));
+  const decoratedRows = decorateBinanceOrderMonitorRows(withStrategyMeta);
+  return res.send(abnormalOnly ? decoratedRows.filter((row) => row.attentionRequired).slice(0, limit) : decoratedRows);
 });
 
 router.get("/runtime/order-process/recent", async (req, res) => {
@@ -7353,6 +7392,9 @@ router.post("/grid/test/auto", async (req, res) => {
 router.post("/grid/live/del", async (req, res) => {
   const userId = req.decoded.userId;
   const idList = Array.isArray(req.body.idList) ? req.body.idList : [];
+  if (!ensureExplicitStrategyDeleteIntent(res, req.body)) {
+    return;
+  }
 
   for (const target of idList) {
     const id = target && typeof target === "object" ? target.id : target;
@@ -7384,7 +7426,7 @@ router.post("/grid/live/del", async (req, res) => {
         strategyCategory: "grid",
         strategyMode: "live",
         pid: id,
-        actionCode: "DELETE",
+        actionCode: "USER_DELETE_STRATEGY",
         previousEnabled: normalizeEnabledValue(item.enabled),
         nextEnabled: "N",
         note: "grid-deleted",
@@ -7405,6 +7447,9 @@ router.post("/grid/live/del", async (req, res) => {
 router.post("/grid/test/del", async (req, res) => {
   const userId = req.decoded.userId;
   const idList = Array.isArray(req.body.idList) ? req.body.idList : [];
+  if (!ensureExplicitStrategyDeleteIntent(res, req.body)) {
+    return;
+  }
 
   for (const target of idList) {
     const id = target && typeof target === "object" ? target.id : target;
@@ -7436,7 +7481,7 @@ router.post("/grid/test/del", async (req, res) => {
         strategyCategory: "grid",
         strategyMode: "test",
         pid: id,
-        actionCode: "DELETE",
+        actionCode: "USER_DELETE_STRATEGY",
         previousEnabled: normalizeEnabledValue(item.enabled),
         nextEnabled: "N",
         note: "grid-deleted",
@@ -7464,6 +7509,41 @@ router.get("/msg/recent", async (req, res) => {
   ]);
 
   return res.send(decorateMsgRows(reData));
+});
+
+router.get("/msg/user-facing", async (req, res) => {
+  const userId = req.decoded.userId;
+  const limit = Math.min(Math.max(parseInt(req.query.limit || "50", 10) || 50, 1), 200);
+  const [msgRows] = await db.query(
+    `SELECT id, fun, code, msg, uid, pid, symbol, side, st, created_at AS createdAt
+       FROM msg_list
+      WHERE uid = ?
+      ORDER BY id DESC
+      LIMIT ?`,
+    [userId, limit]
+  );
+  const [runtimeRows] = await db.query(
+    `SELECT id, uid, pid, strategy_category AS strategyCategory, event_type AS eventType,
+            event_code AS eventCode, severity, symbol, side, position_side AS positionSide,
+            client_order_id AS clientOrderId, order_id AS orderId, order_status AS orderStatus,
+            quantity AS origQty, executed_qty AS executedQty, note, created_at AS createdAt
+       FROM binance_runtime_event_log
+      WHERE uid = ?
+      ORDER BY id DESC
+      LIMIT ?`,
+    [userId, limit]
+  );
+  const runtimeMessages = (runtimeRows || []).map((row) => ({
+    ...row,
+    fun: row.eventType,
+    code: row.eventCode,
+    msg: row.note || row.eventCode,
+  }));
+  const rows = messageFilter
+    .filterUserFacingMessages([...(msgRows || []), ...runtimeMessages])
+    .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
+    .slice(0, limit);
+  return res.send(rows);
 });
 
 router.get("/msg/summary", async (req, res) => {
