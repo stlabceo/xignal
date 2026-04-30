@@ -16,7 +16,7 @@ const topTabs = [
 
 const statusTabs = [
 	{ key: 'exchange', label: '거래소 공통 상태' },
-	{ key: 'orders', label: '사용자 주문 로그' },
+	{ key: 'orders', label: 'Binance 주문 관제' },
 	{ key: 'controls', label: '전략 제어 이력' },
 	{ key: 'accounts', label: '사용자 계정 연결' },
 	{ key: 'system', label: '시스템 로그' }
@@ -624,6 +624,292 @@ const SectionHeader = ({ title, description, action }) => (
 const tableCellClass = 'px-3 py-3 align-top text-sm text-slate-700';
 const tableHeadClass = 'px-3 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500';
 
+const AdminOrderMonitorPanel = ({ monitor, loading, filters, setFilters, onRefresh }) => {
+	const summary = monitor?.summary || {};
+	const currentRiskRows = Array.isArray(monitor?.currentRiskBoard) ? monitor.currentRiskBoard : [];
+	const cycleRows = Array.isArray(monitor?.orderCycles) ? monitor.orderCycles : [];
+	const protectionRows = Array.isArray(monitor?.protectionMatrix) ? monitor.protectionMatrix : [];
+	const openIssues = Array.isArray(monitor?.issueCenter?.open) ? monitor.issueCenter.open : [];
+	const resolvedIssues = Array.isArray(monitor?.issueCenter?.resolved) ? monitor.issueCenter.resolved : [];
+	const rawRows = Array.isArray(monitor?.rawBinanceOrders) ? monitor.rawBinanceOrders : [];
+	const controlRows = Array.isArray(monitor?.strategyControlHistory) ? monitor.strategyControlHistory : [];
+	const sourceRows = Array.isArray(monitor?.sourceStatus) ? monitor.sourceStatus : [];
+	const pidFilter = String(filters.pid || '').trim();
+	const symbolFilter = String(filters.symbol || '').trim().toUpperCase();
+	const categoryFilter = String(filters.category || '').trim().toLowerCase();
+	const currentOnly = String(filters.abnormalOnly || '').toUpperCase() === 'Y';
+	const filteredRiskRows = currentRiskRows.filter((row) => {
+		if (symbolFilter && !String(row.symbol || '').includes(symbolFilter)) return false;
+		if (currentOnly && row.severity !== 'CRITICAL') return false;
+		return true;
+	});
+	const filteredCycles = cycleRows.filter((row) => {
+		if (pidFilter && String(row.pid || '') !== pidFilter) return false;
+		if (symbolFilter && !String(row.symbol || '').includes(symbolFilter)) return false;
+		if (categoryFilter && String(row.category || '').toLowerCase() !== categoryFilter) return false;
+		if (currentOnly && !row.currentRisk) return false;
+		return true;
+	});
+	const filteredOpenIssues = openIssues.filter((row) => {
+		if (pidFilter && String(row.pid || '') !== pidFilter) return false;
+		if (symbolFilter && !String(row.symbol || '').includes(symbolFilter)) return false;
+		return true;
+	});
+	const filteredRawRows = rawRows.filter((row) => {
+		if (pidFilter && String(row.inferredPid || '') !== pidFilter) return false;
+		if (symbolFilter && !String(row.symbol || '').includes(symbolFilter)) return false;
+		return true;
+	});
+	const latestCycles = filteredCycles.slice(0, 40);
+	const latestRawRows = filteredRawRows.slice(0, 80);
+
+	return (
+		<div className={cardClass}>
+			<SectionHeader
+				title="Binance 주문 관제"
+				description="현재 위험, 주문 사이클, 보호주문 매트릭스, 이슈 instance, Binance 원본 주문을 분리해서 봅니다. msg_list와 QA 로그는 annotation이며 lifecycle 정본을 덮어쓰지 않습니다."
+				action={
+					<button
+						type="button"
+						onClick={onRefresh}
+						className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+					>
+						새로고침
+					</button>
+				}
+			/>
+			<div className="mt-6 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+				<input className={inputClass} placeholder="사용자 ID" value={filters.uid} onChange={(e) => setFilters((prev) => ({ ...prev, uid: e.target.value }))} />
+				<input className={inputClass} placeholder="전략 PID" value={filters.pid} onChange={(e) => setFilters((prev) => ({ ...prev, pid: e.target.value }))} />
+				<input className={inputClass} placeholder="종목" value={filters.symbol} onChange={(e) => setFilters((prev) => ({ ...prev, symbol: e.target.value }))} />
+				<select className={selectClass} value={filters.category} onChange={(e) => setFilters((prev) => ({ ...prev, category: e.target.value }))}>
+					<option value="">전체 전략 구분</option>
+					<option value="signal">알고리즘</option>
+					<option value="grid">그리드</option>
+				</select>
+				<select className={selectClass} value={filters.abnormalOnly} onChange={(e) => setFilters((prev) => ({ ...prev, abnormalOnly: e.target.value }))}>
+					<option value="N">전체 보기</option>
+					<option value="Y">현재 위험만 보기</option>
+				</select>
+				<button type="button" onClick={onRefresh} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700">
+					필터 적용
+				</button>
+			</div>
+
+			{loading ? (
+				<div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">Binance read-only evidence를 불러오는 중입니다.</div>
+			) : null}
+
+			<div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+				<SummaryCard title="현재 CRITICAL" value={summary.currentCriticalCount || 0} description="현재 open exposure/protection/local-Binance mismatch 기준입니다." />
+				<SummaryCard title="OPEN 이슈" value={summary.openIssueCount || 0} description="resolved/historical issue는 제외한 현재 issue instance 수입니다." />
+				<SummaryCard title="주문 사이클" value={summary.cycleCount || 0} description="PID별 진입-보호-청산 cycle projection 수입니다." />
+				<SummaryCard title="정상 사이클" value={summary.normalCycleCount || 0} description="OK/INFO로 종료되거나 대기 중인 정상 cycle 수입니다." />
+				<SummaryCard title="Binance 원본 주문" value={summary.rawOrderCount || 0} description="allOrders/userTrades에서 재구성한 evidence row 수입니다." />
+			</div>
+
+			<div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4">
+				<h3 className="text-base font-semibold text-slate-900">Source status</h3>
+				<div className="mt-3 flex flex-wrap gap-2">
+					{sourceRows.map((row) => (
+						<InfoBadge key={row.name} label={`${row.name}: ${row.ok ? 'OK' : 'ERROR'}`} tone={row.ok ? 'emerald' : 'rose'} />
+					))}
+				</div>
+			</div>
+
+			<div className="mt-8 space-y-8">
+				<div>
+					<h3 className="text-base font-semibold text-slate-900">1. 현재 관제</h3>
+					<p className="mt-1 text-sm text-slate-500">지금 위험한 exposure/protection mismatch만 current abnormal로 봅니다.</p>
+					<div className="mt-3 overflow-x-auto">
+						<table className="min-w-full divide-y divide-slate-200">
+							<thead>
+								<tr>
+									<th className={tableHeadClass}>UID / 종목</th>
+									<th className={tableHeadClass}>Side</th>
+									<th className={tableHeadClass}>Binance qty</th>
+									<th className={tableHeadClass}>Local openQty</th>
+									<th className={tableHeadClass}>Owner PID</th>
+									<th className={tableHeadClass}>Protection</th>
+									<th className={tableHeadClass}>Verdict</th>
+									<th className={tableHeadClass}>Next action</th>
+								</tr>
+							</thead>
+							<tbody className="divide-y divide-slate-100 bg-white">
+								{filteredRiskRows.map((row) => (
+									<tr key={`risk-${row.symbol}-${row.side}`}>
+										<td className={tableCellClass}>UID {row.uid}<div className="text-xs text-slate-500">{row.symbol}</div></td>
+										<td className={tableCellClass}>{row.side}</td>
+										<td className={tableCellClass}>{renderNumberOrDash(row.binanceQty, 8)}</td>
+										<td className={tableCellClass}>{renderNumberOrDash(row.localOpenQty, 8)}</td>
+										<td className={tableCellClass}>{row.ownerPids?.length ? row.ownerPids.join(', ') : '-'}</td>
+										<td className={tableCellClass}>{row.activeProtectionCount || 0}/{row.expectedProtectionCount || 0}</td>
+										<td className={tableCellClass}><StatusBadge label={`${row.severity} / ${row.lifecycleStatus}`} /></td>
+										<td className={tableCellClass}>{row.nextAction || '-'}</td>
+									</tr>
+								))}
+							</tbody>
+						</table>
+					</div>
+				</div>
+
+				<div>
+					<h3 className="text-base font-semibold text-slate-900">2. 주문 사이클</h3>
+					<p className="mt-1 text-sm text-slate-500">정상 cycle도 정상으로 보입니다. 과거 resolved issue는 현재 lifecycle을 덮어쓰지 않습니다.</p>
+					<div className="mt-3 overflow-x-auto">
+						<table className="min-w-full divide-y divide-slate-200">
+							<thead>
+								<tr>
+									<th className={tableHeadClass}>Cycle</th>
+									<th className={tableHeadClass}>Strategy</th>
+									<th className={tableHeadClass}>Lifecycle</th>
+									<th className={tableHeadClass}>Entry</th>
+									<th className={tableHeadClass}>Protection</th>
+									<th className={tableHeadClass}>Exit</th>
+									<th className={tableHeadClass}>PnL</th>
+									<th className={tableHeadClass}>Last event</th>
+								</tr>
+							</thead>
+							<tbody className="divide-y divide-slate-100 bg-white">
+								{latestCycles.map((row) => (
+									<tr key={row.cycleId}>
+										<td className={tableCellClass}>PID {row.pid}<div className="text-xs text-slate-500">{row.symbol} / {row.side || '-'}</div></td>
+										<td className={tableCellClass}>{row.category}<div className="text-xs text-slate-500">{row.strategy || '-'}</div></td>
+										<td className={tableCellClass}><StatusBadge label={`${row.severity} / ${row.lifecycleStatus}`} /></td>
+										<td className={tableCellClass}>{row.entryStatus || '-'}<div className="text-xs text-slate-500 break-all">{row.entryClientOrderId || row.entryOrderId || '-'}</div></td>
+										<td className={tableCellClass}>{row.protectionStatus || '-'}<div className="text-xs text-slate-500">{row.activeProtectionCount || 0}/{row.expectedProtectionCount || 0}</div></td>
+										<td className={tableCellClass}>{row.exitStatus || '-'}<div className="text-xs text-slate-500 break-all">{row.exitClientOrderId || row.exitOrderId || '-'}</div></td>
+										<td className={tableCellClass}>{renderNumberOrDash(row.realizedPnl, 6)}</td>
+										<td className={tableCellClass}>{formatDateTime(row.lastEventTime)}</td>
+									</tr>
+								))}
+							</tbody>
+						</table>
+					</div>
+				</div>
+
+				<div>
+					<h3 className="text-base font-semibold text-slate-900">3. 보호주문 매트릭스</h3>
+					<div className="mt-3 overflow-x-auto">
+						<table className="min-w-full divide-y divide-slate-200">
+							<thead>
+								<tr>
+									<th className={tableHeadClass}>PID / Symbol</th>
+									<th className={tableHeadClass}>Side</th>
+									<th className={tableHeadClass}>Local / Binance</th>
+									<th className={tableHeadClass}>Expected</th>
+									<th className={tableHeadClass}>Actual</th>
+									<th className={tableHeadClass}>Verdict</th>
+								</tr>
+							</thead>
+							<tbody className="divide-y divide-slate-100 bg-white">
+								{protectionRows.map((row) => (
+									<tr key={`protect-${row.symbol}-${row.side}`}>
+										<td className={tableCellClass}>{row.pid || '-'}<div className="text-xs text-slate-500">{row.symbol}</div></td>
+										<td className={tableCellClass}>{row.side}</td>
+										<td className={tableCellClass}>{renderNumberOrDash(row.localOpenQty, 8)} / {renderNumberOrDash(row.binanceQtyContribution, 8)}</td>
+										<td className={tableCellClass}>TP {row.expectedTP || 0} / STOP {row.expectedSTOP || 0}</td>
+										<td className={tableCellClass}>TP {row.actualTP || 0} / STOP {row.actualSTOP || 0}</td>
+										<td className={tableCellClass}><StatusBadge label={`${row.severity} / ${row.verdict}`} /></td>
+									</tr>
+								))}
+							</tbody>
+						</table>
+					</div>
+				</div>
+
+				<div>
+					<h3 className="text-base font-semibold text-slate-900">4. 이슈 센터</h3>
+					<p className="mt-1 text-sm text-slate-500">기본은 OPEN issue만입니다. resolved issue는 historical trace로만 남고 current abnormal count에 들어가지 않습니다.</p>
+					<div className="mt-3 overflow-x-auto">
+						<table className="min-w-full divide-y divide-slate-200">
+							<thead>
+								<tr>
+									<th className={tableHeadClass}>Issue</th>
+									<th className={tableHeadClass}>Evidence</th>
+									<th className={tableHeadClass}>Next action</th>
+								</tr>
+							</thead>
+							<tbody className="divide-y divide-slate-100 bg-white">
+								{filteredOpenIssues.length === 0 ? (
+									<tr><td colSpan={3} className={`${tableCellClass} text-center text-emerald-700`}>현재 OPEN issue가 없습니다.</td></tr>
+								) : filteredOpenIssues.map((row) => (
+									<tr key={row.issueId}>
+										<td className={tableCellClass}><StatusBadge label={`${row.severity} / ${row.issueType}`} /><div className="mt-1 text-xs text-slate-500">PID {row.pid || '-'} / {row.symbol || '-'}</div></td>
+										<td className={tableCellClass}>{row.evidence || '-'}</td>
+										<td className={tableCellClass}>{row.nextAction || '-'}</td>
+									</tr>
+								))}
+							</tbody>
+						</table>
+					</div>
+					<div className="mt-3 text-xs text-slate-500">Resolved/historical issue: {resolvedIssues.length}건. 접힌 이력이며 current abnormal에는 포함하지 않습니다.</div>
+				</div>
+
+				<div>
+					<h3 className="text-base font-semibold text-slate-900">5. Binance 원본 주문</h3>
+					<div className="mt-3 overflow-x-auto">
+						<table className="min-w-full divide-y divide-slate-200">
+							<thead>
+								<tr>
+									<th className={tableHeadClass}>Time / Symbol</th>
+									<th className={tableHeadClass}>Order</th>
+									<th className={tableHeadClass}>Type / Side</th>
+									<th className={tableHeadClass}>Qty</th>
+									<th className={tableHeadClass}>Status</th>
+									<th className={tableHeadClass}>Trade IDs</th>
+									<th className={tableHeadClass}>Local match</th>
+								</tr>
+							</thead>
+							<tbody className="divide-y divide-slate-100 bg-white">
+								{latestRawRows.map((row) => (
+									<tr key={`raw-${row.orderId}-${row.clientOrderId}`}>
+										<td className={tableCellClass}>{formatDateTime(row.time)}<div className="text-xs text-slate-500">{row.symbol}</div></td>
+										<td className={tableCellClass}>{row.orderId}<div className="break-all text-xs text-slate-500">{row.clientOrderId}</div></td>
+										<td className={tableCellClass}>{row.type || row.origType || '-'}<div className="text-xs text-slate-500">{row.side} / {row.positionSide || '-'}</div></td>
+										<td className={tableCellClass}>{renderNumberOrDash(row.executedQty, 8)} / {renderNumberOrDash(row.origQty, 8)}</td>
+										<td className={tableCellClass}><StatusBadge label={`${row.status || '-'} / ${row.inferredIntent || '-'}`} /></td>
+										<td className={tableCellClass}>{row.tradeIds?.length ? row.tradeIds.join(', ') : '-'}</td>
+										<td className={tableCellClass}>ledger {row.localLedgerMatch ? 'Y' : 'N'} / reservation {row.localReservationMatch ? 'Y' : 'N'}</td>
+									</tr>
+								))}
+							</tbody>
+						</table>
+					</div>
+				</div>
+
+				<div>
+					<h3 className="text-base font-semibold text-slate-900">6. 전략 제어 이력</h3>
+					<div className="mt-3 overflow-x-auto">
+						<table className="min-w-full divide-y divide-slate-200">
+							<thead>
+								<tr>
+									<th className={tableHeadClass}>Time</th>
+									<th className={tableHeadClass}>UID/PID</th>
+									<th className={tableHeadClass}>Action</th>
+									<th className={tableHeadClass}>Enabled</th>
+									<th className={tableHeadClass}>Note</th>
+								</tr>
+							</thead>
+							<tbody className="divide-y divide-slate-100 bg-white">
+								{controlRows.slice(0, 40).map((row) => (
+									<tr key={`control-${row.id}`}>
+										<td className={tableCellClass}>{formatDateTime(row.createdAt)}</td>
+										<td className={tableCellClass}>UID {row.uid}<div className="text-xs text-slate-500">PID {row.pid || '-'}</div></td>
+										<td className={tableCellClass}>{row.actionCode || '-'}</td>
+										<td className={tableCellClass}>{row.previousEnabled || '-'} → {row.nextEnabled || '-'}</td>
+										<td className={tableCellClass}>{row.note || '-'}</td>
+									</tr>
+								))}
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</div>
+		</div>
+	);
+};
+
 const AdminConsole = () => {
 	const { userInfo } = useAuthStore();
 	const canAccessAdmin = Number(userInfo?.grade) <= 0;
@@ -638,6 +924,8 @@ const AdminConsole = () => {
 	const [selectedOpsUid, setSelectedOpsUid] = useState(null);
 	const [selectedOpsUser, setSelectedOpsUser] = useState(null);
 	const [orderProcesses, setOrderProcesses] = useState([]);
+	const [orderMonitor, setOrderMonitor] = useState(null);
+	const [orderMonitorLoading, setOrderMonitorLoading] = useState(false);
 	const [selectedOrderProcessId, setSelectedOrderProcessId] = useState(null);
 	const [selectedOrderProcessDetail, setSelectedOrderProcessDetail] = useState(null);
 	const [orderProcessDetailLoading, setOrderProcessDetailLoading] = useState(false);
@@ -706,6 +994,23 @@ const AdminConsole = () => {
 		}
 	};
 
+	const loadOrderMonitor = async (nextFilters = orderFilters) => {
+		setOrderMonitorLoading(true);
+		const response = await authRequest(auth.adminOrderMonitorOverview.bind(auth), {
+			uid: nextFilters.uid || selectedOpsUid || 147,
+			pid: nextFilters.pid || undefined,
+			category: nextFilters.category || undefined,
+			symbols: nextFilters.symbol || undefined,
+			rawLimit: 120
+		});
+		setOrderMonitorLoading(false);
+		if (!response || response.errors) {
+			setMessage(response?.errors?.[0]?.msg || 'Binance 주문 관제 데이터를 불러오지 못했습니다.');
+			return;
+		}
+		setOrderMonitor(response);
+	};
+
 	const loadOrderProcessDetail = async (id) => {
 		if (!id) {
 			setSelectedOrderProcessId(null);
@@ -746,12 +1051,17 @@ const AdminConsole = () => {
 	};
 
 	const loadStatusDashboard = async () => {
-		const [priceRes, usersRes, orderRes, controlRes, systemRes] = await Promise.all([
+		const [priceRes, usersRes, orderRes, monitorRes, controlRes, systemRes] = await Promise.all([
 			authRequest(auth.sharedPrices.bind(auth)),
 			authRequest(auth.runtimeOpsUsersOverview.bind(auth), { hours: 24, limit: 100 }),
 			authRequest(auth.adminOrderProcessRecent.bind(auth), {
 				limit: 120,
 				abnormalOnly: orderFilters.abnormalOnly
+			}),
+			authRequest(auth.adminOrderMonitorOverview.bind(auth), {
+				uid: orderFilters.uid || 147,
+				symbols: orderFilters.symbol || undefined,
+				rawLimit: 120
 			}),
 			authRequest(auth.adminStrategyControlAuditRecent.bind(auth), {
 				limit: 120
@@ -772,6 +1082,7 @@ const AdminConsole = () => {
 
 		setSharedPrices(priceRes && !priceRes.errors ? priceRes : {});
 		setOpsUsers(nextUsers);
+		setOrderMonitor(monitorRes && !monitorRes.errors ? monitorRes : null);
 		const nextOrderRows = Array.isArray(orderRes) ? orderRes : [];
 		setOrderProcesses(nextOrderRows);
 		if (selectedOrderProcessId && !nextOrderRows.some((item) => item.id === selectedOrderProcessId)) {
@@ -1079,9 +1390,9 @@ const AdminConsole = () => {
 							description="WARN/CRITICAL 가격 피드 지연 종목 수입니다. INFO expected-ignore는 제외합니다."
 						/>
 						<SummaryCard
-							title="주문 프로세스"
-							value={abnormalOrderProcesses.length}
-							description="정본 lifecycle 기준 CRITICAL/확인 필요 주문 흐름 수입니다."
+							title="주문 현재 위험"
+							value={orderMonitor?.summary?.currentCriticalCount ?? abnormalOrderProcesses.length}
+							description="Binance position/order/protection 기준 current CRITICAL 수입니다. resolved 이력은 제외합니다."
 						/>
 						<SummaryCard
 							title="최근 제어 이벤트"
@@ -1157,6 +1468,16 @@ const AdminConsole = () => {
 					) : null}
 
 					{activeStatusTab === 'orders' ? (
+						<AdminOrderMonitorPanel
+							monitor={orderMonitor}
+							loading={orderMonitorLoading}
+							filters={orderFilters}
+							setFilters={setOrderFilters}
+							onRefresh={() => loadOrderMonitor(orderFilters)}
+						/>
+					) : null}
+
+					{activeStatusTab === 'orders_legacy' ? (
 						<div className={cardClass}>
 							<SectionHeader
 								title="사용자 주문 로그"

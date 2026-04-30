@@ -153,6 +153,16 @@ export const auth = {
 				callback(res.response?.data || []);
 			});
 	},
+	adminOrderMonitorOverview(params, callback) {
+		api
+			.get('/admin/runtime/binance/order-monitor/overview', { params })
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data || false);
+			});
+	},
 	adminOrderProcessRecent(params, callback) {
 		api
 			.get('/admin/runtime/order-process/recent', { params })

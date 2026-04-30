@@ -27,6 +27,7 @@ const userStrategyRowSummary = require("../user-strategy-row-summary");
 const messageFilter = require("../message-filter");
 const accountReadiness = require("../account-readiness");
 const binanceWriteGuard = require("../binance-write-guard");
+const adminOrderMonitor = require("../admin-order-monitor");
 
 const dt = require("../data");
 const dayjs = require("dayjs");
@@ -828,6 +829,17 @@ const loadOpsAccessMember = async (userId) => {
     return false;
   }
 
+  return member;
+};
+
+const loadAdminConsoleAccessMember = async (userId) => {
+  const member = await dbcon.DBOneCall(`CALL SP_A_MEMBER_GET(?)`, [userId]);
+  if (!member) {
+    return null;
+  }
+  if (Number(member.grade) > 0) {
+    return false;
+  }
   return member;
 };
 
@@ -2333,14 +2345,19 @@ const buildTrackRecordDateRange = ({ sDate = "", eDate = "" } = {}) => ({
 });
 
 const matchesTrackRecordCompletion = (processRow, statusFilter) => {
+  const needsReview = Boolean(processRow?.isAbnormal && !processRow?.isExpectedIgnore);
   if (statusFilter === "all") {
     return true;
   }
   if (statusFilter === "review") {
-    return Boolean(processRow?.isAbnormal && !processRow?.isExpectedIgnore);
+    return needsReview;
   }
 
-  return statusFilter === "active" ? !processRow?.completed : Boolean(processRow?.completed);
+  if (statusFilter === "active") {
+    return !processRow?.completed && !needsReview;
+  }
+
+  return Boolean(processRow?.completed) && !needsReview;
 };
 
 const getTrackRecordCycleRealizedPnl = (processRow = {}) => {
@@ -2437,29 +2454,33 @@ const buildTrackRecordListItem = (processRow = {}) => {
 };
 
 const buildTrackRecordSummary = (processRows = []) => {
-  const completedRows = (processRows || []).filter((row) => row?.completed);
-  const totalRealizedPnl = completedRows.reduce(
+  const performanceRows = (processRows || []).filter(
+    (row) => row?.completed && !(row?.isAbnormal && !row?.isExpectedIgnore)
+  );
+  const totalRealizedPnl = performanceRows.reduce(
     (sum, row) => sum + getTrackRecordCycleRealizedPnl(row),
     0
   );
-  const winCount = completedRows.filter(
+  const winCount = performanceRows.filter(
     (row) => getTrackRecordCycleRealizedPnl(row) > 0
   ).length;
-  const loseCount = completedRows.filter(
+  const loseCount = performanceRows.filter(
     (row) => getTrackRecordCycleRealizedPnl(row) < 0
   ).length;
-  const completedCount = completedRows.length;
-  const winningValues = completedRows
+  const completedCount = performanceRows.length;
+  const winningValues = performanceRows
     .map((row) => getTrackRecordCycleRealizedPnl(row))
     .filter((value) => value > 0);
-  const losingValues = completedRows
+  const losingValues = performanceRows
     .map((row) => getTrackRecordCycleRealizedPnl(row))
     .filter((value) => value < 0);
 
   return {
     totalRealizedPnl,
     completedCount,
-    activeCount: (processRows || []).filter((row) => !row?.completed).length,
+    activeCount: (processRows || []).filter(
+      (row) => !row?.completed && !(row?.isAbnormal && !row?.isExpectedIgnore)
+    ).length,
     reviewCount: (processRows || []).filter((row) => row?.isAbnormal && !row?.isExpectedIgnore).length,
     abnormalCount: (processRows || []).filter((row) => row?.isAbnormal && !row?.isExpectedIgnore).length,
     winCount,
@@ -6905,6 +6926,34 @@ router.get("/runtime/binance/order-monitor/recent", async (req, res) => {
   return res.send(abnormalOnly ? decoratedRows.filter((row) => row.attentionRequired).slice(0, limit) : decoratedRows);
 });
 
+router.get("/runtime/binance/order-monitor/overview", async (req, res) => {
+  try {
+    const userId = req.decoded.userId;
+    const accessMember = await loadAdminConsoleAccessMember(userId);
+    if (accessMember === null) {
+      return sendRouteError(res, 404, "회원 정보를 찾을 수 없습니다.");
+    }
+    if (accessMember === false) {
+      return sendRouteError(res, 403, "관리자 권한이 없습니다.");
+    }
+
+    const targetUid = parseInt(req.query.uid || userId || "0", 10);
+    const rawLimit = Math.min(Math.max(parseInt(req.query.rawLimit || "120", 10) || 120, 1), 300);
+    const symbols = String(req.query.symbols || "")
+      .split(",")
+      .map((item) => item.trim().toUpperCase())
+      .filter(Boolean);
+    const payload = await adminOrderMonitor.buildAdminOrderMonitor(targetUid, {
+      rawLimit,
+      symbols,
+    });
+    return res.send(payload);
+  } catch (error) {
+    console.error("[ADMIN_ORDER_MONITOR_OVERVIEW]", error);
+    return sendRouteError(res, 500, error?.message || "관리자 주문 관제 데이터를 불러오지 못했습니다.");
+  }
+});
+
 router.get("/runtime/order-process/recent", async (req, res) => {
   try {
     const userId = req.decoded.userId;
@@ -7960,7 +8009,7 @@ router.post("/manage/users/delete", async (req, res) => {
 
 router.get("/manage/revenue/summary", async (req, res) => {
   const userId = req.decoded.userId;
-  const accessMember = await loadOpsAccessMember(userId);
+  const accessMember = await loadAdminConsoleAccessMember(userId);
   if (accessMember === null) {
     return sendRouteError(res, 404, "회원 정보를 찾을 수 없습니다.");
   }
