@@ -183,6 +183,26 @@ export const auth = {
 				callback(res.response?.data || false);
 			});
 	},
+	adminStatsGridRankings(params, callback) {
+		api
+			.get('/admin/stats/grid/rankings', { params })
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data || false);
+			});
+	},
+	adminStatsGridLatest(params, callback) {
+		api
+			.get('/admin/stats/grid/latest', { params })
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data || false);
+			});
+	},
 	adminStrategyControlAuditRecent(params, callback) {
 		api
 			.get('/admin/strategy-control-audit/recent', { params })

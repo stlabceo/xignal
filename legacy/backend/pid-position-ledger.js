@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const db = require("./database/connect/config");
+const { parsePlatformClientOrderId } = require("./order-client-id");
 
 const normalizeSymbol = (symbol) =>
   String(symbol || "")
@@ -59,6 +60,96 @@ const normalizeSourceId = (value) => {
   }
   const normalized = String(value).trim();
   return normalized ? normalized : null;
+};
+
+const buildReservationClientOrderScope = ({
+  clientOrderId,
+  uid = null,
+  pid = null,
+  strategyCategory = null,
+  positionSide = null,
+  stage = "RESERVATION_CLIENT_ORDER_SCOPE",
+} = {}) => {
+  const normalizedClientOrderId = normalizeSourceId(clientOrderId);
+  const parsed = parsePlatformClientOrderId(normalizedClientOrderId);
+  const expectedUid = Number(uid || 0);
+  const expectedPid = Number(pid || 0);
+
+  if (!normalizedClientOrderId) {
+    return { ok: false, clauses: [], params: [], parsed, normalizedClientOrderId };
+  }
+
+  if (parsed && expectedUid > 0 && parsed.uid !== expectedUid) {
+    logLedgerStateChange("CLIENT_ORDER_UID_MISMATCH_BLOCKED", {
+      stage,
+      clientOrderId: normalizedClientOrderId,
+      parsedUid: parsed.uid,
+      expectedUid,
+      parsedPid: parsed.pid,
+      expectedPid: expectedPid || null,
+    });
+    return { ok: false, clauses: [], params: [], parsed, normalizedClientOrderId };
+  }
+
+  if (parsed && expectedPid > 0 && parsed.pid !== expectedPid) {
+    logLedgerStateChange("CLIENT_ORDER_PID_MISMATCH_BLOCKED", {
+      stage,
+      clientOrderId: normalizedClientOrderId,
+      parsedUid: parsed.uid,
+      expectedUid: expectedUid || null,
+      parsedPid: parsed.pid,
+      expectedPid,
+    });
+    return { ok: false, clauses: [], params: [], parsed, normalizedClientOrderId };
+  }
+
+  const clauses = ["clientOrderId = ?"];
+  const params = [normalizedClientOrderId];
+  const scopedUid = expectedUid > 0 ? expectedUid : parsed?.uid;
+  const scopedPid = expectedPid > 0 ? expectedPid : parsed?.pid;
+  const normalizedCategory = normalizeStrategyCategory(strategyCategory);
+  const normalizedPositionSide = normalizePositionSide(positionSide);
+
+  if (scopedUid > 0) {
+    clauses.push("uid = ?");
+    params.push(scopedUid);
+  }
+  if (scopedPid > 0) {
+    clauses.push("pid = ?");
+    params.push(scopedPid);
+  }
+  if (normalizedCategory) {
+    clauses.push("strategyCategory = ?");
+    params.push(normalizedCategory);
+  }
+  if (normalizedPositionSide) {
+    clauses.push("positionSide = ?");
+    params.push(normalizedPositionSide);
+  }
+
+  if (!parsed && !(scopedUid > 0)) {
+    logLedgerStateChange("RESERVATION_CLIENT_ORDER_SCOPE_UNKNOWN", {
+      stage,
+      clientOrderId: normalizedClientOrderId,
+    });
+    return { ok: false, clauses: [], params: [], parsed, normalizedClientOrderId };
+  }
+
+  if (parsed || scopedUid > 0 || scopedPid > 0) {
+    logLedgerStateChange("RESERVATION_UID_SCOPE_ENFORCED", {
+      stage,
+      clientOrderId: normalizedClientOrderId,
+      uid: scopedUid || null,
+      pid: scopedPid || null,
+      strategyCategory: normalizedCategory || null,
+      positionSide: normalizedPositionSide || null,
+      parsed: parsed
+        ? { prefix: parsed.prefix, uid: parsed.uid, pid: parsed.pid, leg: parsed.leg || null }
+        : null,
+    });
+  }
+
+  return { ok: true, clauses, params, parsed, normalizedClientOrderId };
 };
 
 const normalizeTradeId = (value) => {
@@ -914,15 +1005,34 @@ const applyExitFill = async ({
       const baseOpenCost = toNumber(current?.openCost);
       let sourceReservation = null;
       if (sourceClientOrderId) {
-        const [reservationRows] = await connection.query(
-          `SELECT *
-             FROM live_pid_exit_reservation
-            WHERE clientOrderId = ?
-            LIMIT 1
-            FOR UPDATE`,
-          [sourceClientOrderId]
-        );
-        sourceReservation = reservationRows?.[0] || null;
+        const reservationScope = buildReservationClientOrderScope({
+          clientOrderId: sourceClientOrderId,
+          uid,
+          pid,
+          strategyCategory: normalizedCategory,
+          positionSide: normalizedPositionSide,
+          stage: "APPLY_EXIT_FILL_SOURCE_RESERVATION_LOOKUP",
+        });
+        if (!reservationScope.ok) {
+          logLedgerStateChange("RESERVATION_CLIENT_ORDER_PARSE_FAILED", {
+            stage: "APPLY_EXIT_FILL_SOURCE_RESERVATION_LOOKUP",
+            uid,
+            pid,
+            strategyCategory: normalizedCategory,
+            positionSide: normalizedPositionSide,
+            sourceClientOrderId: normalizeSourceId(sourceClientOrderId),
+          });
+        } else {
+          const [reservationRows] = await connection.query(
+            `SELECT *
+               FROM live_pid_exit_reservation
+              WHERE ${reservationScope.clauses.join(" AND ")}
+              LIMIT 1
+              FOR UPDATE`,
+            reservationScope.params
+          );
+          sourceReservation = reservationRows?.[0] || null;
+        }
       }
       const overfillTolerance = 1e-9;
       if (requestedQty > baseOpenQty + overfillTolerance) {
@@ -1053,7 +1163,13 @@ const applyExitFill = async ({
           connection,
           sourceClientOrderId,
           appliedQty,
-          sourceOrderId
+          sourceOrderId,
+          {
+            uid,
+            pid,
+            strategyCategory: normalizedCategory,
+            positionSide: normalizedPositionSide,
+          }
         );
       }
 
@@ -1086,18 +1202,42 @@ const applyExitFill = async ({
   );
 };
 
-const applyReservationFill = async (connection, clientOrderId, fillQty, actualOrderId = null) => {
+const applyReservationFill = async (
+  connection,
+  clientOrderId,
+  fillQty,
+  actualOrderId = null,
+  scope = {}
+) => {
   if (!connection || !clientOrderId || !(toNumber(fillQty) > 0)) {
+    return false;
+  }
+
+  const reservationScope = buildReservationClientOrderScope({
+    clientOrderId,
+    uid: scope.uid,
+    pid: scope.pid,
+    strategyCategory: scope.strategyCategory,
+    positionSide: scope.positionSide,
+    stage: "APPLY_RESERVATION_FILL_LOOKUP",
+  });
+  if (!reservationScope.ok) {
+    logLedgerStateChange("RESERVATION_CLIENT_ORDER_PARSE_FAILED", {
+      stage: "APPLY_RESERVATION_FILL_LOOKUP",
+      clientOrderId: normalizeSourceId(clientOrderId),
+      uid: scope.uid || null,
+      pid: scope.pid || null,
+    });
     return false;
   }
 
   const [rows] = await connection.query(
     `SELECT *
        FROM live_pid_exit_reservation
-      WHERE clientOrderId = ?
+      WHERE ${reservationScope.clauses.join(" AND ")}
       LIMIT 1
       FOR UPDATE`,
-    [clientOrderId]
+    reservationScope.params
   );
 
   const current = rows?.[0];
@@ -1282,7 +1422,7 @@ const replaceExitReservations = async ({
   );
 };
 
-const markReservationsCanceled = async (clientOrderIds = []) => {
+const markReservationsCanceled = async (clientOrderIds = [], scope = {}) => {
   const normalizedIds = []
     .concat(clientOrderIds || [])
     .map((item) => String(item || "").trim())
@@ -1292,31 +1432,71 @@ const markReservationsCanceled = async (clientOrderIds = []) => {
     return 0;
   }
 
-  const [result] = await db.query(
-    `UPDATE live_pid_exit_reservation
-        SET status = 'CANCELED', updatedAt = CURRENT_TIMESTAMP
-      WHERE clientOrderId IN (${normalizedIds.map(() => "?").join(",")})
-        AND status IN ('ACTIVE', 'PARTIAL', 'CANCEL_REQUESTED', 'CANCEL_PENDING', 'UNKNOWN_CANCEL_STATE')`,
-    normalizedIds
-  );
+  let affectedRows = 0;
+  for (const clientOrderId of normalizedIds) {
+    const reservationScope = buildReservationClientOrderScope({
+      clientOrderId,
+      uid: scope.uid,
+      pid: scope.pid,
+      strategyCategory: scope.strategyCategory,
+      positionSide: scope.positionSide,
+      stage: "MARK_RESERVATIONS_CANCELED",
+    });
+    if (!reservationScope.ok) {
+      logLedgerStateChange("RESERVATION_CLIENT_ORDER_PARSE_FAILED", {
+        stage: "MARK_RESERVATIONS_CANCELED",
+        clientOrderId,
+        uid: scope.uid || null,
+        pid: scope.pid || null,
+      });
+      continue;
+    }
 
-  if (Number(result?.affectedRows || 0) > 0) {
+    const [result] = await db.query(
+      `UPDATE live_pid_exit_reservation
+          SET status = 'CANCELED', updatedAt = CURRENT_TIMESTAMP
+        WHERE ${reservationScope.clauses.join(" AND ")}
+          AND status IN ('ACTIVE', 'PARTIAL', 'CANCEL_REQUESTED', 'CANCEL_PENDING', 'UNKNOWN_CANCEL_STATE')`,
+      reservationScope.params
+    );
+    affectedRows += Number(result?.affectedRows || 0);
+  }
+
+  if (affectedRows > 0) {
     logLedgerStateChange("RESERVATION_CANCEL_CONFIRMED", {
       clientOrderIds: normalizedIds,
-      affectedRows: Number(result?.affectedRows || 0),
+      affectedRows,
     });
     logLedgerStateChange("RESERVATIONS_CANCELED", {
       clientOrderIds: normalizedIds,
-      affectedRows: Number(result?.affectedRows || 0),
+      affectedRows,
     });
   }
 
-  return Number(result?.affectedRows || 0);
+  return affectedRows;
 };
 
-const bindReservationActualOrderId = async (clientOrderId, actualOrderId) => {
+const bindReservationActualOrderId = async (clientOrderId, actualOrderId, scope = {}) => {
   const normalizedClientOrderId = String(clientOrderId || "").trim();
   if (!normalizedClientOrderId || actualOrderId == null || actualOrderId === "") {
+    return 0;
+  }
+
+  const reservationScope = buildReservationClientOrderScope({
+    clientOrderId: normalizedClientOrderId,
+    uid: scope.uid,
+    pid: scope.pid,
+    strategyCategory: scope.strategyCategory,
+    positionSide: scope.positionSide,
+    stage: "BIND_RESERVATION_ACTUAL_ORDER_ID",
+  });
+  if (!reservationScope.ok) {
+    logLedgerStateChange("RESERVATION_CLIENT_ORDER_PARSE_FAILED", {
+      stage: "BIND_RESERVATION_ACTUAL_ORDER_ID",
+      clientOrderId: normalizedClientOrderId,
+      uid: scope.uid || null,
+      pid: scope.pid || null,
+    });
     return 0;
   }
 
@@ -1324,9 +1504,9 @@ const bindReservationActualOrderId = async (clientOrderId, actualOrderId) => {
   const [result] = await db.query(
     `UPDATE live_pid_exit_reservation
         SET actualOrderId = ?, updatedAt = CURRENT_TIMESTAMP
-      WHERE clientOrderId = ?
+      WHERE ${reservationScope.clauses.join(" AND ")}
         AND (actualOrderId IS NULL OR actualOrderId <> ?)`,
-    [normalizedActualOrderId, normalizedClientOrderId, normalizedActualOrderId]
+    [normalizedActualOrderId, ...reservationScope.params, normalizedActualOrderId]
   );
 
   if (Number(result?.affectedRows || 0) > 0) {
@@ -1691,6 +1871,7 @@ module.exports = {
   normalizeSymbol,
   normalizePositionSide,
   normalizeStrategyCategory,
+  parsePlatformClientOrderId,
   buildFillIdentity,
   buildFillIdentityKey,
   applyEntryFill,

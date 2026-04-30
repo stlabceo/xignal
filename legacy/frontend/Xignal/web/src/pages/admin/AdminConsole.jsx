@@ -17,6 +17,7 @@ const topTabs = [
 const statusTabs = [
 	{ key: 'exchange', label: '거래소 공통 상태' },
 	{ key: 'orders', label: 'Binance 주문 관제' },
+	{ key: 'stats', label: '전략 통계 데이터' },
 	{ key: 'controls', label: '전략 제어 이력' },
 	{ key: 'accounts', label: '사용자 계정 연결' },
 	{ key: 'system', label: '시스템 로그' }
@@ -910,6 +911,101 @@ const AdminOrderMonitorPanel = ({ monitor, loading, filters, setFilters, onRefre
 	);
 };
 
+const AdminStatsPreviewPanel = ({ statsPreview, onRefresh }) => {
+	const rankings = Array.isArray(statsPreview?.rankings?.rows) ? statsPreview.rankings.rows : [];
+	const latest = Array.isArray(statsPreview?.latest?.rows) ? statsPreview.latest.rows : [];
+	const hasData = rankings.length > 0 || latest.length > 0;
+
+	return (
+		<div className={cardClass}>
+			<SectionHeader
+				title="전략 통계 데이터"
+				description="TradingView grid stats ingestion과 landing ranking cache 상태를 확인합니다. 주문 dispatch와 분리된 stats-only 데이터입니다."
+				action={
+					<button type="button" onClick={onRefresh} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700">
+						새로고침
+					</button>
+				}
+			/>
+
+			<div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+				<SummaryCard title="1M 랭킹" value={rankings.length} description="landing_strategy_rank_cache 기준입니다." />
+				<SummaryCard title="최근 PUMP 1H" value={latest.length} description="strategy_stats_bestcase 기준입니다." />
+				<SummaryCard title="Source" value={rankings[0]?.source || latest[0]?.source || '-'} description="현재 수신된 stats source입니다." />
+				<SummaryCard title="Updated" value={formatAgo(rankings[0]?.updatedAt || latest[0]?.calculatedAt)} description="마지막 stats 갱신 경과입니다." />
+			</div>
+
+			{!hasData ? (
+				<div className="mt-6 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm text-slate-500">
+					아직 수신된 전략 통계 데이터가 없습니다. 1W처럼 Pine contract에 없는 기간은 표시하지 않고, 데이터가 들어오기 전까지 0으로 속이지 않습니다.
+				</div>
+			) : null}
+
+			<div className="mt-6 grid gap-6 xl:grid-cols-2">
+				<div>
+					<h3 className="text-base font-semibold text-slate-900">Grid ranking preview</h3>
+					<div className="mt-3 overflow-x-auto">
+						<table className="min-w-full divide-y divide-slate-200">
+							<thead>
+								<tr>
+									<th className={tableHeadClass}>Symbol</th>
+									<th className={tableHeadClass}>Period</th>
+									<th className={tableHeadClass}>TP</th>
+									<th className={tableHeadClass}>Net PnL</th>
+									<th className={tableHeadClass}>Win</th>
+									<th className={tableHeadClass}>Updated</th>
+								</tr>
+							</thead>
+							<tbody className="divide-y divide-slate-100 bg-white">
+								{rankings.slice(0, 12).map((row) => (
+									<tr key={`rank-${row.periodKey}-${row.strategyCode}-${row.symbol}-${row.timeframe}`}>
+										<td className={tableCellClass}>{row.symbol}<div className="text-xs text-slate-500">{row.timeframe}</div></td>
+										<td className={tableCellClass}>{row.periodKey}</td>
+										<td className={tableCellClass}>{renderNumberOrDash(row.tpPct ?? row.bestTp ?? row.tp, 2, '%')}</td>
+										<td className={tableCellClass}>{renderNumberOrDash(row.netProfit, 4)}</td>
+										<td className={tableCellClass}>{renderNumberOrDash(row.winRate, 2, '%')}</td>
+										<td className={tableCellClass}>{formatDateTime(row.updatedAt)}</td>
+									</tr>
+								))}
+							</tbody>
+						</table>
+					</div>
+				</div>
+
+				<div>
+					<h3 className="text-base font-semibold text-slate-900">Latest bestcase preview</h3>
+					<div className="mt-3 overflow-x-auto">
+						<table className="min-w-full divide-y divide-slate-200">
+							<thead>
+								<tr>
+									<th className={tableHeadClass}>Symbol</th>
+									<th className={tableHeadClass}>Period</th>
+									<th className={tableHeadClass}>Best TP</th>
+									<th className={tableHeadClass}>Net PnL</th>
+									<th className={tableHeadClass}>Win</th>
+									<th className={tableHeadClass}>Source</th>
+								</tr>
+							</thead>
+							<tbody className="divide-y divide-slate-100 bg-white">
+								{latest.slice(0, 10).map((row) => (
+									<tr key={`latest-${row.rawId}-${row.periodKey}`}>
+										<td className={tableCellClass}>{row.symbol}<div className="text-xs text-slate-500">{row.timeframe}</div></td>
+										<td className={tableCellClass}>{row.periodKey}</td>
+										<td className={tableCellClass}>{renderNumberOrDash(row.bestTp, 2, '%')}</td>
+										<td className={tableCellClass}>{renderNumberOrDash(row.bestNetProfit, 4)}</td>
+										<td className={tableCellClass}>{renderNumberOrDash(row.bestWinRate, 2, '%')}</td>
+										<td className={tableCellClass}>{row.source || '-'}</td>
+									</tr>
+								))}
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</div>
+		</div>
+	);
+};
+
 const AdminConsole = () => {
 	const { userInfo } = useAuthStore();
 	const canAccessAdmin = Number(userInfo?.grade) <= 0;
@@ -975,6 +1071,7 @@ const AdminConsole = () => {
 		referralShareRate: '0.3'
 	});
 	const [revenueSummary, setRevenueSummary] = useState(null);
+	const [statsPreview, setStatsPreview] = useState({ rankings: null, latest: null });
 
 	const loadOrderProcesses = async (nextFilters = orderFilters) => {
 		const response = await authRequest(auth.adminOrderProcessRecent.bind(auth), {
@@ -1009,6 +1106,17 @@ const AdminConsole = () => {
 			return;
 		}
 		setOrderMonitor(response);
+	};
+
+	const loadStatsPreview = async () => {
+		const [rankings, latest] = await Promise.all([
+			authRequest(auth.adminStatsGridRankings.bind(auth), { period: '1M' }),
+			authRequest(auth.adminStatsGridLatest.bind(auth), { symbol: 'PUMPUSDT', timeframe: '1H' })
+		]);
+		setStatsPreview({
+			rankings: rankings && !rankings.errors ? rankings : null,
+			latest: latest && !latest.errors ? latest : null
+		});
 	};
 
 	const loadOrderProcessDetail = async (id) => {
@@ -1051,7 +1159,7 @@ const AdminConsole = () => {
 	};
 
 	const loadStatusDashboard = async () => {
-		const [priceRes, usersRes, orderRes, monitorRes, controlRes, systemRes] = await Promise.all([
+		const [priceRes, usersRes, orderRes, monitorRes, controlRes, systemRes, statsRankingsRes, statsLatestRes] = await Promise.all([
 			authRequest(auth.sharedPrices.bind(auth)),
 			authRequest(auth.runtimeOpsUsersOverview.bind(auth), { hours: 24, limit: 100 }),
 			authRequest(auth.adminOrderProcessRecent.bind(auth), {
@@ -1069,7 +1177,9 @@ const AdminConsole = () => {
 			authRequest(auth.adminSystemLogRecent.bind(auth), {
 				limit: 120,
 				abnormalOnly: systemFilters.abnormalOnly
-			})
+			}),
+			authRequest(auth.adminStatsGridRankings.bind(auth), { period: '1M' }),
+			authRequest(auth.adminStatsGridLatest.bind(auth), { symbol: 'PUMPUSDT', timeframe: '1H' })
 		]);
 
 		const nextUsers = Array.isArray(usersRes?.item)
@@ -1091,6 +1201,10 @@ const AdminConsole = () => {
 		}
 		setControlAudits(Array.isArray(controlRes) ? controlRes : []);
 		setSystemLogs(Array.isArray(systemRes) ? systemRes : []);
+		setStatsPreview({
+			rankings: statsRankingsRes && !statsRankingsRes.errors ? statsRankingsRes : null,
+			latest: statsLatestRes && !statsLatestRes.errors ? statsLatestRes : null
+		});
 
 		const preferredUid = nextUsers.find((item) => item.hasCredentials)?.uid ?? nextUsers[0]?.uid ?? null;
 		setSelectedOpsUid((prev) => prev || preferredUid);
@@ -1475,6 +1589,10 @@ const AdminConsole = () => {
 							setFilters={setOrderFilters}
 							onRefresh={() => loadOrderMonitor(orderFilters)}
 						/>
+					) : null}
+
+					{activeStatusTab === 'stats' ? (
+						<AdminStatsPreviewPanel statsPreview={statsPreview} onRefresh={loadStatsPreview} />
 					) : null}
 
 					{activeStatusTab === 'orders_legacy' ? (

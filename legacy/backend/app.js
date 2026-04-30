@@ -10,6 +10,7 @@ require("dotenv").config();
 
 var adminRouter = require('./routes/admin');
 var usersRouter = require('./routes/users');
+var statsRouter = require('./routes/stats');
 
 var app = express();
 
@@ -29,7 +30,9 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
+app.use('/admin/stats', auth.verifyToken, statsRouter);
 app.use('/admin',auth.verifyToken, adminRouter);
+app.use('/user/api/stats', statsRouter);
 app.use('/user', usersRouter);
 
 // catch 404 and forward to error handler
