@@ -114,7 +114,7 @@ const classifyUserMessage = (row = {}) => {
   } else if (blob.includes("PARTIALLY_FILLED") || blob.includes("PARTIAL_TERMINAL")) {
     category = "PARTIAL_TERMINAL";
     userMessage = "일부만 체결된 뒤 나머지 주문이 종료되었습니다.";
-    actionText = "체결된 포지션은 기준 수량으로 반영되었는지 확인해주세요.";
+    actionText = "체결된 포지션이 기준 수량으로 반영되었는지 확인해주세요.";
   }
 
   return {

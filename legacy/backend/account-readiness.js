@@ -56,7 +56,7 @@ const getAccountReadiness = async (uid) => {
       buildIssue({
         code: "ACCOUNT_SNAPSHOT_MISSING",
         label: "최근 선물 지갑 동기화 데이터가 없습니다.",
-        action: "API 연결을 확인하고 새로고침해주세요.",
+        action: "API 연결 상태를 확인하고 새로고침해주세요.",
       })
     );
   } else if (!(futuresBalanceUsdt > 0)) {
@@ -64,7 +64,7 @@ const getAccountReadiness = async (uid) => {
       buildIssue({
         code: "FUTURES_BALANCE_USDT_EMPTY",
         label: "선물 지갑에 사용 가능한 USDT가 없습니다.",
-        action: "Binance에서 현물 지갑 -> 선물 지갑으로 USDT를 이동한 뒤 다시 운용을 켜주세요.",
+        action: "Binance에서 현물 지갑에서 선물 지갑으로 USDT를 이동한 뒤 다시 운용을 켜주세요.",
       })
     );
   }
