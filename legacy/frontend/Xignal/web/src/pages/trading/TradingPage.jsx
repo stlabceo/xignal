@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import HeaderComponent from '../../components/header/HeaderComponent';
 import TradingGrid from './TradingGrid';
 import OrderView from './OrderView';
 import GridTradingGrid from './GridTradingGrid';
@@ -92,7 +91,7 @@ const TradingPage = () => {
 	const [marketPrices, setMarketPrices] = useState({});
 	const [performanceSummary, setPerformanceSummary] = useState(null);
 
-	const { symbol, bunbong, setSymbol, setBunbong } = useChartStore();
+	const { symbol, bunbong } = useChartStore();
 
 	const loadSignalList = () => {
 		trading.liveList({ live: 'Y' }, (res) => {
@@ -197,16 +196,6 @@ const TradingPage = () => {
 
 	return (
 		<>
-			<HeaderComponent
-				isOrderViewOn={isOrderViewOn}
-				setOrderViewOn={setOrderViewOn}
-				setTradingDetailId={setTradingDetailId}
-				symbol={symbol}
-				setSymbol={setSymbol}
-				bunbong={bunbong}
-				setBunbong={setBunbong}
-			/>
-
 			<div className="inner-container">
 				<div className="space-y-6">
 					<div className="rounded-[28px] border border-[#27313D] bg-[radial-gradient(circle_at_top_left,#233A35_0%,#111820_42%,#0B0E13_100%)] p-5 shadow-[0_28px_70px_rgba(0,0,0,0.28)] md:p-6">

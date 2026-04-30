@@ -6957,7 +6957,16 @@ router.get("/runtime/order-process/recent", async (req, res) => {
       10
     );
 
-    const filteredRows = abnormalOnly ? processRows.filter((row) => row.isAbnormal) : processRows;
+    const filteredRows = abnormalOnly
+      ? processRows.filter((row) => {
+          const lifecycleStatus = String(row.lifecycleStatus || row.lifecycleResult || "").trim().toUpperCase();
+          const severity = String(row.severity || "").trim().toUpperCase();
+          if (row.isExpectedIgnore || lifecycleStatus === "EXPECTED" || lifecycleStatus === "RESOLVED") {
+            return false;
+          }
+          return row.currentRisk === true || lifecycleStatus === "CURRENT_RISK" || severity === "CRITICAL" || severity === "WARN";
+        })
+      : processRows;
     return res.send(filteredRows);
   } catch (error) {
     console.error("[ADMIN_ORDER_PROCESS_RECENT_ERROR]", error);
