@@ -122,6 +122,30 @@ const renderNumberOrDash = (value, digits = 6, suffix = '') => {
 	return `${formatNumber(numeric, digits)}${suffix}`;
 };
 
+const formatLifecycleLabel = (value) => {
+	const normalized = String(value || '').toUpperCase();
+	const labels = {
+		EXPECTED: '예상/정상',
+		OPEN_PROTECTED: '보호중',
+		CLOSED: '종료',
+		RESOLVED: '해결됨',
+		REVIEW: '검토',
+		CURRENT_RISK: '현재 위험'
+	};
+	return labels[normalized] || value || '-';
+};
+
+const formatProtectionStatus = (value) => {
+	const normalized = String(value || '').toUpperCase();
+	const labels = {
+		PROTECTED: '보호 정상',
+		MISSING: '보호 없음',
+		ORPHAN: '오더 고아',
+		NONE: '없음'
+	};
+	return labels[normalized] || value || '-';
+};
+
 const infoToneClass = (tone = 'slate') => {
 	if (tone === 'emerald') return 'border-emerald-200 bg-emerald-50 text-emerald-700';
 	if (tone === 'blue') return 'border-sky-200 bg-sky-50 text-sky-700';
@@ -885,15 +909,14 @@ const AdminConsole = () => {
 	const abnormalOrderProcesses = useMemo(
 		() =>
 			orderProcesses.filter(
-				(item) =>
-					!item.isExpectedIgnore &&
-					(
-						String(item.summaryStatusLabel || '').trim() === '비정상' ||
-						String(item.summaryStatusLabel || '').trim() === '확인 필요' ||
-						String(item.normality || '').toUpperCase() === 'ABNORMAL' ||
-						String(item.expectedOrAbnormal || '').toUpperCase() === 'ABNORMAL' ||
-						Boolean(item.isAbnormal)
-					)
+				(item) => {
+					const severity = String(item.severity || '').toUpperCase();
+					const lifecycleStatus = String(item.lifecycleStatus || item.lifecycleResult || '').toUpperCase();
+					if (item.isExpectedIgnore || lifecycleStatus === 'EXPECTED' || lifecycleStatus === 'RESOLVED') {
+						return false;
+					}
+					return Boolean(item.currentRisk) || lifecycleStatus === 'CURRENT_RISK' || severity === 'CRITICAL' || severity === 'WARN';
+				}
 			),
 		[orderProcesses]
 	);
@@ -1184,15 +1207,15 @@ const AdminConsole = () => {
 												<tr>
 													<th className={tableHeadClass}>사용자/전략</th>
 													<th className={tableHeadClass}>설정/상태</th>
-													<th className={tableHeadClass}>전체 결과</th>
-													<th className={tableHeadClass}>처리 요약</th>
-													<th className={tableHeadClass}>웹훅수신</th>
-													<th className={tableHeadClass}>진입대기</th>
-													<th className={tableHeadClass}>진입</th>
-													<th className={tableHeadClass}>청산</th>
-													<th className={tableHeadClass}>웹훅 발생</th>
-													<th className={tableHeadClass}>청산 시각</th>
-													<th className={tableHeadClass}>비정상 시각</th>
+										<th className={tableHeadClass}>severity/lifecycle</th>
+										<th className={tableHeadClass}>현재 판정</th>
+										<th className={tableHeadClass}>포지션</th>
+										<th className={tableHeadClass}>보호주문</th>
+										<th className={tableHeadClass}>최근 주문</th>
+										<th className={tableHeadClass}>체결/잔량</th>
+										<th className={tableHeadClass}>이벤트 시각</th>
+										<th className={tableHeadClass}>실현손익</th>
+										<th className={tableHeadClass}>다음 조치</th>
 													<th className={tableHeadClass}>작업</th>
 												</tr>
 											</thead>
@@ -1214,7 +1237,10 @@ const AdminConsole = () => {
 																<AlgorithmMetaCell item={item} />
 															</td>
 															<td className={tableCellClass}>
-																<StatusBadge label={item.overallResultLabel || (item.completed ? '완료' : '진행중')} />
+												<div className="flex flex-col gap-1">
+													<StatusBadge label={item.severity || 'INFO'} />
+													<StatusBadge label={formatLifecycleLabel(item.lifecycleStatus || item.lifecycleResult)} />
+												</div>
 															</td>
 															<td className={tableCellClass}>
 																<div className="font-semibold text-slate-900">{item.summaryText || '-'}</div>
@@ -1230,13 +1256,26 @@ const AdminConsole = () => {
 																	</div>
 																) : null}
 															</td>
-															<td className={tableCellClass}>{renderStageBadge(item.algorithmProcess?.webhook)}</td>
-															<td className={tableCellClass}>{renderStageBadge(item.algorithmProcess?.exactWait)}</td>
-															<td className={tableCellClass}>{renderStageBadge(item.algorithmProcess?.entry)}</td>
-															<td className={tableCellClass}>{renderStageBadge(item.algorithmProcess?.exit)}</td>
-															<td className={tableCellClass}>{formatDateTime(item.webhookOccurredAt || item.createdAt)}</td>
-															<td className={tableCellClass}>{formatDateTime(item.completedAt)}</td>
-															<td className={tableCellClass}>{formatDateTime(item.abnormalAt)}</td>
+											<td className={tableCellClass}>
+												<div>{renderNumberOrDash(item.currentPositionQty, 6)}</div>
+												<div className="text-xs text-slate-500">local {renderNumberOrDash(item.localOpenQty, 6)}</div>
+											</td>
+											<td className={tableCellClass}>
+												<StatusBadge label={formatProtectionStatus(item.protectionStatus)} />
+												<div className="mt-1 text-xs text-slate-500">{item.activeProtectionCount || 0}/{item.expectedProtectionCount || 0}</div>
+											</td>
+											<td className={tableCellClass}>
+												<div className="font-medium">{item.lastOrderStatus || '-'}</div>
+												<div className="text-xs text-slate-500">{item.lastOrderIntent || '-'}</div>
+												<div className="text-xs text-slate-500 break-all">{item.lastClientOrderId || item.lastOrderId || '-'}</div>
+											</td>
+											<td className={tableCellClass}>
+												<div>체결 {renderNumberOrDash(item.executedQty, 6)}</div>
+												<div className="text-xs text-slate-500">잔량 {renderNumberOrDash(item.remainingQty, 6)}</div>
+											</td>
+											<td className={tableCellClass}>{formatDateTime(item.eventTime || item.webhookOccurredAt || item.createdAt)}</td>
+											<td className={tableCellClass}>{renderNumberOrDash(item.realizedPnl, 6)}</td>
+											<td className={tableCellClass}>{item.nextAction || '-'}</td>
 															<td className={tableCellClass}>
 																<button
 																	type="button"
@@ -1269,14 +1308,15 @@ const AdminConsole = () => {
 												<tr>
 													<th className={tableHeadClass}>사용자/전략</th>
 													<th className={tableHeadClass}>설정/상태</th>
-													<th className={tableHeadClass}>전체 결과</th>
-													<th className={tableHeadClass}>처리 요약</th>
-													<th className={tableHeadClass}>웹훅수신</th>
-													<th className={tableHeadClass}>Gridding</th>
-													<th className={tableHeadClass}>종료</th>
-													<th className={tableHeadClass}>웹훅 발생</th>
-													<th className={tableHeadClass}>종료 시각</th>
-													<th className={tableHeadClass}>비정상 시각</th>
+										<th className={tableHeadClass}>severity/lifecycle</th>
+										<th className={tableHeadClass}>현재 판정</th>
+										<th className={tableHeadClass}>포지션</th>
+										<th className={tableHeadClass}>보호주문</th>
+										<th className={tableHeadClass}>최근 주문</th>
+										<th className={tableHeadClass}>체결/잔량</th>
+										<th className={tableHeadClass}>이벤트 시각</th>
+										<th className={tableHeadClass}>실현손익</th>
+										<th className={tableHeadClass}>다음 조치</th>
 													<th className={tableHeadClass}>작업</th>
 												</tr>
 											</thead>
@@ -1297,9 +1337,12 @@ const AdminConsole = () => {
 															<td className={tableCellClass}>
 																<GridMetaCell item={item} />
 															</td>
-															<td className={tableCellClass}>
-																<StatusBadge label={item.overallResultLabel || (item.completed ? '완료' : '진행중')} />
-															</td>
+											<td className={tableCellClass}>
+												<div className="flex flex-col gap-1">
+													<StatusBadge label={item.severity || 'INFO'} />
+													<StatusBadge label={formatLifecycleLabel(item.lifecycleStatus || item.lifecycleResult)} />
+												</div>
+											</td>
 															<td className={tableCellClass}>
 																<div className="font-semibold text-slate-900">{item.summaryText || '-'}</div>
 																{item.issueLabel ? (
@@ -1314,12 +1357,26 @@ const AdminConsole = () => {
 																	</div>
 																) : null}
 															</td>
-															<td className={tableCellClass}>{renderStageBadge(item.gridProcess?.webhook)}</td>
-															<td className={tableCellClass}>{renderStageBadge(item.gridProcess?.gridding)}</td>
-															<td className={tableCellClass}>{renderStageBadge(item.gridProcess?.finish)}</td>
-															<td className={tableCellClass}>{formatDateTime(item.webhookOccurredAt || item.createdAt)}</td>
-															<td className={tableCellClass}>{formatDateTime(item.completedAt)}</td>
-															<td className={tableCellClass}>{formatDateTime(item.abnormalAt)}</td>
+											<td className={tableCellClass}>
+												<div>{renderNumberOrDash(item.currentPositionQty, 6)}</div>
+												<div className="text-xs text-slate-500">local {renderNumberOrDash(item.localOpenQty, 6)}</div>
+											</td>
+											<td className={tableCellClass}>
+												<StatusBadge label={formatProtectionStatus(item.protectionStatus)} />
+												<div className="mt-1 text-xs text-slate-500">{item.activeProtectionCount || 0}/{item.expectedProtectionCount || 0}</div>
+											</td>
+											<td className={tableCellClass}>
+												<div className="font-medium">{item.lastOrderStatus || '-'}</div>
+												<div className="text-xs text-slate-500">{item.lastOrderIntent || '-'}</div>
+												<div className="text-xs text-slate-500 break-all">{item.lastClientOrderId || item.lastOrderId || '-'}</div>
+											</td>
+											<td className={tableCellClass}>
+												<div>체결 {renderNumberOrDash(item.executedQty, 6)}</div>
+												<div className="text-xs text-slate-500">잔량 {renderNumberOrDash(item.remainingQty, 6)}</div>
+											</td>
+											<td className={tableCellClass}>{formatDateTime(item.eventTime || item.webhookOccurredAt || item.createdAt)}</td>
+											<td className={tableCellClass}>{renderNumberOrDash(item.realizedPnl, 6)}</td>
+											<td className={tableCellClass}>{item.nextAction || '-'}</td>
 															<td className={tableCellClass}>
 																<button
 																	type="button"

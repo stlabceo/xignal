@@ -29,8 +29,13 @@ const formatDisplayPnl = (value) => {
 	return `${numeric >= 0 ? '+' : ''}${comma(Number(numeric.toFixed(8)))} USDT`;
 };
 
+const formatDisplayAmount = (value) => {
+	const numeric = toNumber(value);
+	return numeric > 0 ? `${comma(numeric)} USDT` : '-';
+};
+
 const isEnabled = isTradingEnabled;
-const getOverallStatusLabel = (item = {}) => item.userOverallStatusLabel || (isEnabled(item) ? '횡보공략중' : '대기중');
+const getOverallStatusLabel = (item = {}) => item.userOverallStatusLabel || item.displayStatus || (isEnabled(item) ? '운용중 / 신호대기' : 'OFF / 대기중');
 const getLongStatusLabel = (item = {}) => item.longPositionStatusLabel || (toNumber(item.longQty) > 0 ? 'LONG 보유' : '진입 대기');
 const getShortStatusLabel = (item = {}) => item.shortPositionStatusLabel || (toNumber(item.shortQty) > 0 ? 'SHORT 보유' : '진입 대기');
 
@@ -45,9 +50,17 @@ const getMetricValue = (item = {}, keys = [], fallback = 0) => {
 	return fallback;
 };
 
+const getConfiguredNotional = (item = {}) =>
+	getMetricValue(item, ['configuredNotional', 'tradeAmount', 'tradeValue'], toNumber(item.margin) * toNumber(item.leverage));
+
+const getActualEntryNotional = (item = {}) => getMetricValue(item, ['actualEntryNotional'], 0);
+
 const getGridUnrealizedPnl = (item = {}, currentPrice) => {
+	if (item.unrealizedPnl !== null && item.unrealizedPnl !== undefined && item.unrealizedPnl !== '') {
+		return toNumber(item.unrealizedPnl);
+	}
 	const price = toNumber(currentPrice);
-	if (!(price > 0)) return 0;
+	if (!(price > 0)) return getMetricValue(item, ['openQty'], 0) > 0 ? null : 0;
 	const longQty = toNumber(item.longQty);
 	const shortQty = toNumber(item.shortQty);
 	const longEntryPrice = toNumber(item.longEntryPrice);
@@ -55,6 +68,11 @@ const getGridUnrealizedPnl = (item = {}, currentPrice) => {
 	const longPnl = longQty > 0 && longEntryPrice > 0 ? (price - longEntryPrice) * longQty : 0;
 	const shortPnl = shortQty > 0 && shortEntryPrice > 0 ? (shortEntryPrice - price) * shortQty : 0;
 	return longPnl + shortPnl;
+};
+
+const formatGridUnrealizedPnl = (value) => {
+	if (value === null || value === undefined) return '집계 불가';
+	return formatDisplayPnl(value);
 };
 
 const StatusChip = ({ label }) => (
@@ -213,6 +231,8 @@ const GridTradingGridBase = ({ mode = 'live', listData = [], setTradingDetailId,
 						<tr>
 							<th className="px-4 py-3">전략 / 타임프레임</th>
 							<th className="px-4 py-3">종목</th>
+							<th className="px-4 py-3">설정금액</th>
+							<th className="px-4 py-3">실제 진입금액</th>
 							<th className="px-4 py-3">현재 레짐</th>
 							<th className="px-4 py-3">LONG 상태</th>
 							<th className="px-4 py-3">SHORT 상태</th>
@@ -230,7 +250,7 @@ const GridTradingGridBase = ({ mode = 'live', listData = [], setTradingDetailId,
 					<tbody>
 						{rows.length === 0 ? (
 							<tr>
-								<td colSpan={14} className="px-4 py-8 text-center text-[13px] text-[#9E9E9E]">
+								<td colSpan={16} className="px-4 py-8 text-center text-[13px] text-[#9E9E9E]">
 									표시할 그리드 전략이 없습니다.
 								</td>
 							</tr>
@@ -250,11 +270,13 @@ const GridTradingGridBase = ({ mode = 'live', listData = [], setTradingDetailId,
 											<div className="mt-1 text-xs text-[#8B96A8]">PID {item.id ?? '-'} / {item.bunbong || '-'}</div>
 										</td>
 										<td className="px-4 py-3">{item.symbol || '-'}</td>
+										<td className="px-4 py-3">{formatDisplayAmount(getConfiguredNotional(item))}</td>
+										<td className="px-4 py-3">{getActualEntryNotional(item) > 0 ? formatDisplayAmount(getActualEntryNotional(item)) : '-'}</td>
 										<td className="px-4 py-3">{getOverallStatusLabel(item)}</td>
 										<td className="px-4 py-3">{getLongStatusLabel(item)}</td>
 										<td className="px-4 py-3">{getShortStatusLabel(item)}</td>
 										<td className="px-4 py-3">{formatDisplayPrice(currentPrice)}</td>
-										<td className={`px-4 py-3 ${unrealizedPnl >= 0 ? 'text-[#8EE6B5]' : 'text-[#FF8E8E]'}`}>{formatDisplayPnl(unrealizedPnl)}</td>
+										<td className={`px-4 py-3 ${unrealizedPnl == null || unrealizedPnl >= 0 ? 'text-[#8EE6B5]' : 'text-[#FF8E8E]'}`}>{formatGridUnrealizedPnl(unrealizedPnl)}</td>
 										<td className={`px-4 py-3 ${cumulativePnl >= 0 ? 'text-[#8EE6B5]' : 'text-[#FF8E8E]'}`}>{formatDisplayPnl(cumulativePnl)}</td>
 										<td className="px-4 py-3">{formatDisplayNumber(currentRegimeTakeProfitCount)}</td>
 										<td className="px-4 py-3">{formatDisplayNumber(cumulativeTakeProfitCount)} / {formatDisplayNumber(cumulativeStopLossCount)}</td>

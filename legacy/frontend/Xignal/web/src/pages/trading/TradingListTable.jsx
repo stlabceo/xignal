@@ -23,7 +23,7 @@ const toNumber = (value) => {
 const getStrategyLabel = (item) => strategyLabelMap[item?.type] || item?.a_name || item?.type || '-';
 const getSignalTypeLabel = (item) => sideLabelMap[String(item?.signalType || '').toUpperCase()] || '-';
 const isEnabled = isTradingEnabled;
-const getUserStatusLabel = (item = {}) => item.userStatusLabel || (getOpenQty(item) > 0 ? '포지션 보유중' : isEnabled(item) ? '운용중' : '대기중');
+const getUserStatusLabel = (item = {}) => item.userStatusLabel || item.displayStatus || (getOpenQty(item) > 0 ? '포지션 보유중' : isEnabled(item) ? '운용중 / 신호대기' : 'OFF / 대기중');
 
 const formatDisplayPrice = (value) => {
 	const numeric = toNumber(value);
@@ -48,15 +48,17 @@ const formatDate = (value) => {
 };
 
 const getTradeAmount = (item = {}) => {
-	const backendValue = toNumber(item.tradeAmount);
+	const backendValue = toNumber(item.configuredNotional ?? item.tradeAmount);
 	if (backendValue > 0) {
 		return backendValue;
 	}
 	return toNumber(item.margin) * toNumber(item.leverage);
 };
 
+const getActualEntryNotional = (item = {}) => toNumber(item.actualEntryNotional);
+
 const getEntryPrice = (item = {}) => {
-	const backendValue = toNumber(item.entryPrice);
+	const backendValue = toNumber(item.avgEntryPrice ?? item.entryPrice);
 	if (backendValue > 0) return backendValue;
 	if (toNumber(item.r_exactPrice) > 0) return toNumber(item.r_exactPrice);
 	if (toNumber(item.r_signalPrice) > 0) return toNumber(item.r_signalPrice);
@@ -70,15 +72,23 @@ const getOpenQty = (item = {}) => {
 };
 
 const getUnrealizedPnl = (item = {}, currentPrice) => {
+	if (item.unrealizedPnl !== null && item.unrealizedPnl !== undefined && item.unrealizedPnl !== '') {
+		return toNumber(item.unrealizedPnl);
+	}
 	const entryPrice = getEntryPrice(item);
 	const qty = getOpenQty(item);
 	const normalizedCurrentPrice = toNumber(currentPrice);
 	if (!(entryPrice > 0) || !(qty > 0) || !(normalizedCurrentPrice > 0)) {
-		return 0;
+		return qty > 0 ? null : 0;
 	}
 	return String(item.signalType || '').toUpperCase() === 'SELL'
 		? (entryPrice - normalizedCurrentPrice) * qty
 		: (normalizedCurrentPrice - entryPrice) * qty;
+};
+
+const formatUnrealizedPnl = (value) => {
+	if (value === null || value === undefined) return '집계 불가';
+	return formatDisplayPnl(value);
 };
 
 const getWinLossLabel = (item = {}) => {
@@ -234,9 +244,10 @@ const TradingListTable = ({ setTradingDetailId, listData: data = [], getListData
 						<tr>
 							<th className="px-4 py-4">전략</th>
 							<th className="px-4 py-4">종목 / 방향</th>
-							<th className="px-4 py-4">투자금</th>
+							<th className="px-4 py-4">설정금액</th>
+							<th className="px-4 py-4">실제 진입금액</th>
 							<th className="px-4 py-4">현재 포지션</th>
-							<th className="px-4 py-4">현재가 / 진입가</th>
+							<th className="px-4 py-4">평균 진입가</th>
 							<th className="px-4 py-4">현재 미실현손익</th>
 							<th className="px-4 py-4">누적 실현손익</th>
 							<th className="px-4 py-4">승/패</th>
@@ -250,7 +261,7 @@ const TradingListTable = ({ setTradingDetailId, listData: data = [], getListData
 					<tbody>
 						{filteredData.length === 0 ? (
 							<tr>
-								<td className="px-4 py-8 text-[#9aa3b2]" colSpan={activeTab === 'OFF' ? 13 : 12}>
+								<td className="px-4 py-8 text-[#9aa3b2]" colSpan={activeTab === 'OFF' ? 14 : 13}>
 									표시할 알고리즘 전략이 없습니다.
 								</td>
 							</tr>
@@ -272,9 +283,10 @@ const TradingListTable = ({ setTradingDetailId, listData: data = [], getListData
 										</td>
 										<td className="px-4 py-4">{item.symbol || '-'} / {getSignalTypeLabel(item)}</td>
 										<td className="px-4 py-4">{formatDisplayAmount(getTradeAmount(item))}</td>
+										<td className="px-4 py-4">{getActualEntryNotional(item) > 0 ? formatDisplayAmount(getActualEntryNotional(item)) : '-'}</td>
 										<td className="px-4 py-4">{getOpenQty(item) > 0 ? comma(getOpenQty(item)) : '-'}</td>
-										<td className="px-4 py-4">{formatDisplayPrice(currentPrice)} / {formatDisplayPrice(getEntryPrice(item))}</td>
-										<td className={`px-4 py-4 ${unrealizedPnl >= 0 ? 'text-[#8EE6B5]' : 'text-[#FF8E8E]'}`}>{formatDisplayPnl(unrealizedPnl)}</td>
+										<td className="px-4 py-4">{formatDisplayPrice(getEntryPrice(item))}</td>
+										<td className={`px-4 py-4 ${unrealizedPnl == null || unrealizedPnl >= 0 ? 'text-[#8EE6B5]' : 'text-[#FF8E8E]'}`}>{formatUnrealizedPnl(unrealizedPnl)}</td>
 										<td className={`px-4 py-4 ${toNumber(item.realizedPnlTotal) >= 0 ? 'text-[#8EE6B5]' : 'text-[#FF8E8E]'}`}>{formatDisplayPnl(item.realizedPnlTotal)}</td>
 										<td className="px-4 py-4">{getWinLossLabel(item)}</td>
 										<td className="px-4 py-4">{formatDate(lastTradeAt)}</td>

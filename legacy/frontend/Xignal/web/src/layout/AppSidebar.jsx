@@ -1,20 +1,16 @@
 import React, { useMemo, useState } from 'react';
 import { Link, useLocation } from 'react-router';
 import logo from '../assets/logo/logo_xignal.svg';
-import MypageModal from '../components/modal/pageModal/MypageModal';
 import MessageModal from '../components/modal/pageModal/MessageModal';
 import { useNotifyStore } from '../store/notifyStore';
 import { useAuthStore } from '../store/authState';
+import { auth } from '../services/auth';
 
-const AppSidebar = ({
-	isDesktopSidebarOpen = false,
-	setIsDesktopSidebarOpen = () => {}
-}) => {
+const AppSidebar = ({ isDesktopSidebarOpen = false, setIsDesktopSidebarOpen = () => {} }) => {
 	const location = useLocation();
-	const { setIsLoggedIn } = useAuthStore();
-	const isNewMsg = useNotifyStore((s) => s.isNewMsg);
+	const { setIsLoggedIn, setIsAdminSession, isAdminSession } = useAuthStore();
+	const isNewMsg = useNotifyStore((state) => state.isNewMsg);
 
-	const [isMypageOpen, setIsMypageOpen] = useState(false);
 	const [isMessageOpen, setIsMessageOpen] = useState(false);
 	const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
@@ -22,14 +18,16 @@ const AppSidebar = ({
 		() => [
 			{ name: 'Demo', path: '/test' },
 			{ name: 'TRADING', path: '/' },
-			{ name: 'TRACK Record', path: '/trade-history' },
-			{ name: 'Demo TRACK Record', path: '/test/trade-history' }
+			{ name: '트랙레코드', path: '/trade-history' }
 		],
 		[]
 	);
 
 	const signout = () => {
+		auth.logout();
 		setIsLoggedIn(false);
+		setIsAdminSession(false);
+		window.location.href = isAdminSession ? '/ops-signin' : '/signin';
 	};
 
 	const handleDesktopToggle = () => {
@@ -49,63 +47,38 @@ const AppSidebar = ({
 	};
 
 	const isActive = (path) => location.pathname === path;
-
 	return (
 		<>
 			<button
 				type="button"
 				onClick={handleMobileToggle}
-				className="xignal-gnb-mobile-toggle md:hidden fixed top-4 left-4 z-[70] flex h-11 w-11 items-center justify-center rounded-lg border border-[#343434] bg-[#1B1B1B] text-white shadow-[0_10px_30px_rgba(0,0,0,0.35)]"
+				className="xignal-gnb-mobile-toggle fixed top-4 left-4 z-[70] flex h-11 w-11 items-center justify-center rounded-lg border border-[#343434] bg-[#1B1B1B] text-white shadow-[0_10px_30px_rgba(0,0,0,0.35)] md:hidden"
 			>
 				<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none">
-					<path
-						d="M4 7H20M4 12H20M4 17H20"
-						stroke="currentColor"
-						strokeWidth="1.8"
-						strokeLinecap="round"
-					/>
+					<path d="M4 7H20M4 12H20M4 17H20" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
 				</svg>
 			</button>
 
-			{isMobileMenuOpen && (
-				<button
-					type="button"
-					className="md:hidden fixed inset-0 z-[55] bg-black/50"
-					onClick={handleCloseMobile}
-				/>
-			)}
+			{isMobileMenuOpen && <button type="button" className="fixed inset-0 z-[55] bg-black/50 md:hidden" onClick={handleCloseMobile} />}
 
 			<aside
 				className={`xignal-gnb fixed z-[60] flex flex-col bg-[#1B1B1B] transition-all duration-300 ease-in-out ${
 					isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
 				} ${isDesktopSidebarOpen ? 'md:w-[272px]' : 'md:w-[64px]'} md:translate-x-0`}
 			>
-				<div
-					className={`border-b border-[#2A2A2A] ${
-						isDesktopSidebarOpen ? 'px-5 py-5' : 'px-0 py-5'
-					}`}
-				>
-					<div className={`${isDesktopSidebarOpen ? 'flex items-center justify-between' : 'flex items-center justify-center'}`}>
-						<button
-							type="button"
-							onClick={handleDesktopToggle}
-							className="flex items-center justify-center"
-						>
+				<div className={`border-b border-[#2A2A2A] ${isDesktopSidebarOpen ? 'px-5 py-5' : 'px-0 py-5'}`}>
+					<div className={isDesktopSidebarOpen ? 'flex items-center justify-between' : 'flex items-center justify-center'}>
+						<button type="button" onClick={handleDesktopToggle} className="flex items-center justify-center">
 							<img src={logo} alt="logo" className="h-[56px] w-[48px]" />
 						</button>
 
 						<button
 							type="button"
 							onClick={handleCloseMobile}
-							className="md:hidden flex h-9 w-9 items-center justify-center rounded-md border border-[#343434] text-white"
+							className="flex h-9 w-9 items-center justify-center rounded-md border border-[#343434] text-white md:hidden"
 						>
 							<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none">
-								<path
-									d="M6 6L18 18M18 6L6 18"
-									stroke="currentColor"
-									strokeWidth="1.8"
-									strokeLinecap="round"
-								/>
+								<path d="M6 6L18 18M18 6L6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
 							</svg>
 						</button>
 					</div>
@@ -121,17 +94,39 @@ const AppSidebar = ({
 											to={nav.path}
 											onClick={handleLinkClick}
 											className={`xignal-gnb-link relative flex min-h-[52px] w-full items-center rounded-xl px-4 py-3 transition-all ${
-												isActive(nav.path)
-													? 'bg-[#262626] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)]'
-													: 'hover:bg-[#202020]'
+												isActive(nav.path) ? 'bg-[#262626] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)]' : 'hover:bg-[#202020]'
 											}`}
 										>
-											<span className="text-left text-[15px] font-medium leading-[1.35] text-white">
-												{nav.name}
-											</span>
+											<span className="text-left text-[15px] font-medium leading-[1.35] text-white">{nav.name}</span>
 										</Link>
 									</li>
 								))}
+
+								<li className="w-full">
+									<Link
+										to="/mypage"
+										onClick={handleLinkClick}
+										className={`xignal-gnb-link relative flex min-h-[52px] w-full items-center rounded-xl px-4 py-3 transition-all ${
+											isActive('/mypage') ? 'bg-[#262626] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)]' : 'hover:bg-[#202020]'
+										}`}
+									>
+										<span className="text-[15px] font-medium text-white">My Page</span>
+									</Link>
+								</li>
+
+								{isAdminSession && (
+									<li className="w-full">
+										<Link
+											to="/ops-console"
+											onClick={handleLinkClick}
+											className={`xignal-gnb-link relative flex min-h-[52px] w-full items-center rounded-xl px-4 py-3 transition-all ${
+												isActive('/ops-console') ? 'bg-[#262626] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)]' : 'hover:bg-[#202020]'
+											}`}
+										>
+											<span className="text-[15px] font-medium text-white">Admin Console</span>
+										</Link>
+									</li>
+								)}
 
 								<li className="w-full">
 									<button
@@ -142,9 +137,9 @@ const AppSidebar = ({
 										}}
 										className="xignal-gnb-link relative flex min-h-[52px] w-full items-center rounded-xl px-4 py-3 text-left transition-all hover:bg-[#202020]"
 									>
-										<span className="text-[15px] font-medium text-white">Message</span>
+										<span className="text-[15px] font-medium text-white">메시지</span>
 										{isNewMsg && (
-											<div className="absolute right-3 top-3 flex h-4 min-w-4 items-center justify-center rounded-full bg-white px-1 text-[10px] text-black">
+											<div className="absolute top-3 right-3 flex h-4 min-w-4 items-center justify-center rounded-full bg-white px-1 text-[10px] text-black">
 												N
 											</div>
 										)}
@@ -160,7 +155,7 @@ const AppSidebar = ({
 										}}
 										className="xignal-gnb-link flex min-h-[52px] w-full items-center rounded-xl px-4 py-3 text-left transition-all hover:bg-[#202020]"
 									>
-										<span className="text-[15px] font-medium text-white">Logout</span>
+										<span className="text-[15px] font-medium text-white">로그아웃</span>
 									</button>
 								</li>
 							</ul>
@@ -169,7 +164,6 @@ const AppSidebar = ({
 				)}
 			</aside>
 
-			{isMypageOpen && <MypageModal isOpen={true} onClose={() => setIsMypageOpen(false)} />}
 			{isMessageOpen && <MessageModal isOpen={true} onClose={() => setIsMessageOpen(false)} />}
 		</>
 	);

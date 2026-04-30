@@ -2,6 +2,16 @@
 
 const db = require("./database/connect/config");
 
+const INCIDENT_ORDER_IDS = new Set(["147797474565", "4289769085", "4289774077"]);
+const INCIDENT_TRADE_IDS = new Set([
+  "3097747576",
+  "3097747577",
+  "3097747578",
+  "3097747579",
+  "221477564",
+  "221477649",
+]);
+
 const toNumber = (value) => {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : 0;
@@ -16,27 +26,116 @@ const buildPeriodStart = (days) => {
   return toSqlDate(date);
 };
 
-const getUserPerformanceSummary = async (uid) => {
+const isIncidentLedgerRow = (row = {}) =>
+  INCIDENT_ORDER_IDS.has(String(row.sourceOrderId || row.orderId || "")) ||
+  INCIDENT_TRADE_IDS.has(String(row.sourceTradeId || row.tradeId || ""));
+
+const isExitLedgerRow = (row = {}) => {
+  const eventType = String(row.eventType || row.type || row.intent || "").trim().toUpperCase();
+  if (!eventType) {
+    return toNumber(row.realizedPnl) !== 0;
+  }
+  if (eventType.includes("ENTRY")) {
+    return false;
+  }
+  return (
+    eventType.includes("EXIT") ||
+    eventType.includes("PROFIT") ||
+    eventType.includes("STOP") ||
+    eventType.includes("CLOSE") ||
+    eventType.includes("TP")
+  );
+};
+
+const getEventTime = (row = {}) => row.tradeTime || row.createdAt || row.updatedAt || null;
+
+const isAtOrAfter = (value, sqlDate) => {
+  if (!value) {
+    return false;
+  }
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) && time >= new Date(`${sqlDate.replace(" ", "T")}Z`).getTime();
+};
+
+const summarizeLedgerRows = (rows = []) => {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const todayStart = toSqlDate(today);
   const sevenDayStart = buildPeriodStart(7);
   const thirtyDayStart = buildPeriodStart(30);
+  const exitCycles = new Map();
+  const totals = {
+    totalRealizedPnl: 0,
+    todayRealizedPnl: 0,
+    sevenDayRealizedPnl: 0,
+    thirtyDayRealizedPnl: 0,
+    lastTradeAt: null,
+    incidentExcludedCount: 0,
+  };
 
-  const [[ledgerTotals], [strategyCounts], [openSnapshotRows]] = await Promise.all([
+  rows.forEach((row) => {
+    if (isIncidentLedgerRow(row)) {
+      totals.incidentExcludedCount += 1;
+      return;
+    }
+
+    const pnl = toNumber(row.realizedPnl);
+    const eventTime = getEventTime(row);
+    totals.totalRealizedPnl += pnl;
+    if (isAtOrAfter(eventTime, todayStart)) {
+      totals.todayRealizedPnl += pnl;
+    }
+    if (isAtOrAfter(eventTime, sevenDayStart)) {
+      totals.sevenDayRealizedPnl += pnl;
+    }
+    if (isAtOrAfter(eventTime, thirtyDayStart)) {
+      totals.thirtyDayRealizedPnl += pnl;
+    }
+    if (eventTime && (!totals.lastTradeAt || new Date(eventTime).getTime() > new Date(totals.lastTradeAt).getTime())) {
+      totals.lastTradeAt = eventTime;
+    }
+
+    if (isExitLedgerRow(row)) {
+      const cycleKey = [
+        row.pid || "",
+        row.strategyCategory || "",
+        row.sourceClientOrderId || row.clientOrderId || "",
+        row.sourceOrderId || row.orderId || "",
+        row.sourceTradeId ? "" : row.dedupeKey || row.id || "",
+      ].join("|");
+      exitCycles.set(cycleKey, (exitCycles.get(cycleKey) || 0) + pnl);
+    }
+  });
+
+  let winCount = 0;
+  let lossCount = 0;
+  let breakevenCount = 0;
+  exitCycles.forEach((pnl) => {
+    if (pnl > 0) {
+      winCount += 1;
+    } else if (pnl < 0) {
+      lossCount += 1;
+    } else {
+      breakevenCount += 1;
+    }
+  });
+
+  return {
+    ...totals,
+    winCount,
+    lossCount,
+    breakevenCount,
+    completedCycleCount: exitCycles.size,
+  };
+};
+
+const getUserPerformanceSummary = async (uid) => {
+  const [[ledgerRows], [strategyCounts], [openSnapshotRows]] = await Promise.all([
     db.query(
-      `SELECT
-          COALESCE(SUM(realizedPnl), 0) AS totalRealizedPnl,
-          COALESCE(SUM(CASE WHEN createdAt >= ? THEN realizedPnl ELSE 0 END), 0) AS todayRealizedPnl,
-          COALESCE(SUM(CASE WHEN createdAt >= ? THEN realizedPnl ELSE 0 END), 0) AS sevenDayRealizedPnl,
-          COALESCE(SUM(CASE WHEN createdAt >= ? THEN realizedPnl ELSE 0 END), 0) AS thirtyDayRealizedPnl,
-          SUM(CASE WHEN realizedPnl > 0 THEN 1 ELSE 0 END) AS winCount,
-          SUM(CASE WHEN realizedPnl < 0 THEN 1 ELSE 0 END) AS lossCount,
-          COUNT(DISTINCT CASE WHEN realizedPnl <> 0 THEN COALESCE(sourceTradeId, dedupeKey, id) END) AS completedFillCount,
-          MAX(tradeTime) AS lastTradeAt
-        FROM live_pid_position_ledger
-       WHERE uid = ?`,
-      [todayStart, sevenDayStart, thirtyDayStart, uid]
+      `SELECT id, pid, strategyCategory, eventType, sourceClientOrderId, sourceOrderId, sourceTradeId, dedupeKey, realizedPnl, tradeTime, createdAt
+         FROM live_pid_position_ledger
+        WHERE uid = ?`,
+      [uid]
     ),
     db.query(
       `SELECT
@@ -64,11 +163,9 @@ const getUserPerformanceSummary = async (uid) => {
     ),
   ]);
 
-  const totals = ledgerTotals[0] || {};
+  const totals = summarizeLedgerRows(ledgerRows || []);
   const counts = strategyCounts[0] || {};
-  const winCount = toNumber(totals.winCount);
-  const lossCount = toNumber(totals.lossCount);
-  const completedFillCount = toNumber(totals.completedFillCount);
+  const completedCycleCount = toNumber(totals.completedCycleCount);
   const activeStrategyCount = toNumber(counts.activeSignalCount) + toNumber(counts.activeGridCount);
 
   return {
@@ -76,8 +173,9 @@ const getUserPerformanceSummary = async (uid) => {
     dataAvailability: {
       realizedPnl: "AVAILABLE",
       unrealizedPnl: "PRICE_REQUIRED",
-      winRate: completedFillCount > 0 ? "AVAILABLE" : "INSUFFICIENT_COMPLETED_TRADES",
+      winRate: completedCycleCount > 0 ? "AVAILABLE" : "INSUFFICIENT_COMPLETED_TRADES",
       fee: "LEDGER_FEE_IF_RECORDED",
+      incidentHandling: totals.incidentExcludedCount > 0 ? "QA_REPLAY_ACCIDENT_EXCLUDED" : "NONE",
     },
     cards: {
       totalRealizedPnl: toNumber(totals.totalRealizedPnl),
@@ -87,11 +185,14 @@ const getUserPerformanceSummary = async (uid) => {
       thirtyDayPnl: toNumber(totals.thirtyDayRealizedPnl),
       runningStrategyCount: activeStrategyCount,
       openPositionCount: openSnapshotRows.length,
-      recentWinRate: completedFillCount > 0 ? (winCount / completedFillCount) * 100 : null,
+      recentWinRate: completedCycleCount > 0 ? (totals.winCount / completedCycleCount) * 100 : null,
     },
-    winCount,
-    lossCount,
-    completedFillCount,
+    winCount: totals.winCount,
+    lossCount: totals.lossCount,
+    breakevenCount: totals.breakevenCount,
+    completedCycleCount,
+    completedFillCount: completedCycleCount,
+    incidentExcludedCount: totals.incidentExcludedCount,
     signalCount: toNumber(counts.signalCount),
     gridCount: toNumber(counts.gridCount),
     openPositions: openSnapshotRows,

@@ -23,8 +23,10 @@ const signalForceOffControl = require("../signal-force-off-control");
 const orderDisplayState = require("../order-display-state");
 const { hasExplicitStrategyDeleteIntent } = require("../strategy-delete-intent");
 const userPerformanceSummary = require("../user-performance-summary");
+const userStrategyRowSummary = require("../user-strategy-row-summary");
 const messageFilter = require("../message-filter");
 const accountReadiness = require("../account-readiness");
+const binanceWriteGuard = require("../binance-write-guard");
 
 const dt = require("../data");
 const dayjs = require("dayjs");
@@ -286,17 +288,27 @@ const decorateLogPayload = (payload = {}) => ({
   sumObj: decorateRuntimeItem(payload.sumObj),
 });
 
-const decorateOwnedSignalCollection = async (items, uid) =>
-  canonicalRuntimeState.decorateSignalCollection(items || [], { uid });
+const decorateOwnedSignalCollection = async (items, uid) => {
+  const canonicalRows = await canonicalRuntimeState.decorateSignalCollection(items || [], { uid });
+  return userStrategyRowSummary.decorateStrategyRows(canonicalRows, { uid, category: "signal" });
+};
 
 const decorateOwnedSignalItem = async (item, uid) =>
-  canonicalRuntimeState.decorateSignalItem(item, { uid });
+  userStrategyRowSummary.decorateStrategyItem(await canonicalRuntimeState.decorateSignalItem(item, { uid }), {
+    uid,
+    category: "signal",
+  });
 
-const decorateOwnedGridCollection = async (items, uid) =>
-  canonicalRuntimeState.decorateGridCollection(items || [], { uid });
+const decorateOwnedGridCollection = async (items, uid) => {
+  const canonicalRows = await canonicalRuntimeState.decorateGridCollection(items || [], { uid });
+  return userStrategyRowSummary.decorateStrategyRows(canonicalRows, { uid, category: "grid" });
+};
 
 const decorateOwnedGridItem = async (item, uid) =>
-  canonicalRuntimeState.decorateGridItem(item, { uid });
+  userStrategyRowSummary.decorateStrategyItem(await canonicalRuntimeState.decorateGridItem(item, { uid }), {
+    uid,
+    category: "grid",
+  });
 
 const WEBHOOK_CATEGORY_LABELS = {
   signal: "알고리즘",
@@ -2134,6 +2146,37 @@ const buildOrderProcessRow = async (targetRow, options = {}) => {
     stages: normalizedStages,
   });
 
+  const currentSnapshotRows = currentLifecycleWindow?.snapshotRows || [];
+  const currentReservationRows = currentLifecycleWindow?.reservationRows || [];
+  const activeProtectionRows = currentReservationRows.filter((row) =>
+    ["ACTIVE", "PARTIAL"].includes(String(row.status || "").trim().toUpperCase())
+  );
+  const currentPositionQty = currentSnapshotRows.reduce((sum, row) => sum + Number(row.openQty || 0), 0);
+  const activeProtectionCount = activeProtectionRows.length;
+  const expectedProtectionCount = currentPositionQty > 0 ? 2 : 0;
+  const protectionStatus =
+    currentPositionQty > 0
+      ? activeProtectionCount > 0
+        ? "PROTECTED"
+        : "MISSING"
+      : activeProtectionCount > 0
+        ? "ORPHAN"
+        : "NONE";
+  const currentRisk = protectionStatus === "MISSING" || protectionStatus === "ORPHAN";
+  const lifecycleStatus = suppressLifecycleAttribution
+    ? "EXPECTED"
+    : currentRisk
+      ? "CURRENT_RISK"
+      : currentPositionQty > 0
+        ? "OPEN_PROTECTED"
+        : normalizedStages.abnormal
+          ? "RESOLVED"
+          : "CLOSED";
+  const severity = currentRisk ? "CRITICAL" : normalizedStages.abnormal ? "INFO" : "INFO";
+  const latestOrderEvent = [...projectionBinanceRows]
+    .sort((a, b) => new Date(b.eventTime || b.createdAt || 0).getTime() - new Date(a.eventTime || a.createdAt || 0).getTime())[0] || {};
+  const realizedPnl = projectionLedgerRows.reduce((sum, row) => sum + Number(row.realizedPnl || 0), 0);
+
   const baseRow = {
     id: targetRow.id,
     eventId: targetRow.eventId,
@@ -2158,6 +2201,11 @@ const buildOrderProcessRow = async (targetRow, options = {}) => {
     processStatus: normalizedStages.processStatus,
     normalityLabel: normalizedStages.processStatusLabel,
     isAbnormal: normalizedStages.abnormal,
+    currentRisk,
+    lifecycleStatus,
+    lifecycleResult: lifecycleStatus,
+    severity,
+    expectedOrAbnormal: currentRisk ? "ABNORMAL" : suppressLifecycleAttribution ? "EXPECTED" : "REVIEW",
     isExpectedIgnore: suppressLifecycleAttribution,
     completed: normalizedStages.completed,
     completionLabel: normalizedStages.completionLabel,
@@ -2171,6 +2219,26 @@ const buildOrderProcessRow = async (targetRow, options = {}) => {
     exitPendingStage: normalizedStages.exitPendingStage,
     exitStage: normalizedStages.exitStage,
     openQtyTotal: projectionSnapshotRows.reduce((sum, row) => sum + Number(row.openQty || 0), 0),
+    currentPositionQty,
+    localOpenQty: currentPositionQty,
+    protectionStatus,
+    activeProtectionCount,
+    expectedProtectionCount,
+    lastOrderStatus: latestOrderEvent.status || latestOrderEvent.orderStatus || latestOrderEvent.eventCode || null,
+    lastOrderIntent: latestOrderEvent.intent || latestOrderEvent.orderIntent || latestOrderEvent.eventCode || null,
+    lastOrderId: latestOrderEvent.orderId || latestOrderEvent.sourceOrderId || null,
+    lastClientOrderId: latestOrderEvent.clientOrderId || latestOrderEvent.sourceClientOrderId || null,
+    executedQty: latestOrderEvent.executedQty || null,
+    remainingQty:
+      latestOrderEvent.remainingQty !== undefined
+        ? latestOrderEvent.remainingQty
+        : latestOrderEvent.origQty !== undefined && latestOrderEvent.executedQty !== undefined
+          ? Math.max(Number(latestOrderEvent.origQty || 0) - Number(latestOrderEvent.executedQty || 0), 0)
+          : null,
+    realizedPnl,
+    issueReason: currentRisk ? protectionStatus : issueMeta.issueLabel || normalizedStages.problemDetail || null,
+    nextAction: currentRisk ? "현재 포지션/보호주문 정합성 확인" : normalizedStages.abnormal ? "해결된 이력으로 보관" : "없음",
+    eventTime: latestOrderEvent.eventTime || latestOrderEvent.createdAt || targetRow.createdAt,
     exitReservationCount: projectionReservationRows.length,
     ledgerFillCount: projectionLedgerRows.length,
     runtimeMessageCount: projectionMsgRows.length,
@@ -2178,8 +2246,10 @@ const buildOrderProcessRow = async (targetRow, options = {}) => {
     ...detailProjection,
     ...issueMeta,
     summaryText:
-      normalizedStages.abnormal
+      currentRisk
         ? `비정상 / ${issueMeta.issueLabel || normalizedStages.problemDetail || "원인 미상"}`
+        : normalizedStages.abnormal
+          ? `해결됨 / ${issueMeta.issueLabel || normalizedStages.problemDetail || "이력"}`
         : suppressLifecycleAttribution && normalizedStages.currentStepLabel
           ? `정상 / ${normalizedStages.currentStepLabel}`
           : viewProjection.summaryText,
@@ -5697,8 +5767,39 @@ router.get("/live/performance-summary", async (req, res) => {
 
 router.get("/account/readiness", async (req, res) => {
   const userId = req.decoded.userId;
-  const payload = await accountReadiness.getAccountReadiness(userId);
+  const runtimeHealth = await coin.getBinanceRuntimeHealth(userId).catch((error) => ({
+    status: "UNKNOWN",
+    lastErrorCode: error?.code || null,
+    lastErrorMessage: error?.message || null,
+  }));
+  const payload = await accountReadiness.getAccountReadiness(userId, { runtimeHealth });
   return res.send(payload);
+});
+
+router.post("/account/ensure-hedge-mode", async (req, res) => {
+  const userId = req.decoded.userId;
+  const decision = binanceWriteGuard.evaluateBinanceWriteAllowed({
+    uid: userId,
+    action: "WRITE_POSITION_MODE_CHANGE",
+    caller: "routes/admin.account.ensure-hedge-mode",
+    allowLiveOrders: false,
+  });
+
+  if (!decision.allowed) {
+    return res.send({
+      ok: false,
+      blockedByWriteGuard: true,
+      guardReason: decision.reason,
+      runtimeMode: process.env.QA_DISABLE_BINANCE_WRITES ? "READ_ONLY_WRITE_DISABLED" : "WRITE_APPROVAL_REQUIRED",
+      message: "헤지 모드 자동 설정은 live-write 승인 상태에서만 실행할 수 있습니다.",
+    });
+  }
+
+  return res.status(501).send({
+    ok: false,
+    blockedByWriteGuard: false,
+    message: "헤지 모드 자동 설정 실행은 별도 승인된 live-write preflight에서만 제공됩니다.",
+  });
 });
 
 router.get("/runtime/account-risk/current", async (req, res) => {

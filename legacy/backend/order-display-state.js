@@ -409,7 +409,7 @@ const deriveUserDisplayStatus = (row = {}) => {
     return "관리자 확인 필요";
   }
   if (!enabled && openQty <= 0) {
-    return "대기중 / OFF";
+    return "OFF / 대기중";
   }
   if (openQty > 0 && missingProtectionCount > 0) {
     return "보호주문 확인 필요";
@@ -423,7 +423,7 @@ const deriveUserDisplayStatus = (row = {}) => {
   if (legacyStatus.includes("AUTO_PAUSED") || legacyStatus.includes("REJECTED")) {
     return "자동중지 / 진입 실패";
   }
-  return enabled ? "운용중" : "대기중 / OFF";
+  return enabled ? "운용중 / 신호대기" : "OFF / 대기중";
 };
 
 const deriveAdminLifecycleSeverity = (row = {}) => {

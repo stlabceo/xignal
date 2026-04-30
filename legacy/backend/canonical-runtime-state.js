@@ -8,11 +8,11 @@ const SIGNAL_RUNTIME_LABELS = {
 
 const GRID_RUNTIME_LABELS = {
   READY: "대기중",
-  GRIDDING: "횡보 공략중",
+  GRIDDING: "횡보공략중",
 };
 
 const CONTROL_STATE_LABELS = {
-  ON: "사용중",
+  ON: "운용중",
   OFF: "중지",
 };
 
@@ -112,6 +112,34 @@ const getItemEnabled = (item = {}) => {
   return false;
 };
 
+const deriveFlatDisplayLabel = (enabled) => (enabled ? "운용중 / 신호대기" : "OFF / 대기중");
+
+const deriveSignalUserStatusLabel = ({ enabled, runtimeState, openQty }) => {
+  if (runtimeState === "EXACT" || toNumber(openQty) > 0) {
+    return "포지션 보유중";
+  }
+  if (runtimeState === "EXACT_WAIT") {
+    return "진입중";
+  }
+  return deriveFlatDisplayLabel(enabled);
+};
+
+const deriveGridUserStatusLabel = ({ enabled, runtimeState, longOpen, shortOpen }) => {
+  if (runtimeState === "GRIDDING") {
+    if (longOpen && shortOpen) {
+      return "양방향 보유";
+    }
+    if (longOpen) {
+      return "LONG 보유";
+    }
+    if (shortOpen) {
+      return "SHORT 보유";
+    }
+    return enabled ? "횡보공략중" : "확인 필요";
+  }
+  return deriveFlatDisplayLabel(enabled);
+};
+
 const deriveSignalRuntimeState = (item = {}, options = {}) => {
   const snapshots = options.snapshots || item.pidSnapshots || [];
 
@@ -167,7 +195,7 @@ const decorateSignalItemSync = (item = {}, options = {}) => {
     controlStateLabel: enabled ? CONTROL_STATE_LABELS.ON : CONTROL_STATE_LABELS.OFF,
     runtimeState,
     runtimeStateLabel: SIGNAL_RUNTIME_LABELS[runtimeState] || runtimeState,
-    userStatusLabel: runtimeState === "EXACT" ? "포지션 보유중" : "대기중",
+    userStatusLabel: runtimeState === "EXACT" ? "포지션 보유중" : enabled ? "운용중" : "대기중",
     openQty,
     entryPrice: entryPrice > 0 ? entryPrice : null,
     targetTakeProfitPrice: targetTakeProfitPrice && targetTakeProfitPrice > 0 ? targetTakeProfitPrice : null,
@@ -175,6 +203,8 @@ const decorateSignalItemSync = (item = {}, options = {}) => {
     stopConditionLabel: buildSignalStopConditionLabel(item),
     realizedPnlTotal,
     legacyStatus: item.status || null,
+    userStatusLabel: deriveSignalUserStatusLabel({ enabled, runtimeState, openQty }),
+    displayStatus: deriveSignalUserStatusLabel({ enabled, runtimeState, openQty }),
   };
 };
 
@@ -193,6 +223,17 @@ const decorateGridItemSync = (item = {}, options = {}) => {
     (row) => normalizeStatus(row?.positionSide) === "SHORT" && toNumber(row?.openQty) > 0
   );
 
+  const userOverallStatusLabel =
+    runtimeState === "GRIDDING"
+      ? longOpen && shortOpen
+        ? "양방향 보유"
+        : longOpen
+          ? "LONG 보유"
+          : shortOpen
+            ? "SHORT 보유"
+            : "횡보공략중"
+      : "대기중";
+
   return {
     ...item,
     strategyCategory: "GRID",
@@ -203,11 +244,13 @@ const decorateGridItemSync = (item = {}, options = {}) => {
     runtimeStateLabel: GRID_RUNTIME_LABELS[runtimeState] || runtimeState,
     gridRuntimeState: runtimeState,
     gridRuntimeStateLabel: GRID_RUNTIME_LABELS[runtimeState] || runtimeState,
-    userOverallStatusLabel: runtimeState === "GRIDDING" ? "횡보 공략중" : "대기중",
-    longPositionStatusLabel: longOpen ? "포지션 보유중" : "Ready",
-    shortPositionStatusLabel: shortOpen ? "포지션 보유중" : "Ready",
+    userOverallStatusLabel,
+    longPositionStatusLabel: longOpen ? "LONG 보유" : "진입 대기",
+    shortPositionStatusLabel: shortOpen ? "SHORT 보유" : "진입 대기",
     tradeAmount: toNumber(item?.margin) * toNumber(item?.leverage),
     legacyRegimeStatus: item.regimeStatus || null,
+    userOverallStatusLabel: deriveGridUserStatusLabel({ enabled, runtimeState, longOpen, shortOpen }),
+    displayStatus: deriveGridUserStatusLabel({ enabled, runtimeState, longOpen, shortOpen }),
   };
 };
 

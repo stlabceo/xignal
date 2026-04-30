@@ -263,6 +263,16 @@ export const auth = {
 				callback(res.response?.data || false);
 			});
 	},
+	ensureHedgeMode(body, callback) {
+		api
+			.post('/admin/account/ensure-hedge-mode', body)
+			.then((res) => {
+				callback(res);
+			})
+			.catch((res) => {
+				callback(res.response?.data || false);
+			});
+	},
 	runtimeOpsOverview(params, callback) {
 		api
 			.get('/admin/runtime/ops/overview', { params })

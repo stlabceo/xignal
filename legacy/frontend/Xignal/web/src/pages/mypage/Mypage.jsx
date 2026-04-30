@@ -26,13 +26,23 @@ const formatMetric = (value, digits = 4) => {
 
 const getReadinessTone = (status) => {
 	const normalized = String(status || '').toUpperCase();
-	if (normalized === 'READY' || normalized === 'OK' || normalized === 'CONNECTED') {
+	if (normalized === 'READY' || normalized === 'OK' || normalized === 'CONNECTED' || normalized === 'READ_OK_ORDER_PERMISSION_UNVERIFIED' || normalized === 'HEDGE') {
 		return 'border-emerald-200 bg-emerald-50 text-emerald-700';
 	}
-	if (normalized === 'ACTION_REQUIRED' || normalized === 'CHECK_RUNTIME_HEALTH') {
+	if (normalized === 'ACTION_REQUIRED' || normalized === 'CHECK_RUNTIME_HEALTH' || normalized === 'UNKNOWN' || normalized === 'ONE_WAY') {
 		return 'border-amber-200 bg-amber-50 text-amber-700';
 	}
 	return 'border-red-200 bg-red-50 text-red-700';
+};
+
+const formatReadinessBadgeLabel = (status) => {
+	const normalized = String(status || '').toUpperCase();
+	if (normalized === 'OK' || normalized === 'READY' || normalized === 'CONNECTED' || normalized === 'HEDGE') return '정상';
+	if (normalized === 'READ_OK_ORDER_PERMISSION_UNVERIFIED') return '읽기 정상';
+	if (normalized === 'UNKNOWN') return '검증 불가';
+	if (normalized === 'ONE_WAY') return '자동 설정 필요';
+	if (normalized === 'ACTION_REQUIRED' || normalized === 'CHECK_RUNTIME_HEALTH') return '확인 필요';
+	return status || '-';
 };
 
 const ReadinessBadge = ({ value, label }) => (
@@ -48,7 +58,7 @@ const ReadinessItem = ({ label, value, status, action }) => (
 				<p className="text-sm font-semibold text-slate-900">{label}</p>
 				<p className="mt-1 text-sm text-slate-600">{value || '-'}</p>
 			</div>
-			<ReadinessBadge value={status} label={status === 'OK' ? '정상' : status === 'READY' ? '정상' : '확인 필요'} />
+			<ReadinessBadge value={status} label={formatReadinessBadgeLabel(status)} />
 		</div>
 		{action ? <p className="mt-2 text-xs text-amber-700">{action}</p> : null}
 	</div>
@@ -65,9 +75,11 @@ const Mypage = () => {
 	const [saveMessage, setSaveMessage] = useState('');
 	const [validateMessage, setValidateMessage] = useState('');
 	const [pageMessage, setPageMessage] = useState('');
+	const [hedgeModeMessage, setHedgeModeMessage] = useState('');
 	const [isSaving, setIsSaving] = useState(false);
 	const [isValidating, setIsValidating] = useState(false);
 	const [isRefreshing, setIsRefreshing] = useState(false);
+	const [isEnsuringHedgeMode, setIsEnsuringHedgeMode] = useState(false);
 
 	const signout = () => {
 		auth.logout();
@@ -137,6 +149,16 @@ const Mypage = () => {
 		auth.validateMemberKeys({ appKey, appSecret }, (res) => {
 			setValidateMessage(res?.message || res?.msg || 'API 검증에 실패했습니다.');
 			setIsValidating(false);
+			loadRuntimeInfo();
+		});
+	};
+
+	const handleEnsureHedgeMode = () => {
+		setIsEnsuringHedgeMode(true);
+		setHedgeModeMessage('');
+		auth.ensureHedgeMode({}, (res) => {
+			setHedgeModeMessage(res?.message || '헤지 모드 자동 설정은 현재 실행할 수 없습니다.');
+			setIsEnsuringHedgeMode(false);
 			loadRuntimeInfo();
 		});
 	};
@@ -237,11 +259,25 @@ const Mypage = () => {
 				) : null}
 
 				<div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-					<ReadinessItem label="API 연결" value={readiness?.apiConnection === 'OK' ? 'API Key 등록됨' : 'API Key 확인 필요'} status={readiness?.apiConnection} action={readiness?.apiConnection === 'OK' ? '' : 'API Key를 등록해주세요.'} />
-					<ReadinessItem label="API 권한" value={readiness?.apiPermission === 'OK' ? '선물 읽기/주문 권한 정상' : '런타임 health에서 최종 확인'} status={readiness?.apiPermission} action={readiness?.apiPermission === 'OK' ? '' : 'Futures 권한과 IP 허용 목록을 확인해주세요.'} />
-					<ReadinessItem label="선물 지갑 USDT" value={readiness?.futuresBalanceUsdt == null ? '데이터 준비중' : `${formatMetric(readiness.futuresBalanceUsdt, 2)} USDT`} status={readiness?.futuresBalanceUsdt > 0 ? 'OK' : 'ACTION_REQUIRED'} action={readiness?.futuresBalanceUsdt > 0 ? '' : '현물 지갑에서 선물 지갑으로 USDT를 이동해주세요.'} />
-					<ReadinessItem label="최소 주문 가능 금액" value={readiness?.canTradeFutures ? '주문 가능' : '잔고 또는 권한 확인 필요'} status={readiness?.canTradeFutures ? 'OK' : 'ACTION_REQUIRED'} action={readiness?.canTradeFutures ? '' : '거래금액을 높이거나 선물 지갑 잔고를 보충해주세요.'} />
-					<ReadinessItem label="포지션 모드" value="헤지 모드 필요" status="CHECK_RUNTIME_HEALTH" action="Binance Futures가 Hedge Mode인지 확인해주세요." />
+					<ReadinessItem label="API 연결" value={readiness?.apiConnectionLabel || (readiness?.apiConnection === 'OK' ? '연결 정상' : 'API Key 확인 필요')} status={readiness?.apiConnection} action={readiness?.apiConnection === 'OK' ? '' : 'API Key를 등록해주세요.'} />
+					<ReadinessItem label="API 권한" value={readiness?.apiPermissionLabel || '검증 불가'} status={readiness?.apiPermission} action={readiness?.apiPermission === 'ACTION_REQUIRED' ? 'Futures 권한 또는 IP 허용 목록을 확인해주세요.' : ''} />
+					<ReadinessItem label="투자 가능 잔고" value={readiness?.futuresBalanceUsdt == null ? '데이터 준비중' : `${formatMetric(readiness.futuresBalanceUsdt, 2)} USDT`} status={readiness?.futuresBalanceUsdt > 0 ? 'OK' : 'ACTION_REQUIRED'} action={readiness?.futuresBalanceUsdt > 0 ? '자동매매에 사용할 수 있는 선물 지갑 USDT입니다.' : '투자 가능 USDT가 없습니다. Binance 현물 지갑에서 선물 지갑으로 USDT를 이동해야 합니다.'} />
+					<div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
+						<div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+							<div>
+								<p className="text-sm font-semibold text-slate-900">포지션 모드</p>
+								<p className="mt-1 text-sm text-slate-600">{readiness?.positionModeLabel || readiness?.hedgeMode?.label || '확인 불가'}</p>
+							</div>
+							<ReadinessBadge value={readiness?.positionMode || readiness?.hedgeMode?.status} label={readiness?.positionMode === 'HEDGE' ? '정상' : readiness?.positionMode === 'ONE_WAY' ? '자동 설정 필요' : '검증 불가'} />
+						</div>
+						<div className="mt-3 flex flex-wrap items-center gap-2">
+							<button type="button" className="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 disabled:opacity-50" onClick={handleEnsureHedgeMode} disabled={isEnsuringHedgeMode || readiness?.hedgeMode?.blockedByWriteGuard}>
+								{isEnsuringHedgeMode ? '확인 중...' : readiness?.hedgeMode?.actionLabel || '헤지 모드 자동 설정'}
+							</button>
+							<span className="text-xs text-slate-500">{readiness?.hedgeMode?.message || '설정 변경은 승인된 live-write preflight에서만 실행됩니다.'}</span>
+						</div>
+						{hedgeModeMessage ? <p className="mt-2 text-xs text-amber-700">{hedgeModeMessage}</p> : null}
+					</div>
 					<ReadinessItem label="자산 모드" value="USDT 선물 지원" status="OK" />
 					<ReadinessItem label="마지막 동기화" value={formatDateTime(readiness?.lastSyncedAt)} status={readiness?.lastSyncedAt ? 'OK' : 'ACTION_REQUIRED'} action={readiness?.lastSyncedAt ? '' : '새로고침 또는 API 연결 확인이 필요합니다.'} />
 					<ReadinessItem label="User Stream" value={runtimeHealth?.statusLabel || runtimeHealth?.status || '미확인'} status={runtimeHealth?.status || 'ACTION_REQUIRED'} action={runtimeHealth?.lastErrorMessage || ''} />
