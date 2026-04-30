@@ -13,6 +13,7 @@ const pidPositionLedger = require("./pid-position-ledger");
 const { getExchangeSymbolRuleSummary } = require("./admin-management");
 const { insertBinanceRuntimeEventLog } = require("./binance-runtime-event-log");
 const strategyControlState = require("./strategy-control-state");
+const binanceWriteGuard = require("./binance-write-guard");
 let gridEngine = null;
 let policyEngine = null;
 const Binance = require('node-binance-api');
@@ -47,6 +48,7 @@ const accountRiskSnapshotCache = {};
 let futuresServerTimeOffsetMs = 0;
 let futuresServerTimeSyncedAt = 0;
 const DEBUG_RUNTIME_TRACE = process.env.DEBUG_TIME_EXPIRY === '1' || process.env.DEBUG_RUNTIME_TRACE === '1';
+const isQaReplayMode = binanceWriteGuard.isQaReplayMode;
 
 let io = null;
 const FUTURES_BASE_URL = 'https://fapi.binance.com';
@@ -118,6 +120,185 @@ const createBinanceApiClient = (appKey, appSecret) => new Binance().options({
     futures: true,
     hedgeMode: true,
 });
+
+const isQaTempMarker = (value) => String(value || '').trim().toUpperCase().startsWith('QA_');
+const isQaReplayMockBinanceClient = (uid) => Boolean(binance?.[uid]?.__qaMockBinanceClient);
+
+const loadLiveGridWriteGuardRow = async (uid, pid) => {
+    if(!uid || !pid){
+        return null;
+    }
+
+    try{
+        const [rows] = await db.query(
+            `SELECT id, uid, a_name, symbol, enabled, regimeStatus
+               FROM live_grid_strategy_list
+              WHERE uid = ?
+                AND id = ?
+              LIMIT 1`,
+            [uid, pid]
+        );
+        return rows?.[0] || null;
+    }catch(error){
+        return null;
+    }
+};
+
+const shouldBlockGridCloseBinanceWrite = async ({ uid, pid, symbol } = {}) => {
+    const allowQaMockClient = isQaReplayMode() && isQaReplayMockBinanceClient(uid);
+    if(isQaReplayMode() && !allowQaMockClient){
+        return {
+            blocked: true,
+            reason: 'QA_REPLAY_MODE_BINANCE_WRITE_BLOCKED',
+            row: null,
+        };
+    }
+
+    const row = await loadLiveGridWriteGuardRow(uid, pid);
+    if(!allowQaMockClient && row && (isQaTempMarker(row.a_name) || isQaTempMarker(row.symbol))){
+        return {
+            blocked: true,
+            reason: 'QA_TEMP_STRATEGY_BINANCE_WRITE_BLOCKED',
+            row,
+        };
+    }
+
+    if(!allowQaMockClient && isQaTempMarker(symbol)){
+        return {
+            blocked: true,
+            reason: 'QA_SYMBOL_BINANCE_WRITE_BLOCKED',
+            row,
+        };
+    }
+
+    return { blocked: false, reason: null, row };
+};
+
+const logBlockedGridCloseBinanceWrite = async ({ uid, pid, symbol, leg, qty, reason, row } = {}) => {
+    const note = `blocked grid market close before Binance write: ${reason}`;
+    console.log(`[BINANCE_WRITE_BLOCKED] ${note}`, {
+        uid,
+        pid,
+        symbol,
+        leg,
+        qty,
+        strategyName: row?.a_name || null,
+    });
+
+    if(isQaReplayMode()){
+        return null;
+    }
+
+    return await insertBinanceRuntimeEventLog({
+        uid,
+        pid,
+        strategyCategory: 'grid',
+        eventType: 'BINANCE_WRITE_BLOCKED',
+        eventCode: reason || 'GRID_MARKET_CLOSE_BLOCKED',
+        severity: 'critical',
+        symbol,
+        side: leg === 'LONG' ? 'SELL' : leg === 'SHORT' ? 'BUY' : null,
+        positionSide: leg || null,
+        quantity: qty,
+        note,
+        payload: {
+            callsite: 'coin.closeGridLegMarketOrder',
+            qaReplayMode: isQaReplayMode(),
+            strategyName: row?.a_name || null,
+            strategySymbol: row?.symbol || null,
+            enabled: row?.enabled || null,
+            regimeStatus: row?.regimeStatus || null,
+        },
+    });
+};
+
+const logBlockedBinanceWrite = async ({ error, context = {} } = {}) => {
+    const guardContext = error?.guardContext || context || {};
+    const reason = error?.guardReason || error?.guardDecision?.reason || 'BINANCE_WRITE_BLOCKED_BY_GUARD';
+    const note = `blocked Binance write before exchange call: ${reason}`;
+    console.log(`[BINANCE_WRITE_BLOCKED_BY_GUARD] ${note}`, guardContext);
+
+    if(isQaReplayMode()){
+        return null;
+    }
+
+    try{
+        return await insertBinanceRuntimeEventLog({
+            uid: guardContext.uid || context.uid || null,
+            pid: guardContext.pid || context.pid || null,
+            strategyCategory: guardContext.strategyCategory || context.strategyCategory || null,
+            eventType: 'BINANCE_WRITE_BLOCKED',
+            eventCode: reason,
+            severity: 'critical',
+            symbol: guardContext.symbol || context.symbol || null,
+            side: guardContext.side || context.side || null,
+            positionSide: guardContext.positionSide || context.positionSide || null,
+            clientOrderId: guardContext.clientOrderId || context.clientOrderId || null,
+            orderId: guardContext.orderId || context.orderId || null,
+            orderType: context.orderType || null,
+            quantity: context.quantity || null,
+            note,
+            payload: {
+                callsite: guardContext.caller || context.caller || null,
+                guardReason: reason,
+                qaReplayMode: isQaReplayMode(),
+                action: guardContext.action || context.action || null,
+            },
+        });
+    }catch(logError){
+        return null;
+    }
+};
+
+const assertBinanceWriteAllowedOrLog = async (context = {}) => {
+    const client = context.uid ? binance?.[context.uid] : null;
+    try{
+        return binanceWriteGuard.assertBinanceWriteAllowed({
+            ...context,
+            clientIsMock: context.clientIsMock === true || Boolean(client?.__qaMockBinanceClient),
+        });
+    }catch(error){
+        if(binanceWriteGuard.isBinanceWriteGuardError(error)){
+            await logBlockedBinanceWrite({ error, context });
+        }
+        throw error;
+    }
+};
+
+const submitFuturesOrder = async (context = {}, type, side, symbol, qty, price, options = {}) => {
+    await assertBinanceWriteAllowedOrLog({
+        ...context,
+        action: context.action || 'WRITE_CREATE_ORDER',
+        symbol,
+        side,
+        positionSide: options?.positionSide || context.positionSide || null,
+        clientOrderId: options?.newClientOrderId || context.clientOrderId || null,
+        orderType: type,
+        quantity: qty,
+    });
+    return await binance[context.uid].futuresOrder(type, side, symbol, qty, price, options);
+};
+
+const cancelFuturesOrder = async (context = {}, symbol, orderId) => {
+    await assertBinanceWriteAllowedOrLog({
+        ...context,
+        action: context.action || 'WRITE_CANCEL_ORDER',
+        symbol,
+        orderId,
+    });
+    return await binance[context.uid].futuresCancel(symbol, orderId);
+};
+
+const privateFuturesClientWrite = async (context = {}, endpoint, params = {}, method = 'POST') => {
+    await assertBinanceWriteAllowedOrLog({
+        ...context,
+        action: context.action || `PRIVATE_FUTURES_${String(method || 'POST').toUpperCase()}`,
+        symbol: params?.symbol || context.symbol || null,
+        clientOrderId: params?.clientAlgoId || params?.newClientOrderId || context.clientOrderId || null,
+        orderId: params?.orderId || params?.algoId || context.orderId || null,
+    });
+    return await binance[context.uid].privateFuturesRequest(endpoint, params, method);
+};
 
 const updateBinanceRuntimeMeta = (uid, patch = {}) => {
     const meta = ensureBinanceRuntimeMeta(uid);
@@ -943,6 +1124,40 @@ const setLivePlayReadyModeIfCurrent = async (play, expectedStatus) => {
     return true;
 }
 
+const setLivePlayReadyModeIfCurrentWithoutRuntimeReset = async (play, expectedStatus, actionCode = 'SYSTEM_RESET_READY_NO_RUNTIME_RESET') => {
+    if(!play?.id || !expectedStatus){
+        return false;
+    }
+
+    const controlState = runtimeState.getControlState(play);
+    const latest = await loadLivePlaySnapshot(play.id);
+    if(!latest || latest.status !== expectedStatus){
+        return false;
+    }
+    const callerHint = getRuntimeCallerHint();
+    await strategyControlState.applyPlayControlState({
+        mode: 'LIVE',
+        pid: play.id,
+        enabled: controlState === 'ON' ? 'Y' : 'N',
+        status: 'READY',
+        resetRuntime: false,
+        audit: buildSignalSystemAuditPayload(
+            latest,
+            actionCode,
+            `coin:set-ready-mode-no-runtime-reset-if-current:${expectedStatus}`,
+            {
+                expectedStatus,
+                callerHint,
+            }
+        ),
+    });
+    await positionOwnership.releaseAllPositionBucketOwnersByPid({
+        ownerPid: play.id,
+        ownerStrategyCategory: 'signal',
+    });
+    return true;
+}
+
 const restoreLivePlayStatus = async (pid, status) => {
     if(!pid || !status){
         return false;
@@ -973,6 +1188,51 @@ const restoreLivePlayStatus = async (pid, status) => {
 const logClosePartialFill = (closeType, ownerUserId, pid, oid, symbol, side, qty, price, endStatus) => {
     const runtimeMessage = `closeType:${closeType}, endStatus:${endStatus}, symbol:${symbol}, side:${side}, qty:${qty}, price:${price}`;
     exports.msgAdd('closePartialFill', endStatus, runtimeMessage, ownerUserId, pid, oid, symbol, side);
+}
+
+const TERMINAL_ORDER_STATUSES = new Set(['CANCELED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'REJECTED']);
+const RECOVERABLE_FILL_ORDER_STATUSES = new Set(['FILLED', 'PARTIALLY_FILLED', 'CANCELED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'REJECTED']);
+const isTerminalOrderStatus = (status) => TERMINAL_ORDER_STATUSES.has(String(status || '').trim().toUpperCase());
+const isRecoverableFillOrderStatus = (status) => RECOVERABLE_FILL_ORDER_STATUSES.has(String(status || '').trim().toUpperCase());
+const getOrderExecutedQty = (order = {}) => {
+    const values = [
+        order?.executedQty,
+        order?.cumQty,
+        order?.z,
+    ];
+    for(const value of values){
+        const numeric = Number(value || 0);
+        if(numeric > 0){
+            return numeric;
+        }
+    }
+    return 0;
+}
+
+const getRecoveredFallbackFillQty = (order = {}) => {
+    const executedQty = getOrderExecutedQty(order);
+    if(executedQty > 0){
+        return executedQty;
+    }
+    const status = String(order?.status || order?.X || '').trim().toUpperCase();
+    return status === 'FILLED' ? Number(order?.origQty || order?.q || 0) : 0;
+}
+
+const getTerminalOrderAuditLabel = (status, hasFill) => {
+    const normalized = String(status || '').trim().toUpperCase();
+    if(normalized === 'EXPIRED_IN_MATCH'){
+        return hasFill ? 'ORDER_EXPIRED_IN_MATCH_WITH_FILL' : 'ORDER_EXPIRED_IN_MATCH_NO_FILL';
+    }
+    if(normalized === 'REJECTED'){
+        return hasFill ? 'ORDER_REJECTED_WITH_FILL' : 'ORDER_REJECTED_NO_FILL';
+    }
+    if(normalized === 'CANCELED'){
+        return hasFill ? 'ORDER_PARTIAL_REMAINDER_CANCELED' : 'ORDER_TERMINAL_WITHOUT_FILL';
+    }
+    if(normalized === 'EXPIRED'){
+        return hasFill ? 'ORDER_PARTIAL_REMAINDER_EXPIRED' : 'ORDER_TERMINAL_WITHOUT_FILL';
+    }
+    return hasFill ? 'ORDER_TERMINAL_WITH_EXECUTED_QTY' : 'ORDER_TERMINAL_WITHOUT_FILL';
 }
 
 const resolveEntrySignalTypeFromCloseSide = (signalType, closeSide) => {
@@ -1261,8 +1521,16 @@ const resolveOrderRuntimeLifecycle = (order = {}) => {
             : 'EXPIRED';
     }
 
+    if(endStatus === 'EXPIRED_IN_MATCH'){
+        return executedQty > 0 && (!originalQty || executedQty < originalQty)
+            ? 'PARTIAL_EXPIRED_IN_MATCH'
+            : 'EXPIRED_IN_MATCH';
+    }
+
     if(endStatus === 'REJECTED'){
-        return 'REJECTED';
+        return executedQty > 0
+            ? 'PARTIAL_REJECTED'
+            : 'REJECTED';
     }
 
     if(endStatus === 'NEW'){
@@ -1319,6 +1587,8 @@ const resolveRuntimeEventSeverity = ({ orderKind = 'UNKNOWN', lifecycle = 'UPDAT
             normalizedLifecycle.startsWith('PARTIAL')
             || normalizedLifecycle === 'CANCELED'
             || normalizedLifecycle === 'EXPIRED'
+            || normalizedLifecycle === 'EXPIRED_IN_MATCH'
+            || normalizedLifecycle === 'REJECTED'
         ){
             return 'high';
         }
@@ -1328,6 +1598,8 @@ const resolveRuntimeEventSeverity = ({ orderKind = 'UNKNOWN', lifecycle = 'UPDAT
         normalizedLifecycle.startsWith('PARTIAL')
         || normalizedLifecycle === 'CANCELED'
         || normalizedLifecycle === 'EXPIRED'
+        || normalizedLifecycle === 'EXPIRED_IN_MATCH'
+        || normalizedLifecycle === 'REJECTED'
         || normalizedLifecycle === 'TRIGGERED'
     ){
         return 'medium';
@@ -1586,7 +1858,7 @@ const handleAlgoReservationRuntimeUpdate = async (uid, data) => {
             await pidPositionLedger.bindReservationActualOrderId(clientAlgoId, context.actualOrderId);
         }
 
-        if(['CANCELED', 'EXPIRED', 'REJECTED'].includes(algoStatus)){
+        if(['CANCELED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'REJECTED'].includes(algoStatus)){
             await pidPositionLedger.markReservationsCanceled([clientAlgoId]);
             outcome = `RESERVATION_${algoStatus}`;
             return true;
@@ -1849,6 +2121,16 @@ const ensureBinanceApiClient = async (uid, options = {}) => {
         return false;
     }
 
+    if(isQaReplayMode() && !binance[uid]){
+        updateBinanceRuntimeMeta(uid, {
+            connected: false,
+            status: 'QA_REPLAY_WRITE_BLOCKED',
+            lastErrorCode: 'QA_REPLAY_MODE_BINANCE_CLIENT_BLOCKED',
+            lastErrorMessage: 'QA replay cannot initialize a real Binance write-capable client',
+        });
+        return false;
+    }
+
     if(isExcludedRuntimeUid(uid)){
         markBinanceRuntimeExcluded(uid);
         return false;
@@ -1871,6 +2153,18 @@ const ensureBinanceApiClient = async (uid, options = {}) => {
 }
 
 const privateFuturesSignedRequest = async (uid, path, params = {}, method = 'GET') => {
+    const normalizedMethod = String(method || 'GET').trim().toUpperCase();
+    if(normalizedMethod !== 'GET'){
+        await assertBinanceWriteAllowedOrLog({
+            uid,
+            action: `SIGNED_${normalizedMethod}`,
+            symbol: params?.symbol || null,
+            clientOrderId: params?.clientAlgoId || params?.newClientOrderId || params?.origClientOrderId || null,
+            orderId: params?.orderId || params?.algoId || null,
+            caller: `coin.privateFuturesSignedRequest:${path}`,
+        });
+    }
+
     if(isExcludedRuntimeUid(uid)){
         const error = new Error('runtime excluded');
         error.code = -90022;
@@ -1895,7 +2189,7 @@ const privateFuturesSignedRequest = async (uid, path, params = {}, method = 'GET
 
         const url = `${FUTURES_BASE_URL}${path}?${signedQuery}`;
         const response = await axios({
-            method,
+            method: normalizedMethod,
             url,
             headers: {
                 'X-MBX-APIKEY': credentials.appKey,
@@ -2541,7 +2835,7 @@ const buildRecoveredOrderFillUnits = ({
             clientOrderId,
             orderId,
             tradeId: null,
-            qty: Number(targetOrder?.executedQty || targetOrder?.origQty || 0),
+            qty: getRecoveredFallbackFillQty(targetOrder),
             fee: 0,
             realizedPnl: Number(defaultRealizedPnl || 0),
             price: fallbackPrice,
@@ -2597,7 +2891,7 @@ const loadRecentSignalCloseExecutionFromExchange = async ({
             }
 
             const status = String(order?.status || '').toUpperCase();
-            if(!['FILLED', 'PARTIALLY_FILLED'].includes(status)){
+            if(!isRecoverableFillOrderStatus(status)){
                 return false;
             }
 
@@ -2896,7 +3190,7 @@ const loadRecentSignalEntryExecutionFromExchange = async ({
             }
 
             const status = String(order?.status || '').toUpperCase();
-            if(!['FILLED', 'PARTIALLY_FILLED'].includes(status)){
+            if(!isRecoverableFillOrderStatus(status)){
                 return false;
             }
 
@@ -3074,7 +3368,7 @@ const loadRecentGridCloseExecutionFromExchange = async ({
             }
 
             const status = String(order?.status || '').toUpperCase();
-            if(!['FILLED', 'PARTIALLY_FILLED'].includes(status)){
+            if(!isRecoverableFillOrderStatus(status)){
                 return false;
             }
 
@@ -3243,7 +3537,7 @@ const loadGridReservationOwnedExitExecutionsFromExchange = async ({
                     ? null
                     : String(order.orderId).trim();
 
-                if(!['FILLED', 'PARTIALLY_FILLED', 'CANCELED'].includes(status)){
+                if(!isRecoverableFillOrderStatus(status)){
                     return false;
                 }
                 if(orderSide !== closeSide){
@@ -3276,9 +3570,7 @@ const loadGridReservationOwnedExitExecutionsFromExchange = async ({
             continue;
         }
 
-        const targetOrder = candidates.find((order) =>
-            ['FILLED', 'PARTIALLY_FILLED'].includes(String(order?.status || '').trim().toUpperCase())
-        ) || candidates[0];
+        const targetOrder = candidates.find((order) => getOrderExecutedQty(order) > 0) || candidates[0];
         const matchedTrades = (relatedTrades || []).filter((trade) =>
             Number(trade?.orderId || 0) === Number(targetOrder?.orderId || 0)
             && String(trade?.side || '').trim().toUpperCase() === closeSide
@@ -3461,7 +3753,7 @@ const recoverGridExternalManualCloseFromExchange = async ({
             const positionSide = String(order?.positionSide || '').trim().toUpperCase();
             const clientOrderId = String(order?.clientOrderId || '').trim();
             const type = String(order?.type || order?.origType || '').trim().toUpperCase();
-            if(!['FILLED', 'PARTIALLY_FILLED'].includes(status)){
+            if(!isRecoverableFillOrderStatus(status)){
                 return false;
             }
             if(side !== closeSide || (positionSide && positionSide !== normalizedLeg)){
@@ -3684,7 +3976,7 @@ const loadRecentGridEntryExecutionFromExchange = async ({
             }
 
             const status = String(order?.status || '').toUpperCase();
-            if(!['FILLED', 'PARTIALLY_FILLED'].includes(status)){
+            if(!isRecoverableFillOrderStatus(status)){
                 return false;
             }
 
@@ -4025,7 +4317,18 @@ const recoverSignalExitFillFromExchange = async ({
                 });
             }
         }else{
-            await setLivePlayReadyModeIfCurrent(row, row.status);
+            const siblingOrders = timeExitRecovery
+                ? await listOpenBoundExitOrders(uid, row.symbol, row.id)
+                : [];
+            if(timeExitRecovery && siblingOrders.length > 0){
+                await setLivePlayReadyModeIfCurrentWithoutRuntimeReset(
+                    row,
+                    row.status,
+                    'SIGNAL_TIME_EXIT_READY_NO_RUNTIME_RESET'
+                );
+            }else{
+                await setLivePlayReadyModeIfCurrent(row, row.status);
+            }
             if(timeExitRecovery){
                 logOrderRuntimeTrace('SIGNAL_TIME_EXIT_RECOVERY_SNAPSHOT_SYNCED', {
                     uid,
@@ -4043,7 +4346,6 @@ const recoverSignalExitFillFromExchange = async ({
                     status: 'READY',
                     r_qty: 0,
                 });
-                const siblingOrders = await listOpenBoundExitOrders(uid, row.symbol, row.id);
                 if(siblingOrders.length > 0){
                     logOrderRuntimeTrace('SIGNAL_TIME_EXIT_SIBLING_PROTECTION_ACTIVE', {
                         uid,
@@ -4624,7 +4926,7 @@ exports.recoverGridExitFillFromExchange = async ({
         }
     }
 
-    if(appliedFillCount > 0 || duplicateFillCount > 0){
+    if(appliedFillCount > 0){
         const siblingReservationIds = activeReservations
             .map((reservation) => String(reservation?.clientOrderId || '').trim())
             .filter((clientOrderId) => Boolean(clientOrderId) && !matchedReservationClientOrderIds.has(clientOrderId));
@@ -4648,6 +4950,16 @@ exports.recoverGridExitFillFromExchange = async ({
             leg: normalizedLeg,
             includeEntries: false,
             includeExits: true,
+        });
+    }else if(duplicateFillCount > 0){
+        logOrderRuntimeTrace('GRID_RESERVATION_EXIT_RECOVERY_DUPLICATE_NO_SIBLING_CANCEL', {
+            uid,
+            pid: row.id,
+            symbol: row.symbol,
+            positionSide: normalizedLeg,
+            matchedReservationClientOrderIds: Array.from(matchedReservationClientOrderIds),
+            duplicateFillCount,
+            reason: 'duplicate-exit-fill-must-not-cancel-current-active-protection',
         });
     }
     await pidPositionLedger.syncGridLegSnapshot(row.id, normalizedLeg);
@@ -5094,6 +5406,20 @@ exports.closeGridLegMarketOrder = async ({
         return null;
     }
 
+    const writeGuard = await shouldBlockGridCloseBinanceWrite({ uid, pid, symbol });
+    if(writeGuard.blocked){
+        await logBlockedGridCloseBinanceWrite({
+            uid,
+            pid,
+            symbol,
+            leg,
+            qty,
+            reason: writeGuard.reason,
+            row: writeGuard.row,
+        });
+        return null;
+    }
+
     if(!(await ensureBinanceApiClient(uid))){
         return null;
     }
@@ -5128,7 +5454,35 @@ exports.closeGridLegMarketOrder = async ({
 
     const side = leg === 'LONG' ? 'SELL' : 'BUY';
     const clientOrderId = `GMANUAL_${leg === 'LONG' ? 'L' : 'S'}_${uid}_${pid}_${Date.now().toString().slice(-8)}`;
-    const order = await binance[uid].futuresOrder(
+    await insertBinanceRuntimeEventLog({
+        uid,
+        pid,
+        strategyCategory: 'grid',
+        eventType: 'BINANCE_WRITE_ATTEMPT',
+        eventCode: 'GRID_MARKET_CLOSE_ATTEMPT',
+        severity: 'high',
+        symbol,
+        side,
+        positionSide: leg,
+        clientOrderId,
+        orderType: 'MARKET',
+        quantity: normalizedQty,
+        note: 'about to submit grid market reduce-only close',
+        payload: {
+            callsite: 'coin.closeGridLegMarketOrder',
+            requestedQty,
+            positionQty,
+            finalCloseQty: closeQty,
+        },
+    });
+    const order = await submitFuturesOrder(
+        {
+            uid,
+            pid,
+            strategyCategory: 'grid',
+            action: 'WRITE_CLOSE_MARKET',
+            caller: 'coin.closeGridLegMarketOrder',
+        },
         'MARKET',
         side,
         symbol,
@@ -5139,6 +5493,27 @@ exports.closeGridLegMarketOrder = async ({
             newClientOrderId: clientOrderId,
         }
     );
+
+    await insertBinanceRuntimeEventLog({
+        uid,
+        pid,
+        strategyCategory: 'grid',
+        eventType: 'BINANCE_WRITE_RESULT',
+        eventCode: 'GRID_MARKET_CLOSE_SUBMITTED',
+        severity: 'high',
+        symbol,
+        side,
+        positionSide: leg,
+        clientOrderId,
+        orderId: order?.orderId || null,
+        orderType: 'MARKET',
+        quantity: normalizedQty,
+        note: 'submitted grid market reduce-only close',
+        payload: {
+            callsite: 'coin.closeGridLegMarketOrder',
+            order,
+        },
+    });
 
     await pidPositionLedger.replaceExitReservations({
         uid,
@@ -5193,7 +5568,15 @@ const cancelBoundExitOrders = async (uid, symbol, pid, excludeType = null) => {
                     algoId: order.orderId,
                 }, 'DELETE');
             }else{
-                await binance[uid].futuresCancel(symbol, order.orderId);
+                await cancelFuturesOrder({
+                    uid,
+                    pid,
+                    strategyCategory: 'signal',
+                    action: 'WRITE_CANCEL_ORDER',
+                    caller: 'coin.cancelBoundExitOrders',
+                    clientOrderId: clientOrderId || null,
+                    orderType,
+                }, symbol, order.orderId);
             }
             canceledCount += 1;
             if(clientOrderId){
@@ -6470,7 +6853,26 @@ exports.reconcileLiveSignalRuntimeIssues = async (uid, options = {}) => {
                     positionSide: getSignalPositionSide(resolvedSignalType),
                 });
                 if(Number(latestSnapshot?.openQty || 0) <= 0){
-                    await setLivePlayReadyModeIfCurrent(row, row.status);
+                    const siblingOrders = await listOpenBoundExitOrders(uid, row.symbol, row.id);
+                    if(siblingOrders.length > 0){
+                        await setLivePlayReadyModeIfCurrentWithoutRuntimeReset(
+                            row,
+                            row.status,
+                            'SIGNAL_TIME_EXIT_READY_NO_RUNTIME_RESET'
+                        );
+                        logOrderRuntimeTrace('SIGNAL_TIME_EXIT_SIBLING_PROTECTION_ACTIVE', {
+                            uid,
+                            pid: row.id,
+                            symbol: row.symbol,
+                            positionSide: getSignalPositionSide(resolvedSignalType),
+                            remainingQty: 0,
+                            siblingCount: siblingOrders.length,
+                            siblingClientOrderIds: siblingOrders.map((order) => order.clientOrderId || null).filter(Boolean),
+                            reason: 'USER_ACTION_REQUIRED_TIME_EXIT_ORPHAN_PROTECTION',
+                        });
+                    }else{
+                        await setLivePlayReadyModeIfCurrent(row, row.status);
+                    }
                     await evaluateLiveStrategyPoliciesAfterClose(uid, issue.pid);
                 }
 
@@ -6783,7 +7185,16 @@ exports.cancelGridOrders = async ({
                   clientAlgoId: order.clientOrderId,
                 }, 'DELETE');
             }else{
-                await binance[uid].futuresCancel(symbol, order.orderId);
+                await cancelFuturesOrder({
+                    uid,
+                    pid,
+                    strategyCategory: 'grid',
+                    action: 'WRITE_CANCEL_ORDER',
+                    caller: 'coin.cancelGridOrders',
+                    clientOrderId: order.clientOrderId || null,
+                    positionSide: leg || null,
+                    orderType: prefix,
+                }, symbol, order.orderId);
           }
           canceledCount += 1;
           if(order.clientOrderId){
@@ -6871,7 +7282,14 @@ exports.placeGridEntryOrder = async ({
 
         const orderSide = leg === 'LONG' ? 'BUY' : 'SELL';
         const clientOrderId = buildGridClientOrderId('GENTRY', leg, uid, pid);
-        const order = await binance[uid].futuresOrder(
+        const order = await submitFuturesOrder(
+            {
+                uid,
+                pid,
+                strategyCategory: 'grid',
+                action: 'WRITE_CREATE_ORDER',
+                caller: 'coin.placeGridEntryOrder',
+            },
             'LIMIT',
             orderSide,
             symbol,
@@ -7460,9 +7878,12 @@ const syncEnterOrderFromQuery = async (uid, pid, minQty, queriedOrder) => {
         ]);
     }
 
-    const status = queriedOrder.status;
-    if(status === 'FILLED' || status === 'PARTIALLY_FILLED'){
+    const status = String(queriedOrder.status || '').trim().toUpperCase();
+    const executedQty = getRecoveredFallbackFillQty(queriedOrder);
+    if(isRecoverableFillOrderStatus(status) && executedQty > 0){
         const play = await loadLivePlaySnapshot(pid);
+        let resolvedOpenQty = 0;
+        let resolvedAvgEntryPrice = 0;
         await touchSignalPositionOwnership({
             uid,
             pid,
@@ -7483,11 +7904,11 @@ const syncEnterOrderFromQuery = async (uid, pid, minQty, queriedOrder) => {
                 positionSide,
                 sourceClientOrderId: queriedOrder.clientOrderId || queriedOrder.origClientOrderId || null,
                 sourceOrderId: queriedOrder.orderId || null,
-                fillQty: queriedOrder.executedQty || queriedOrder.origQty || 0,
+                fillQty: executedQty,
                 fillPrice: queriedOrder.avgPrice || queriedOrder.price || 0,
                 fee: 0,
                 tradeTime: queriedOrder.updateTime || queriedOrder.time || null,
-                eventType: 'ENTRY_SYNC_QUERY',
+                eventType: `ENTRY_SYNC_QUERY_${status}`,
                 note: `sync-enter-query:${status}`,
             });
             await pidPositionLedger.syncSignalPlaySnapshot(pid, positionSide);
@@ -7497,8 +7918,8 @@ const syncEnterOrderFromQuery = async (uid, pid, minQty, queriedOrder) => {
                 strategyCategory: 'signal',
                 positionSide,
             });
-            const resolvedOpenQty = Number(snapshot?.openQty || queriedOrder.executedQty || queriedOrder.origQty || 0);
-            const resolvedAvgEntryPrice = Number(snapshot?.avgEntryPrice || queriedOrder.avgPrice || queriedOrder.price || 0);
+            resolvedOpenQty = Number(snapshot?.openQty || executedQty || 0);
+            resolvedAvgEntryPrice = Number(snapshot?.avgEntryPrice || queriedOrder.avgPrice || queriedOrder.price || 0);
             await dbcon.DBCall(`CALL SP_LIVE_PLAY_ST_NEW_EXACT_UPDATE(?,?,?,?,?,?)`, [
                 pid,
                 uid,
@@ -7509,27 +7930,36 @@ const syncEnterOrderFromQuery = async (uid, pid, minQty, queriedOrder) => {
             ]);
         }
 
-        if(status === 'FILLED'){
+        if(positionSide && resolvedOpenQty > 0){
             await syncLiveBoundExitOrders({
                 uid,
                 pid,
                 symbol: queriedOrder.symbol,
                 entryOrderId: queriedOrder.orderId,
-                entryPrice: queriedOrder.avgPrice || queriedOrder.price || 0,
-                qty: queriedOrder.executedQty || queriedOrder.origQty || 0,
+                entryPrice: resolvedAvgEntryPrice,
+                qty: resolvedOpenQty,
             });
-        }else{
-            exports.msgAdd(
-                'syncLiveBoundExitOrd',
-                'BOUND_WAIT_FILLED',
-                `pid:${pid}, symbol:${queriedOrder.symbol}, orderId:${queriedOrder.orderId}, endStatus:${status}, qty:${queriedOrder.executedQty || queriedOrder.origQty || 0}, price:${queriedOrder.avgPrice || queriedOrder.price || 0}`,
+            logOrderRuntimeTrace('PROTECTION_SYNC_FOR_PARTIAL_EXPOSURE', {
                 uid,
                 pid,
-                queriedOrder.orderId || null,
-                queriedOrder.symbol || null,
-                null
-            );
+                symbol: queriedOrder.symbol,
+                status,
+                executedQty,
+                protectedQty: resolvedOpenQty,
+                source: 'syncEnterOrderFromQuery',
+            });
         }
+    }else if(isTerminalOrderStatus(status)){
+        logOrderRuntimeTrace(getTerminalOrderAuditLabel(status, false), {
+            uid,
+            pid,
+            symbol: queriedOrder.symbol || null,
+            orderId: queriedOrder.orderId || null,
+            clientOrderId: queriedOrder.clientOrderId || queriedOrder.origClientOrderId || null,
+            status,
+            executedQty: Number(queriedOrder.executedQty || 0),
+            source: 'syncEnterOrderFromQuery',
+        });
     }
 
     return true;
@@ -7544,7 +7974,10 @@ const describeOrderForLog = (order) => {
 }
 
 const isRecoverableExchangeOrder = (order) => {
-    return Boolean(order && ['NEW', 'PARTIALLY_FILLED', 'FILLED'].includes(order.status));
+    return Boolean(order && (
+        String(order.status || '').toUpperCase() === 'NEW'
+        || isRecoverableFillOrderStatus(order.status)
+    ));
 }
 
 const recoverOrderAfterRetryError = async ({ uid, symbol, orderId = null, clientOrderId = null }) => {
@@ -8046,7 +8479,7 @@ const handleOrderRuntimeUpdate = (uid, data) => {
             return true;
         }
 
-        if(endStatus === 'NEW' || endStatus === 'CANCELED' || endStatus === 'EXPIRED' || endStatus === 'REJECTED'){
+        if(endStatus === 'NEW' || isTerminalOrderStatus(endStatus)){
             exports.msgAdd('orderUpdate', endStatus, runtimeMessage, ownerUserId, pid, oid, symbol, side);
             outcome = endStatus;
             return true;
@@ -8202,30 +8635,6 @@ const reOrderGet = async (uid, data) => {
         }
     }
 
-    if(cData[0] == 'NEW' && (endStatus == 'CANCELED' || endStatus == 'EXPIRED' || endStatus == 'REJECTED')){
-        runtimeTraceOutcome = `ENTRY_${endStatus}`;
-        await resetLivePlayToReady(runtimeOrderMeta.pid, ['EXACT_WAIT']);
-        return true;
-    }
-
-    if((runtimeState.isConditionalExitOrderType(cData[0]) || runtimeState.isMarketExitOrderType(cData[0]))
-        && (endStatus == 'CANCELED' || endStatus == 'EXPIRED' || endStatus == 'REJECTED')){
-        runtimeTraceOutcome = `EXIT_${endStatus}`;
-        await pidPositionLedger.markReservationsCanceled([rawClientOrderId]);
-        await restoreLivePlayStatus(
-            runtimeOrderMeta.pid,
-            runtimeState.isMarketExitOrderType(cData[0])
-                ? runtimeState.getLegacyExitPendingStatus()
-                : 'EXACT'
-        );
-        return true;
-    }
-
-    if(endStatus != 'FILLED' && endStatus != 'PARTIALLY_FILLED'){
-        runtimeTraceOutcome = 'IGNORED_NON_FILL';
-        return false;
-    }
-
     if(isGridClientOrderId(rawClientOrderId)){
         try{
             const gridHandled = await getGridEngine().handleLiveOrderTradeUpdate(uid, data);
@@ -8241,6 +8650,75 @@ const reOrderGet = async (uid, data) => {
             console.log('handleGridOrderRuntimeUpdate ERROR :: ', gridError);
             return false;
         }
+    }
+
+    if(cData[0] == 'NEW' && isTerminalOrderStatus(endStatus)){
+        runtimeTraceOutcome = `ENTRY_${endStatus}`;
+        const terminalExecutedQty = getOrderExecutedQty(reData);
+        const play = await loadLivePlaySnapshot(runtimeOrderMeta.pid);
+        const recoveredExecution = (terminalExecutedQty > 0 || ['EXPIRED_IN_MATCH', 'REJECTED'].includes(String(endStatus || '').toUpperCase()))
+            ? await recoverSignalEntryFillFromExchange({
+                uid: runtimeOrderMeta.ownerUserId,
+                row: play,
+                issue: { issues: [`SIGNAL_ENTRY_TERMINAL_${endStatus}`] },
+            })
+            : null;
+        logOrderRuntimeTrace(getTerminalOrderAuditLabel(endStatus, Boolean(recoveredExecution || terminalExecutedQty > 0)), {
+            uid: runtimeOrderMeta.ownerUserId,
+            pid: runtimeOrderMeta.pid,
+            symbol,
+            positionSide: getSignalPositionSide(side),
+            clientOrderId: rawClientOrderId,
+            orderId: oid,
+            status: endStatus,
+            executedQty: terminalExecutedQty,
+            recovered: Boolean(recoveredExecution),
+            source: 'reOrderGet:signal-entry-terminal',
+        });
+        if(!recoveredExecution){
+            await resetLivePlayToReady(runtimeOrderMeta.pid, ['EXACT_WAIT']);
+        }
+        return true;
+    }
+
+    if((runtimeState.isConditionalExitOrderType(cData[0]) || runtimeState.isMarketExitOrderType(cData[0]))
+        && isTerminalOrderStatus(endStatus)){
+        runtimeTraceOutcome = `EXIT_${endStatus}`;
+        const terminalExecutedQty = getOrderExecutedQty(reData);
+        let recoveredExecution = null;
+        if(terminalExecutedQty > 0 || ['EXPIRED_IN_MATCH', 'REJECTED'].includes(String(endStatus || '').toUpperCase())){
+            const play = await loadLivePlaySnapshot(runtimeOrderMeta.pid);
+            recoveredExecution = await recoverSignalExitFillFromExchange({
+                uid: runtimeOrderMeta.ownerUserId,
+                row: play,
+                issue: { issues: [`SIGNAL_EXIT_TERMINAL_${endStatus}`] },
+            });
+        }
+        logOrderRuntimeTrace(getTerminalOrderAuditLabel(endStatus, Boolean(recoveredExecution || terminalExecutedQty > 0)), {
+            uid: runtimeOrderMeta.ownerUserId,
+            pid: runtimeOrderMeta.pid,
+            symbol,
+            positionSide: getSignalPositionSide(resolveEntrySignalTypeFromCloseSide(null, side)),
+            clientOrderId: rawClientOrderId,
+            orderId: oid,
+            status: endStatus,
+            executedQty: terminalExecutedQty,
+            recovered: Boolean(recoveredExecution),
+            source: 'reOrderGet:signal-exit-terminal',
+        });
+        await pidPositionLedger.markReservationsCanceled([rawClientOrderId]);
+        await restoreLivePlayStatus(
+            runtimeOrderMeta.pid,
+            runtimeState.isMarketExitOrderType(cData[0])
+                ? runtimeState.getLegacyExitPendingStatus()
+                : 'EXACT'
+        );
+        return true;
+    }
+
+    if(endStatus != 'FILLED' && endStatus != 'PARTIALLY_FILLED'){
+        runtimeTraceOutcome = 'IGNORED_NON_FILL';
+        return false;
     }
 
     return await withQueuedSignalOrderRuntimeLock(`signal-runtime-order:${uid}:${rawClientOrderId}`, async () => {
@@ -8307,27 +8785,14 @@ const reOrderGet = async (uid, data) => {
                 sourceOrderId: oid,
                 note: `entry-filled:${endStatus}`,
             });
-            if(endStatus === 'FILLED'){
-                await syncLiveBoundExitOrders({
-                    uid,
-                    pid,
-                    symbol,
-                    entryOrderId: oid,
-                    entryPrice: resolvedAvgEntryPrice,
-                    qty: resolvedOpenQty,
-                });
-            }else{
-                exports.msgAdd(
-                    'syncLiveBoundExitOrd',
-                    'BOUND_WAIT_FILLED',
-                    `pid:${pid}, symbol:${symbol}, orderId:${oid}, endStatus:${endStatus}, qty:${resolvedOpenQty}, price:${resolvedAvgEntryPrice}`,
-                    uid,
-                    pid,
-                    oid,
-                    symbol,
-                    side
-                );
-            }
+            await syncLiveBoundExitOrders({
+                uid,
+                pid,
+                symbol,
+                entryOrderId: oid,
+                entryPrice: resolvedAvgEntryPrice,
+                qty: resolvedOpenQty,
+            });
 
             runtimeTraceOutcome = endStatus === 'PARTIALLY_FILLED'
                 ? 'SIGNAL_ENTRY_PARTIAL'
@@ -8723,26 +9188,44 @@ const reOrderGet = async (uid, data) => {
 }
 
 const cancelOrder = async (symbol, type, leftId, rigthId) => {
-    if(type == 'PROFIT'){
-        binance.futuresCancel(symbol, rigthId);
-    }else{
-        binance.futuresCancel(symbol, leftId);
-    }
+    await assertBinanceWriteAllowedOrLog({
+        action: 'WRITE_CANCEL_ORDER',
+        symbol,
+        orderId: type == 'PROFIT' ? rigthId : leftId,
+        caller: 'coin.cancelOrder.legacy',
+    });
+    throw new Error('LEGACY_CANCEL_WRITE_DISABLED');
 }
 const cancelOrderAll2 = async (uid, symbol, leftId = null, rigthId = null) => {
-    binance[uid].futuresCancel(symbol, leftId).then((re)=>{}).catch((err)=>{});
-    binance[uid].futuresCancel(symbol, rigthId).then((re)=>{}).catch((err)=>{});
+    if(leftId){
+        await cancelFuturesOrder({ uid, action: 'WRITE_CANCEL_ORDER', symbol, orderId: leftId, caller: 'coin.cancelOrderAll2.left' }, symbol, leftId).catch((err)=>{});
+    }
+    if(rigthId){
+        await cancelFuturesOrder({ uid, action: 'WRITE_CANCEL_ORDER', symbol, orderId: rigthId, caller: 'coin.cancelOrderAll2.right' }, symbol, rigthId).catch((err)=>{});
+    }
 }
 
 const cancelOrderAll = async (symbol, leftId = null, rigthId = null) => {
     try{
-        await binance.futuresCancel(symbol, leftId);
+        await assertBinanceWriteAllowedOrLog({
+            action: 'WRITE_CANCEL_ORDER',
+            symbol,
+            orderId: leftId,
+            caller: 'coin.cancelOrderAll.left.legacy',
+        });
+        throw new Error('LEGACY_CANCEL_WRITE_DISABLED');
     }catch(e){        
 
     }
 
     try{
-        await binance.futuresCancel(symbol, rigthId);
+        await assertBinanceWriteAllowedOrLog({
+            action: 'WRITE_CANCEL_ORDER',
+            symbol,
+            orderId: rigthId,
+            caller: 'coin.cancelOrderAll.right.legacy',
+        });
+        throw new Error('LEGACY_CANCEL_WRITE_DISABLED');
     }catch(e){        
         
     }
@@ -9058,11 +9541,12 @@ const legacySetMarginType = async (symbol, marginType) => {
     const url = `${BASE_URL}/fapi/v1/marginType?${query}&signature=${signature}`;
   
     try {
-      const res = await axios.post(url, null, {
-        headers: {
-          "X-MBX-APIKEY": API_KEY
-        }
+      await assertBinanceWriteAllowedOrLog({
+        action: 'WRITE_MARGIN_TYPE',
+        symbol,
+        caller: 'coin.legacySetMarginType',
       });
+      throw new Error('LEGACY_MARGIN_TYPE_WRITE_DISABLED');
       console.log("留덉쭊 ????ㅼ젙 ?꾨즺:", res.data);
     } catch (e) {
       if (e.response) {
@@ -9102,7 +9586,12 @@ const setMarginType = async (uid, symbol, marginType) => {
     }
 
     try{
-        const res = await binance[uid].privateFuturesRequest('v1/marginType', {
+        const res = await privateFuturesClientWrite({
+            uid,
+            action: 'WRITE_MARGIN_TYPE',
+            symbol,
+            caller: 'coin.setMarginType',
+        }, 'v1/marginType', {
             symbol,
             marginType: normalized,
         }, 'POST');
@@ -9191,7 +9680,12 @@ const ensureMarginAndLeverage = async (uid, symbol, marginType, leverage) => {
     let leverageResult = { status: false, skipped: true, leverage: normalizedLeverage };
     if(normalizedLeverage > 0){
         try{
-            await binance[uid].privateFuturesRequest('v1/leverage', {
+            await privateFuturesClientWrite({
+                uid,
+                action: 'WRITE_LEVERAGE',
+                symbol,
+                caller: 'coin.ensureMarginAndLeverage',
+            }, 'v1/leverage', {
                 symbol,
                 leverage: normalizedLeverage,
             }, 'POST');
@@ -9486,7 +9980,15 @@ exports.sendForcing = async (type = null, symbol = null, side = null, userQty = 
             await cancelBoundExitOrders(uid, symbol, pid);
         }
 
-        const closeOrder = await binance[uid].futuresOrder(
+        const closeOrder = await submitFuturesOrder(
+            {
+                uid,
+                pid,
+                strategyCategory: 'signal',
+                action: 'WRITE_CLOSE_MARKET',
+                caller: 'coin.sendForcing',
+                clientOrderId,
+            },
             'MARKET',
             side == 'BUY' ? 'SELL' : 'BUY',
             symbol,
@@ -9553,7 +10055,15 @@ exports.sendForcing = async (type = null, symbol = null, side = null, userQty = 
                 }
 
                 if(closeQty > 0){
-                    const retriedOrder = await binance[uid].futuresOrder(
+                    const retriedOrder = await submitFuturesOrder(
+                        {
+                            uid,
+                            pid,
+                            strategyCategory: 'signal',
+                            action: 'WRITE_CLOSE_MARKET',
+                            caller: 'coin.sendForcing.retry',
+                            clientOrderId,
+                        },
                         'MARKET',
                         side == 'BUY' ? 'SELL' : 'BUY',
                         symbol,
@@ -9783,7 +10293,15 @@ exports.sendEnter = async (symbol = null, side = null, lv = null, userMargin = n
         console.log(`?뱦id:${uid} ?꾩옱媛: ${price}, 怨꾩궛???섎웾: ${rawQty}, 理쒖쥌 ?섎웾: ${finalQty}, 諛⑺뼢: ${side}`);
         // 二쇰Ц ?ㅽ뻾
 
-        extData = await binance[uid].futuresOrder(
+        extData = await submitFuturesOrder(
+            {
+                uid,
+                pid,
+                strategyCategory: 'signal',
+                action: 'WRITE_CREATE_ORDER',
+                caller: 'coin.sendEnter',
+                clientOrderId,
+            },
             'MARKET',
             side == 'BUY' ? 'BUY' : 'SELL',
             symbol,
@@ -9873,7 +10391,15 @@ exports.sendEnter = async (symbol = null, side = null, lv = null, userMargin = n
                         newClientOrderId: clientOrderId,
                     };
 
-                    const retriedOrder = await binance[uid].futuresOrder(
+                    const retriedOrder = await submitFuturesOrder(
+                        {
+                            uid,
+                            pid,
+                            strategyCategory: 'signal',
+                            action: 'WRITE_CREATE_ORDER',
+                            caller: 'coin.sendEnter.retry',
+                            clientOrderId,
+                        },
                         'MARKET',
                         side == 'BUY' ? 'BUY' : 'SELL',
                         symbol,

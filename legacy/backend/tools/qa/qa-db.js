@@ -92,6 +92,38 @@ const ensureUidExists = async (uid) => {
 const buildLabel = (prefix = "QA") =>
   `${prefix}_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
 
+const normalizePositiveIds = (values = []) =>
+  Array.from(
+    new Set([].concat(values || []).map((value) => Number(value || 0)).filter((value) => value > 0))
+  );
+
+const isQaTempStrategyName = (value) => String(value || "").trim().toUpperCase().startsWith("QA_");
+
+const loadStrategyMarkerRows = async (tableName, uid, ids = []) => {
+  const normalizedIds = normalizePositiveIds(ids);
+  if (normalizedIds.length === 0) {
+    return [];
+  }
+  const placeholders = normalizedIds.map(() => "?").join(",");
+  return await query(
+    `SELECT id, a_name
+       FROM ${tableName}
+      WHERE uid = ?
+        AND id IN (${placeholders})`,
+    [uid, ...normalizedIds]
+  );
+};
+
+const resolveQaTempSignalIds = async (uid, ids = []) => {
+  const rows = await loadStrategyMarkerRows(SIGNAL_TABLE, uid, ids);
+  return rows.filter((row) => isQaTempStrategyName(row.a_name)).map((row) => Number(row.id));
+};
+
+const resolveQaTempGridIds = async (uid, ids = []) => {
+  const rows = await loadStrategyMarkerRows(GRID_TABLE, uid, ids);
+  return rows.filter((row) => isQaTempStrategyName(row.a_name)).map((row) => Number(row.id));
+};
+
 const createTempSignalPlay = async ({
   uid,
   symbol = "BTCUSDT",
@@ -357,68 +389,149 @@ const cleanupArtifacts = async ({
   pids = [],
   signalIds = [],
   gridIds = [],
+  registeredQaPids = [],
   settleMs = 250,
   passes = 2,
 } = {}) => {
-  const uniquePids = Array.from(
-    new Set([].concat(pids || []).map((value) => Number(value || 0)).filter((value) => value > 0))
+  const requestedPids = normalizePositiveIds(pids);
+  const requestedSignalIds = normalizePositiveIds([].concat(signalIds || [], requestedPids));
+  const requestedGridIds = normalizePositiveIds([].concat(gridIds || [], requestedPids));
+  const registeredArtifactPids = normalizePositiveIds(registeredQaPids);
+  const [signalMarkerRows, gridMarkerRows] = await Promise.all([
+    loadStrategyMarkerRows(SIGNAL_TABLE, uid, requestedSignalIds),
+    loadStrategyMarkerRows(GRID_TABLE, uid, requestedGridIds),
+  ]);
+  const uniqueSignalIds = signalMarkerRows
+    .filter((row) => isQaTempStrategyName(row.a_name))
+    .map((row) => Number(row.id));
+  const uniqueGridIds = gridMarkerRows
+    .filter((row) => isQaTempStrategyName(row.a_name))
+    .map((row) => Number(row.id));
+  const uniquePids = normalizePositiveIds([].concat(uniqueSignalIds, uniqueGridIds));
+  const requestedAllIds = normalizePositiveIds([].concat(requestedPids, requestedSignalIds, requestedGridIds));
+  const allowedAllIds = new Set([].concat(uniquePids, uniqueSignalIds, uniqueGridIds, registeredArtifactPids).map((value) => Number(value)));
+  const nonQaIds = new Set(
+    []
+      .concat(signalMarkerRows, gridMarkerRows)
+      .filter((row) => row?.id && !isQaTempStrategyName(row.a_name))
+      .map((row) => Number(row.id))
   );
-  const uniqueSignalIds = Array.from(
-    new Set([].concat(signalIds || [], uniquePids).map((value) => Number(value || 0)).filter((value) => value > 0))
+  const blockedPids = requestedAllIds.filter((value) => !allowedAllIds.has(Number(value)));
+  const conflictPids = uniquePids.filter((value) => nonQaIds.has(Number(value)));
+  const artifactCleanupPids = normalizePositiveIds(
+    [].concat(uniquePids, registeredArtifactPids)
+      .filter((value) => !nonQaIds.has(Number(value)))
   );
-  const uniqueGridIds = Array.from(
-    new Set([].concat(gridIds || [], uniquePids).map((value) => Number(value || 0)).filter((value) => value > 0))
-  );
+  const signalArtifactIds = normalizePositiveIds([].concat(uniqueSignalIds, registeredArtifactPids));
+  const gridArtifactIds = normalizePositiveIds([].concat(uniqueGridIds, registeredArtifactPids));
+  const msgCleanupPids = artifactCleanupPids;
 
-  if (uniquePids.length === 0 && uniqueSignalIds.length === 0 && uniqueGridIds.length === 0) {
+  if (requestedAllIds.length === 0) {
     return {
       cleaned: false,
       pids: [],
       signalIds: [],
       gridIds: [],
+      blockedPids: [],
+      conflictPids: [],
+      guard: "QA_MARKER_REQUIRED",
     };
   }
 
-  const pidPlaceholders = uniquePids.map(() => "?").join(",");
+  if (uniquePids.length === 0 && uniqueSignalIds.length === 0 && uniqueGridIds.length === 0 && registeredArtifactPids.length === 0) {
+    return {
+      cleaned: false,
+      pids: [],
+      signalIds: [],
+      gridIds: [],
+      blockedPids,
+      conflictPids,
+      guard: "QA_MARKER_REQUIRED",
+    };
+  }
+
   const signalPlaceholders = uniqueSignalIds.map(() => "?").join(",");
   const gridPlaceholders = uniqueGridIds.map(() => "?").join(",");
+  const signalArtifactPlaceholders = signalArtifactIds.map(() => "?").join(",");
+  const gridArtifactPlaceholders = gridArtifactIds.map(() => "?").join(",");
+  const msgPlaceholders = msgCleanupPids.map(() => "?").join(",");
   const normalizedPasses = Math.max(1, Number(passes || 0));
 
   const runDeletePass = async () => {
-    if (uniquePids.length > 0) {
+    if (signalArtifactIds.length > 0) {
       await db.query(
         `DELETE FROM live_pid_exit_reservation
           WHERE uid = ?
-            AND pid IN (${pidPlaceholders})`,
-        [uid, ...uniquePids]
+            AND strategyCategory = 'signal'
+            AND pid IN (${signalArtifactPlaceholders})`,
+        [uid, ...signalArtifactIds]
       );
       await db.query(
         `DELETE FROM live_pid_position_snapshot
           WHERE uid = ?
-            AND pid IN (${pidPlaceholders})`,
-        [uid, ...uniquePids]
+            AND strategyCategory = 'signal'
+            AND pid IN (${signalArtifactPlaceholders})`,
+        [uid, ...signalArtifactIds]
       );
       await db.query(
         `DELETE FROM live_pid_position_ledger
           WHERE uid = ?
-            AND pid IN (${pidPlaceholders})`,
-        [uid, ...uniquePids]
+            AND strategyCategory = 'signal'
+            AND pid IN (${signalArtifactPlaceholders})`,
+        [uid, ...signalArtifactIds]
       );
+    }
+
+    if (gridArtifactIds.length > 0) {
+      await db.query(
+        `DELETE FROM live_pid_exit_reservation
+          WHERE uid = ?
+            AND strategyCategory = 'grid'
+            AND pid IN (${gridArtifactPlaceholders})`,
+        [uid, ...gridArtifactIds]
+      );
+      await db.query(
+        `DELETE FROM live_pid_position_snapshot
+          WHERE uid = ?
+            AND strategyCategory = 'grid'
+            AND pid IN (${gridArtifactPlaceholders})`,
+        [uid, ...gridArtifactIds]
+      );
+      await db.query(
+        `DELETE FROM live_pid_position_ledger
+          WHERE uid = ?
+            AND strategyCategory = 'grid'
+            AND pid IN (${gridArtifactPlaceholders})`,
+        [uid, ...gridArtifactIds]
+      );
+    }
+
+    if (msgCleanupPids.length > 0) {
       await db.query(
         `DELETE FROM msg_list
           WHERE uid = ?
-            AND pid IN (${pidPlaceholders})`,
-        [uid, ...uniquePids]
+            AND pid IN (${msgPlaceholders})`,
+        [uid, ...msgCleanupPids]
       );
     }
 
     const [runtimeLogTable] = await db.query(`SHOW TABLES LIKE 'binance_runtime_event_log'`);
-    if (runtimeLogTable && runtimeLogTable.length > 0 && uniquePids.length > 0) {
+    if (runtimeLogTable && runtimeLogTable.length > 0 && signalArtifactIds.length > 0) {
       await db.query(
         `DELETE FROM binance_runtime_event_log
           WHERE uid = ?
-            AND pid IN (${pidPlaceholders})`,
-        [uid, ...uniquePids]
+            AND strategy_category = 'signal'
+            AND pid IN (${signalArtifactPlaceholders})`,
+        [uid, ...signalArtifactIds]
+      );
+    }
+    if (runtimeLogTable && runtimeLogTable.length > 0 && gridArtifactIds.length > 0) {
+      await db.query(
+        `DELETE FROM binance_runtime_event_log
+          WHERE uid = ?
+            AND strategy_category = 'grid'
+            AND pid IN (${gridArtifactPlaceholders})`,
+        [uid, ...gridArtifactIds]
       );
     }
 
@@ -446,12 +559,17 @@ const cleanupArtifacts = async ({
     await delay(settleMs);
     await runDeletePass();
   }
+  await delay(settleMs);
+  await runDeletePass();
 
   return {
     cleaned: true,
     pids: uniquePids,
     signalIds: uniqueSignalIds,
     gridIds: uniqueGridIds,
+    blockedPids,
+    conflictPids,
+    guard: "QA_MARKER_REQUIRED",
   };
 };
 
@@ -730,6 +848,7 @@ module.exports = {
   loadMsgList,
   loadRuntimeEventLogs,
   cleanupArtifacts,
+  isQaTempStrategyName,
   findQaTempSignalIdsByUid,
   findQaTempGridIdsByUid,
   loadQaTempArtifactRows,

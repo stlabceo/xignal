@@ -1,5 +1,15 @@
 const fs = require("fs");
 const path = require("path");
+
+process.env.QA_REPLAY_MODE = process.env.QA_REPLAY_MODE || "1";
+process.env.QA_DISABLE_BINANCE_WRITES = process.env.QA_DISABLE_BINANCE_WRITES || "1";
+
+const { installQaReplayNetworkFirewall } = require("./qa-network-firewall");
+const qaReplayFirewall = installQaReplayNetworkFirewall();
+console.log(
+  `[QA_REPLAY_SAFETY] mode=data-replay, binanceWrites=blocked, networkFirewall=${qaReplayFirewall.installed ? "ON" : "OFF"}`
+);
+
 const { loadQaConfig, parseArgs } = require("./qa-config");
 const {
   closePool,
@@ -26,6 +36,13 @@ const {
   runSplitTpPartialClose,
   runGridMultiTradeEntryPreservation,
   runGridMultiTradeExitPreservation,
+  runLiveReadonlyDetectsSixPositionsEightConditionalsProtectionShortage,
+  runGridDuplicateExitRecoveryDoesNotCancelCurrentProtection,
+  runSignalEntryPartiallyFilledThenCanceled,
+  runGridEntryPartiallyFilledThenExpired,
+  runPartialFillStateMachineExpectedTransitions,
+  runOrderStatusStateMachineFinalizationScenarios,
+  runOnOffDeleteAndOrderDisplayStateScenarios,
   runCrossPidOwnershipGuard,
   runGridReservationOwnedStopFillRecovery,
   runSignalRecoveredCloseViaTruthSync,
@@ -97,6 +114,8 @@ const collectNodeCheckTargets = () => {
     path.resolve(QA_DIR, "../../routes/validation.js"),
     path.resolve(QA_DIR, "../../signal-strategy-identity.js"),
     path.resolve(QA_DIR, "../../signal-force-off-control.js"),
+    path.resolve(QA_DIR, "../../order-display-state.js"),
+    path.resolve(QA_DIR, "../../strategy-delete-intent.js"),
     path.resolve(QA_DIR, "../../coin.js"),
     path.resolve(QA_DIR, "../../grid-engine.js"),
     path.resolve(QA_DIR, "../../pid-position-ledger.js"),
@@ -158,6 +177,24 @@ const run = async () => {
         await runPartialFillDistinctTradeIds({ uid: resolvedUid, cleanup: false }),
         await runSignalEntryRecoveryPartialFill({ uid: resolvedUid, cleanup: false }),
       ]),
+    },
+    {
+      scriptName: "data-replay-protection-shortage-partial-state-machine.js",
+      run: async () => ([
+        await runLiveReadonlyDetectsSixPositionsEightConditionalsProtectionShortage({ uid: resolvedUid, cleanup: false }),
+        await runGridDuplicateExitRecoveryDoesNotCancelCurrentProtection({ uid: resolvedUid, cleanup: false }),
+        await runSignalEntryPartiallyFilledThenCanceled({ uid: resolvedUid, cleanup: false }),
+        await runGridEntryPartiallyFilledThenExpired({ uid: resolvedUid, cleanup: false }),
+        await runPartialFillStateMachineExpectedTransitions({ uid: resolvedUid, cleanup: false }),
+      ]),
+    },
+    {
+      scriptName: "data-replay-order-status-state-machine.js",
+      run: async () => runOrderStatusStateMachineFinalizationScenarios({ uid: resolvedUid }),
+    },
+    {
+      scriptName: "data-replay-onoff-delete-display-state.js",
+      run: async () => runOnOffDeleteAndOrderDisplayStateScenarios({ uid: resolvedUid }),
     },
     {
       scriptName: "data-replay-signal-split-tp-exit-multifill.js",
@@ -386,6 +423,7 @@ const run = async () => {
       pids: finalSweepPids,
       signalIds: finalSweepPids,
       gridIds: finalSweepPids,
+      registeredQaPids: finalSweepPids,
       settleMs: 300,
       passes: 3,
     });

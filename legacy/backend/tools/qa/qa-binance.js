@@ -1,6 +1,7 @@
 const axios = require("axios");
 const crypto = require("crypto");
 const { getMember, normalizeSymbol } = require("./qa-db");
+const binanceWriteGuard = require("../../binance-write-guard");
 
 const FUTURES_BASE_URL = "https://fapi.binance.com";
 let futuresServerOffsetMs = 0;
@@ -57,7 +58,20 @@ const getCredentials = async (uid) => {
   };
 };
 
-const signedGet = async (uid, path, params = {}) => {
+const signedRequest = async (uid, path, params = {}, method = "GET") => {
+  const normalizedMethod = String(method || "GET").trim().toUpperCase();
+  if (normalizedMethod !== "GET") {
+    binanceWriteGuard.assertBinanceWriteAllowed({
+      uid,
+      action: `QA_BINANCE_SIGNED_${normalizedMethod}`,
+      symbol: params?.symbol || null,
+      clientOrderId: params?.clientOrderId || params?.clientAlgoId || params?.newClientOrderId || null,
+      orderId: params?.orderId || params?.algoId || null,
+      caller: `qa-binance.signedRequest:${path}`,
+      isReplay: true,
+    });
+  }
+
   const credentials = await getCredentials(uid);
   await syncServerTime(false);
 
@@ -68,7 +82,9 @@ const signedGet = async (uid, path, params = {}) => {
       timestamp: getFuturesTimestamp(),
     });
 
-    const response = await axios.get(`${FUTURES_BASE_URL}${path}?${signedQuery}`, {
+    const response = await axios({
+      method: normalizedMethod,
+      url: `${FUTURES_BASE_URL}${path}?${signedQuery}`,
       timeout: 10000,
       headers: {
         "X-MBX-APIKEY": credentials.appKey,
@@ -87,6 +103,8 @@ const signedGet = async (uid, path, params = {}) => {
     throw error;
   }
 };
+
+const signedGet = async (uid, path, params = {}) => signedRequest(uid, path, params, "GET");
 
 const getPositionRisk = async (uid, symbol = null) => {
   const positions = await signedGet(uid, "/fapi/v2/positionRisk", {});
@@ -188,6 +206,7 @@ module.exports = {
   FUTURES_BASE_URL,
   maskKey,
   getCredentials,
+  signedRequest,
   signedGet,
   getPositionRisk,
   getOpenOrders,
