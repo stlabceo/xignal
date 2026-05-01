@@ -2085,42 +2085,54 @@ const runCrossPidOwnershipGuard = async ({ uid, cleanup = true } = {}) => {
     await pidPositionLedger.syncSignalPlaySnapshot(signalPlay.id, "LONG");
     await pidPositionLedger.syncGridLegSnapshot(gridRow.id, "LONG");
 
-    coinQa.__qa.binance[resolvedUid] = runtimeClient;
     const captured = await captureConsoleLogs(async () => {
-      const first = await coinQa.__qa.closeGridLegMarketOrder({
+      const ownerClear = await coinQa.__qa.resolvePidOwnedCloseQtyGuard({
         uid: resolvedUid,
         pid: gridRow.id,
+        strategyCategory: "grid",
         symbol: "PUMPUSDT",
-        leg: "LONG",
-        qty: 27888,
+        positionSide: "LONG",
+        requestedQty: 27888,
+        exchangeAggregateQty: 27888,
+        reason: "qa-owner-clear-grid-close",
       });
       expectEqual(
         scenario,
-        first,
-        null,
-        "ambiguous same-symbol/side ownership should block the grid close before Binance write"
+        ownerClear?.allowed,
+        true,
+        "owner-clear same-symbol/side close should remain allowed when bounded to the target PID"
+      );
+      expectApprox(
+        scenario,
+        ownerClear?.finalCloseQty,
+        13950,
+        1e-9,
+        "owner-clear close qty should be clamped to PID-owned openQty"
+      );
+      expectEqual(
+        scenario,
+        ownerClear?.ownerCountForSymbolSide,
+        2,
+        "same-symbol/side multi-PID should be observable but not a blanket block"
       );
 
-      runtimeClient.futuresPositionRisk = async () => [
-        {
-          symbol: "PUMPUSDT",
-          positionSide: "LONG",
-          positionAmt: "10000",
-        },
-        {
-          symbol: "PUMPUSDT",
-          positionSide: "SHORT",
-          positionAmt: "0",
-        },
-      ];
-      const blocked = await coinQa.__qa.closeGridLegMarketOrder({
+      const blocked = await coinQa.__qa.resolvePidOwnedCloseQtyGuard({
         uid: resolvedUid,
         pid: gridRow.id,
+        strategyCategory: "grid",
         symbol: "PUMPUSDT",
-        leg: "LONG",
-        qty: 13950,
+        positionSide: "LONG",
+        requestedQty: 13950,
+        exchangeAggregateQty: 10000,
+        reason: "qa-aggregate-mismatch",
       });
-      expectEqual(scenario, blocked, null, "aggregate mismatch should block a cross-PID close attempt");
+      expectEqual(scenario, blocked?.allowed, false, "aggregate below PID-owned qty should block outgoing close");
+      expectEqual(
+        scenario,
+        blocked?.reason,
+        "EXCHANGE_AGGREGATE_LT_PID_OWNED",
+        "aggregate-only mismatch should block without touching another PID"
+      );
     });
 
     const signalState = await loadScenarioState({
@@ -2136,10 +2148,10 @@ const runCrossPidOwnershipGuard = async ({ uid, cleanup = true } = {}) => {
       positionSide: "LONG",
     });
 
-    expectEqual(scenario, placedOrders.length, 0, "no close order should be submitted while symbol/side ownership is ambiguous");
+    expectEqual(scenario, placedOrders.length, 0, "guard-only replay must not submit close orders");
     expectApprox(scenario, signalState.snapshot?.openQty, 13938, 1e-9, "signal PID should remain open and untouched");
     expectApprox(scenario, gridState.snapshot?.openQty, 13950, 1e-9, "grid PID should remain open and untouched");
-    expectEqual(scenario, gridState.reservations?.length || 0, 0, "no grid manual close reservation should be created");
+    expectEqual(scenario, gridState.reservations?.length || 0, 0, "guard-only replay should not create close reservations");
     if (filterAuditLogs(captured.logs).length > 0) {
       expectTrue(
         scenario,

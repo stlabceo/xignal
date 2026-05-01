@@ -5348,10 +5348,11 @@ const resolvePidOwnedCloseQtyGuard = async ({
         strategyCategory: String(owner?.strategyCategory || '').trim().toLowerCase(),
         openQty: Number(owner?.openQty || 0),
     }));
-    const targetOwnerOnly = openOwners.length === 1
-        && Number(openOwners[0]?.pid || 0) === Number(pid || 0)
-        && String(openOwners[0]?.strategyCategory || '') === normalizedCategory;
-    if(!targetOwnerOnly){
+    const targetOwnerPresent = openOwners.some((owner) =>
+        Number(owner?.pid || 0) === Number(pid || 0)
+        && String(owner?.strategyCategory || '') === normalizedCategory
+    );
+    if(openOwners.length > 0 && !targetOwnerPresent){
         logOrderRuntimeTrace('PID_CLOSE_QTY_GUARD_BLOCKED', {
             uid,
             pid,
@@ -5359,7 +5360,7 @@ const resolvePidOwnedCloseQtyGuard = async ({
             symbol,
             positionSide: normalizedPositionSide,
             clientOrderId,
-            reason: reason || 'ambiguous-symbol-side-owners',
+            reason: reason || 'target-owner-missing',
             pidOwnedQty,
             requestedCloseQty,
             exchangeAggregateQty: hasExchangeAggregateQty ? resolvedExchangeAggregateQty : null,
@@ -5367,7 +5368,7 @@ const resolvePidOwnedCloseQtyGuard = async ({
         });
         return {
             allowed: false,
-            reason: 'AMBIGUOUS_SYMBOL_SIDE_PID_OWNERS',
+            reason: 'PID_OWNER_NOT_IN_SYMBOL_SIDE_SNAPSHOT',
             pidOwnedQty,
             requestedCloseQty,
             exchangeAggregateQty: hasExchangeAggregateQty ? resolvedExchangeAggregateQty : null,
@@ -5425,6 +5426,12 @@ const resolvePidOwnedCloseQtyGuard = async ({
         requestedCloseQty,
         exchangeAggregateQty: hasExchangeAggregateQty ? resolvedExchangeAggregateQty : null,
         finalCloseQty,
+        ownerClear: true,
+        ownerCountForSymbolSide: openOwners.length,
+        otherOwners: openOwners.filter((owner) =>
+            Number(owner?.pid || 0) !== Number(pid || 0)
+            || String(owner?.strategyCategory || '') !== normalizedCategory
+        ),
     });
 
     return {
@@ -5434,6 +5441,9 @@ const resolvePidOwnedCloseQtyGuard = async ({
         requestedCloseQty,
         exchangeAggregateQty: hasExchangeAggregateQty ? resolvedExchangeAggregateQty : null,
         finalCloseQty,
+        ownerClear: true,
+        ownerCountForSymbolSide: openOwners.length,
+        owners: openOwners,
     };
 }
 

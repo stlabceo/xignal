@@ -20,6 +20,7 @@ module.exports.__qa = {
   recoverGridExitFillFromExchange: exports.recoverGridExitFillFromExchange,
   convergeLiveSignalPositionToExchangeFlat,
   loadLivePlaySnapshot,
+  resolvePidOwnedCloseQtyGuard,
   closeGridLegMarketOrder: exports.closeGridLegMarketOrder
 };
 `;
