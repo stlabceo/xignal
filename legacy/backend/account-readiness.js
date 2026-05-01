@@ -94,8 +94,149 @@ const normalizeRuntimeError = (runtimeHealth = {}) => {
   return null;
 };
 
+const getRuntimeStatus = (runtimeHealth = {}) => String(runtimeHealth?.status || "").trim().toUpperCase();
+
+const isUserStreamAuthError = (runtimeHealth = {}) => {
+  const code = String(runtimeHealth.lastErrorCode || runtimeHealth.errorCode || "").trim();
+  const message = String(
+    runtimeHealth.lastErrorMessage || runtimeHealth.errorMessage || runtimeHealth.message || ""
+  ).trim();
+  const combined = `${code} ${message}`.toUpperCase();
+  return (
+    combined.includes("-2015") ||
+    combined.includes("INVALID API-KEY") ||
+    combined.includes("PERMISSION") ||
+    combined.includes("FUTURES") ||
+    combined.includes("IP")
+  );
+};
+
+const buildUserStreamReadiness = ({
+  hasApiKey,
+  apiReadOk,
+  runtimeHealth,
+  writeDisabled,
+  liveWriteEnabled,
+  enabledSignalCount,
+  enabledGridCount,
+}) => {
+  const runtimeStatus = getRuntimeStatus(runtimeHealth || {});
+  const connected = Boolean(runtimeHealth?.connected) || Number(runtimeHealth?.wsReadyState) === 1;
+  const enabledStrategyCount = Number(enabledSignalCount || 0) + Number(enabledGridCount || 0);
+  const liveWriteCapable = !writeDisabled && liveWriteEnabled;
+  const requiredNow = Boolean(hasApiKey && apiReadOk && liveWriteCapable && enabledStrategyCount > 0);
+  const base = {
+    connected,
+    requiredNow,
+    enabledSignalCount: Number(enabledSignalCount || 0),
+    enabledGridCount: Number(enabledGridCount || 0),
+    rawRuntimeStatus: runtimeStatus || "UNKNOWN",
+    lastConnectedAt: runtimeHealth?.lastReadyAt || runtimeHealth?.lastMessageAt || null,
+    lastKeepaliveAt: runtimeHealth?.lastKeepAliveAt || null,
+    lastMessageAt: runtimeHealth?.lastMessageAt || null,
+    listenKeyPresent: Boolean(runtimeHealth?.listenKey),
+  };
+
+  if (!hasApiKey) {
+    return {
+      ...base,
+      status: "API_KEY_MISSING",
+      label: "API 등록 후 확인",
+      severity: "INFO",
+      reason: "API_KEY_MISSING",
+      nextAction: "API Key와 Secret Key를 등록하면 수신 상태를 확인합니다.",
+      abnormalCounted: false,
+    };
+  }
+
+  if (writeDisabled) {
+    return {
+      ...base,
+      status: "STREAM_NOT_REQUIRED_READONLY",
+      label: "read-only 모드: 수신 대기",
+      severity: "INFO",
+      requiredNow: false,
+      reason: "READ_ONLY_WRITE_DISABLED",
+      nextAction: "자동매매 시작 시 실시간 주문 이벤트 수신을 연결합니다.",
+      abnormalCounted: false,
+    };
+  }
+
+  if (!apiReadOk) {
+    return {
+      ...base,
+      status: "STREAM_AUTH_ERROR",
+      label: "API 권한 확인 필요",
+      severity: "CRITICAL",
+      requiredNow: false,
+      reason: "API_READ_NOT_READY",
+      nextAction: "API Key, Secret Key, Futures 읽기 권한 또는 IP 허용 목록을 확인해 주세요.",
+      abnormalCounted: true,
+    };
+  }
+
+  if (!liveWriteCapable || enabledStrategyCount === 0) {
+    return {
+      ...base,
+      status: "API_READ_OK_LIVE_DISABLED",
+      label: "실거래 시작 전 대기",
+      severity: "INFO",
+      requiredNow: false,
+      reason: !liveWriteCapable ? "LIVE_WRITE_DISABLED" : "NO_ENABLED_STRATEGY",
+      nextAction: "자동매매 시작 시 실시간 주문 이벤트 수신을 연결합니다.",
+      abnormalCounted: false,
+    };
+  }
+
+  if (connected || runtimeStatus === "CONNECTED") {
+    return {
+      ...base,
+      status: "STREAM_CONNECTED",
+      label: "연결 정상",
+      severity: "OK",
+      reason: "CONNECTED",
+      nextAction: "",
+      abnormalCounted: false,
+    };
+  }
+
+  if (isUserStreamAuthError(runtimeHealth || {})) {
+    return {
+      ...base,
+      status: "STREAM_AUTH_ERROR",
+      label: "API 권한 확인 필요",
+      severity: "CRITICAL",
+      reason: "LISTEN_KEY_AUTH_ERROR",
+      nextAction: "listenKey 생성/유지에 필요한 Binance API 권한과 IP 허용 목록을 확인해 주세요.",
+      abnormalCounted: true,
+    };
+  }
+
+  if (runtimeHealth?.retryAt || runtimeHealth?.disabledUntil || ["CONNECTING", "ERROR"].includes(runtimeStatus)) {
+    return {
+      ...base,
+      status: "STREAM_RECONNECTING",
+      label: "재연결 중",
+      severity: "WARN",
+      reason: runtimeStatus || "RECONNECTING",
+      nextAction: "잠시 후 자동 재연결 상태를 다시 확인해 주세요.",
+      abnormalCounted: true,
+    };
+  }
+
+  return {
+    ...base,
+    status: "STREAM_DISCONNECTED_REQUIRED",
+    label: "실시간 주문 이벤트 수신 끊김",
+    severity: "CRITICAL",
+    reason: runtimeStatus || "DISCONNECTED",
+    nextAction: "실거래 가능 상태에서 User Stream 연결이 필요합니다. runtime 상태를 확인해 주세요.",
+    abnormalCounted: true,
+  };
+};
+
 const getAccountReadiness = async (uid, { runtimeHealth = null } = {}) => {
-  const [[memberRows], [snapshotRows]] = await Promise.all([
+  const [[memberRows], [snapshotRows], [enabledSignalRows], [enabledGridRows]] = await Promise.all([
     db.query(
       `SELECT id, appKey, appSecret, tradeAccessMode
          FROM admin_member
@@ -118,10 +259,26 @@ const getAccountReadiness = async (uid, { runtimeHealth = null } = {}) => {
        LIMIT 1`,
       [uid]
     ),
+    db.query(
+      `SELECT COUNT(*) AS cnt
+         FROM live_play_list
+        WHERE uid = ?
+          AND enabled = 'Y'`,
+      [uid]
+    ),
+    db.query(
+      `SELECT COUNT(*) AS cnt
+         FROM live_grid_strategy_list
+        WHERE uid = ?
+          AND enabled = 'Y'`,
+      [uid]
+    ),
   ]);
 
   const member = memberRows[0] || {};
   const snapshot = snapshotRows[0] || null;
+  const enabledSignalCount = Number(enabledSignalRows?.[0]?.cnt || 0);
+  const enabledGridCount = Number(enabledGridRows?.[0]?.cnt || 0);
   const issues = [];
   const hasApiKey = Boolean(member.appKey && member.appSecret);
   const futuresBalanceUsdt = snapshot ? toNumber(snapshot.availableBalance) : null;
@@ -129,6 +286,7 @@ const getAccountReadiness = async (uid, { runtimeHealth = null } = {}) => {
   const runtimeIssue = normalizeApiValidationIssue(apiValidation) || normalizeRuntimeError(runtimeHealth || {});
   const positionMode = derivePositionMode(runtimeHealth || {});
   const writeDisabled = truthy(process.env.QA_DISABLE_BINANCE_WRITES);
+  const liveWriteEnabled = truthy(process.env.BINANCE_LIVE_WRITES_ENABLED);
   const runtimeExcluded = Boolean(runtimeHealth?.excluded);
 
   if (!hasApiKey) {
@@ -177,6 +335,26 @@ const getAccountReadiness = async (uid, { runtimeHealth = null } = {}) => {
   const apiConnection = apiReadOk ? "OK" : hasApiKey ? "ACTION_REQUIRED" : "MISSING";
   const apiPermission = runtimeIssue ? "ACTION_REQUIRED" : hasApiKey ? "READ_OK_ORDER_PERMISSION_UNVERIFIED" : "MISSING";
   const canTradeFutures = apiReadOk && snapshot && futuresBalanceUsdt > 0 && !runtimeExcluded;
+  const userStream = buildUserStreamReadiness({
+    hasApiKey,
+    apiReadOk,
+    runtimeHealth,
+    writeDisabled,
+    liveWriteEnabled,
+    enabledSignalCount,
+    enabledGridCount,
+  });
+
+  if (userStream.requiredNow && userStream.abnormalCounted) {
+    issues.push(
+      buildIssue({
+        code: userStream.status,
+        label: userStream.label,
+        action: userStream.nextAction,
+      })
+    );
+  }
+
   const readinessStatus = issues.length === 0 ? "READY" : hasApiKey ? "ACTION_REQUIRED" : "BLOCKED";
 
   return {
@@ -194,6 +372,7 @@ const getAccountReadiness = async (uid, { runtimeHealth = null } = {}) => {
     futuresBalanceUsdt,
     futuresBalanceLabel: "투자 가능 잔고",
     canTradeFutures,
+    userStream,
     positionMode,
     positionModeLabel:
       positionMode === "HEDGE" ? "헤지 모드" : positionMode === "ONE_WAY" ? "원웨이 모드" : "검증 불가",

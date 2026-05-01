@@ -49,10 +49,24 @@ const formatMetric = (value, digits = 4) => {
 
 const getReadinessTone = (status) => {
 	const normalized = String(status || '').toUpperCase();
-	if (['READY', 'OK', 'CONNECTED', 'HEDGE', 'READ_OK_ORDER_PERMISSION_UNVERIFIED'].includes(normalized)) {
+	if (['READY', 'OK', 'CONNECTED', 'HEDGE', 'READ_OK_ORDER_PERMISSION_UNVERIFIED', 'STREAM_CONNECTED'].includes(normalized)) {
 		return 'border-emerald-200 bg-emerald-50 text-emerald-700';
 	}
-	if (['ACTION_REQUIRED', 'CHECK_RUNTIME_HEALTH', 'UNKNOWN', 'ONE_WAY', 'VALIDATION_REQUIRED'].includes(normalized)) {
+	if (
+		[
+			'ACTION_REQUIRED',
+			'CHECK_RUNTIME_HEALTH',
+			'UNKNOWN',
+			'ONE_WAY',
+			'VALIDATION_REQUIRED',
+			'API_KEY_MISSING',
+			'API_READ_OK_LIVE_DISABLED',
+			'STREAM_NOT_REQUIRED_READONLY',
+			'STREAM_RECONNECTING',
+			'INFO',
+			'WARN'
+		].includes(normalized)
+	) {
 		return 'border-amber-200 bg-amber-50 text-amber-700';
 	}
 	return 'border-red-200 bg-red-50 text-red-700';
@@ -62,6 +76,11 @@ const formatReadinessBadgeLabel = (status) => {
 	const normalized = String(status || '').toUpperCase();
 	if (['OK', 'READY', 'CONNECTED', 'HEDGE'].includes(normalized)) return '정상';
 	if (normalized === 'READ_OK_ORDER_PERMISSION_UNVERIFIED') return '읽기 정상';
+	if (normalized === 'STREAM_CONNECTED') return '정상';
+	if (normalized === 'STREAM_NOT_REQUIRED_READONLY') return '대기';
+	if (normalized === 'API_READ_OK_LIVE_DISABLED') return '대기';
+	if (normalized === 'API_KEY_MISSING') return '입력 필요';
+	if (normalized === 'STREAM_RECONNECTING') return '재연결';
 	if (normalized === 'UNKNOWN') return '검증 불가';
 	if (normalized === 'ONE_WAY') return '자동 설정 필요';
 	if (['ACTION_REQUIRED', 'CHECK_RUNTIME_HEALTH', 'MISSING', 'BLOCKED', 'VALIDATION_REQUIRED'].includes(normalized)) {
@@ -233,6 +252,12 @@ const Mypage = () => {
 	const futuresBalanceIssue = readiness?.issues?.find((issue) => issue.code === 'FUTURES_BALANCE_USDT_EMPTY');
 	const maskedKeyInfo = memberInfo?.appKeyMasked || (memberInfo?.hasAppKey ? '등록됨' : '미등록');
 	const secretStatus = memberInfo?.hasAppSecret ? '등록됨' : '미등록';
+	const userStream = readiness?.userStream || null;
+	const userStreamStatus = userStream?.status || (runtimeHealth?.connected ? 'STREAM_CONNECTED' : 'UNKNOWN');
+	const userStreamLabel = userStream?.label || runtimeHealth?.statusLabel || '검증 불가';
+	const userStreamAction =
+		userStream?.nextAction ||
+		(userStream?.requiredNow ? runtimeHealth?.lastErrorMessage || 'runtime 상태를 확인해 주세요.' : '');
 	const messageClass = (tone) =>
 		tone === 'success'
 			? 'bg-emerald-50 text-emerald-700'
@@ -398,7 +423,12 @@ const Mypage = () => {
 						status={readiness?.lastSyncedAt ? 'OK' : 'ACTION_REQUIRED'}
 						action={readiness?.lastSyncedAt ? '' : '새로고침 또는 API 연결 확인이 필요합니다.'}
 					/>
-					<ReadinessItem label="User Stream" value={runtimeHealth?.statusLabel || runtimeHealth?.status || '미확인'} status={runtimeHealth?.status || 'ACTION_REQUIRED'} action={runtimeHealth?.lastErrorMessage || ''} />
+					<ReadinessItem
+						label="User Stream"
+						value={userStreamLabel}
+						status={userStreamStatus}
+						action={userStreamAction}
+					/>
 				</div>
 
 				{readiness?.issues?.length ? (
@@ -414,7 +444,7 @@ const Mypage = () => {
 			</div>
 
 			<div className="mt-6 grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-				<AccountBalancePanel />
+				<AccountBalancePanel streamReadiness={userStream} />
 
 				<div className="rounded-lg bg-white p-4 shadow sm:p-6">
 					<div className="border-b border-slate-200 pb-4">
