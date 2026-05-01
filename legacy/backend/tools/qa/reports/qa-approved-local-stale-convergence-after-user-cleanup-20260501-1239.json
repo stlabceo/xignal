@@ -1,0 +1,198 @@
+{
+  "finalClassification": "LOCAL_STALE_CONVERGENCE_PASS_CLEAN_GATE_RESTORED",
+  "approvalPhrase": "APPROVE_LOCAL_STALE_CONVERGENCE_UID147_AFTER_USER_BINANCE_CLEANUP_20260501",
+  "currentBinanceBefore": "PUMPUSDT/XRPUSDT position/order/algo flat",
+  "localStaleBefore": [
+    {
+      "pid": 991501,
+      "category": "grid",
+      "symbol": "XRPUSDT",
+      "side": "LONG",
+      "localOpenQty": 18.2,
+      "binanceQty": 0,
+      "convergenceType": "PARTIAL_AND_REQUIRES_REVIEW"
+    },
+    {
+      "pid": 991749,
+      "category": "signal",
+      "symbol": "XRPUSDT",
+      "side": "SHORT",
+      "localOpenQty": 18.3,
+      "binanceQty": 0,
+      "convergenceType": "OWNER_CLEAR_ACTUAL_FILL_RECOVERY"
+    },
+    {
+      "pid": 991502,
+      "category": "grid",
+      "symbol": "PUMPUSDT",
+      "side": "LONG",
+      "localOpenQty": 0,
+      "binanceQty": 0,
+      "staleReservationQty": 14116,
+      "convergenceType": "STALE_RESERVATION_ONLY"
+    }
+  ],
+  "actualFillRecoveries": [
+    {
+      "pid": 991749,
+      "eventType": "SIGNAL_EXTERNAL_MANUAL_CLOSE_FILL",
+      "clientOrderId": "web_ec6JjjyTRmBZCdEB8VNW",
+      "orderId": "147883985484",
+      "tradeId": "3098434938",
+      "qty": 18.3,
+      "realizedPnl": 0.00732,
+      "fee": 0.01249249
+    },
+    {
+      "pid": 991501,
+      "eventType": "GRID_EXTERNAL_MANUAL_CLOSE_FILL",
+      "clientOrderId": "web_fJW6ZgN65aViY3gaGkCj",
+      "orderId": "147883985483",
+      "tradeId": "3098434937",
+      "qty": 3.4,
+      "realizedPnl": -0.01938,
+      "fee": 0.00232083
+    }
+  ],
+  "controlledCorrections": [
+    {
+      "pid": 991501,
+      "eventType": "GRID_EXCHANGE_FLAT_LOCAL_STALE_FLATTEN",
+      "qty": 14.8,
+      "sourceClientOrderId": null,
+      "sourceOrderId": null,
+      "sourceTradeId": null,
+      "realizedPnl": 0,
+      "note": "controlled-local-stale-convergence: exchange flat, prior aggregate reduction not owner-clear, no Binance open protection"
+    }
+  ],
+  "staleReservationsFinalized": [
+    {
+      "pid": 991749,
+      "clientOrderIds": [
+        "PROFIT_147_991749_147846553633",
+        "STOP_147_991749_147846553633"
+      ],
+      "affectedRows": 2
+    },
+    {
+      "pid": 991502,
+      "clientOrderIds": [
+        "GSTOP_L_147_991502_48618296"
+      ],
+      "affectedRows": 1
+    }
+  ],
+  "localStateAfter": [
+    {
+      "symbol": "PUMPUSDT",
+      "side": "LONG",
+      "binanceQty": 0,
+      "openOrders": 0,
+      "openAlgoOrders": 0,
+      "localOpenQtySum": 0,
+      "activeReservations": 0,
+      "verdict": "CLEAN"
+    },
+    {
+      "symbol": "PUMPUSDT",
+      "side": "SHORT",
+      "binanceQty": 0,
+      "openOrders": 0,
+      "openAlgoOrders": 0,
+      "localOpenQtySum": 0,
+      "activeReservations": 0,
+      "verdict": "CLEAN"
+    },
+    {
+      "symbol": "XRPUSDT",
+      "side": "LONG",
+      "binanceQty": 0,
+      "openOrders": 0,
+      "openAlgoOrders": 0,
+      "localOpenQtySum": 0,
+      "activeReservations": 0,
+      "verdict": "CLEAN"
+    },
+    {
+      "symbol": "XRPUSDT",
+      "side": "SHORT",
+      "binanceQty": 0,
+      "openOrders": 0,
+      "openAlgoOrders": 0,
+      "localOpenQtySum": 0,
+      "activeReservations": 0,
+      "verdict": "CLEAN"
+    }
+  ],
+  "adminMonitorAfter": {
+    "currentCriticalCount": 0,
+    "unresolvedWarnCount": 0,
+    "currentRiskCount": 0,
+    "openIssueCount": 0,
+    "normalCycleCount": 48
+  },
+  "duplicatePnlIntegrity": {
+    "sourceTradeId3098434937": 1,
+    "sourceTradeId3098434938": 1,
+    "sourceOrderId147883985483": 1,
+    "sourceOrderId147883985484": 1,
+    "correctionRealizedPnl": 0,
+    "activeReservations": 0
+  },
+  "targetedReplay": {
+    "approvedLocalStaleConvergence": "PASS",
+    "crossPidOwnershipGuard": "PASS",
+    "externalManualCloseConvergence": "PASS"
+  },
+  "runAllDataReplay": {
+    "status": "PASS",
+    "qaReplayMode": "1",
+    "qaDisableBinanceWrites": "1",
+    "binanceDeltaZero": true,
+    "deltas": {
+      "openOrders": 0,
+      "openAlgoOrders": 0,
+      "positionQtyAbs": 0,
+      "allOrders": {
+        "PUMPUSDT": 0,
+        "XRPUSDT": 0
+      },
+      "userTrades": {
+        "PUMPUSDT": 0,
+        "XRPUSDT": 0
+      }
+    }
+  },
+  "runAllLiveReadonly": {
+    "status": "PASS",
+    "reportJson": "C:\\Users\\tmdtk\\Xignal\\legacy\\backend\\tools\\qa\\reports\\qa-live-readonly-report-2026-05-01T03-38-36-767Z.json",
+    "reportMd": "C:\\Users\\tmdtk\\Xignal\\legacy\\backend\\tools\\qa\\reports\\qa-live-readonly-report-2026-05-01T03-38-36-767Z.md"
+  },
+  "restartSmoke": {
+    "restartRequired": false,
+    "reason": "QA/local convergence tooling only; runtime route/order path unchanged",
+    "matchedWebhookSent": false
+  },
+  "evidenceFiles": {
+    "convergence": "C:\\Users\\tmdtk\\Xignal\\legacy\\backend\\tools\\qa\\reports\\tmp-approved-local-stale-convergence-20260501-2026-05-01T03-33-33-383Z.json",
+    "postVerify": "C:\\Users\\tmdtk\\Xignal\\legacy\\backend\\tools\\qa\\reports\\tmp-approved-local-stale-post-verify-2026-05-01T03-34-01-769Z.json",
+    "dataReplayDelta": "C:\\Users\\tmdtk\\Xignal\\legacy\\backend\\tools\\qa\\reports\\tmp-approved-local-stale-runall-data-replay-delta-2026-05-01T03-36-39-330Z.json"
+  },
+  "didNotDo": {
+    "binanceOrderCreate": true,
+    "binanceOrderCancel": true,
+    "binancePositionClose": true,
+    "protectionOrderCreate": true,
+    "realStrategyMatchingWebhook": true,
+    "tradingViewAlertEdit": true,
+    "strategyOnOffChange": true,
+    "pidEnabledArbitraryChange": true,
+    "rawSqlProductionPatch": true,
+    "dbSchemaChange": true,
+    "storedProcedureChange": true,
+    "liveWriteModeSwitch": true,
+    "qaDisableBinanceWritesUnset": true,
+    "push": true
+  }
+}
