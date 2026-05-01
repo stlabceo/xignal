@@ -65,7 +65,7 @@ export const auth = {
 	},
 	member(callback) {
 		api
-			.get('/admin/member')
+			.get('/user/api/account/member')
 			.then((res) => {
 				callback(res);
 			})
@@ -75,7 +75,7 @@ export const auth = {
 	},
 	saveMemberKeys(body, callback) {
 		api
-			.post('/admin/member/keys', body)
+			.post('/user/api/account/binance-keys', body)
 			.then((res) => {
 				callback(res);
 			})
@@ -85,7 +85,7 @@ export const auth = {
 	},
 	validateMemberKeys(body, callback) {
 		api
-			.post('/admin/member/keys/validate', body)
+			.post('/user/api/account/binance-keys/validate', body)
 			.then((res) => {
 				callback(res);
 			})
@@ -285,7 +285,7 @@ export const auth = {
 	},
 	accountReadiness(params, callback) {
 		api
-			.get('/admin/account/readiness', { params })
+			.get('/user/api/account/readiness', { params })
 			.then((res) => {
 				callback(res);
 			})
@@ -295,7 +295,7 @@ export const auth = {
 	},
 	ensureHedgeMode(body, callback) {
 		api
-			.post('/admin/account/ensure-hedge-mode', body)
+			.post('/user/api/account/ensure-hedge-mode', body)
 			.then((res) => {
 				callback(res);
 			})

@@ -14,6 +14,7 @@ const { getExchangeSymbolRuleSummary } = require("./admin-management");
 const { insertBinanceRuntimeEventLog } = require("./binance-runtime-event-log");
 const strategyControlState = require("./strategy-control-state");
 const binanceWriteGuard = require("./binance-write-guard");
+const credentialSecrets = require("./credential-secrets");
 let gridEngine = null;
 let policyEngine = null;
 const Binance = require('node-binance-api');
@@ -113,7 +114,7 @@ const ensureBinanceRuntimeMeta = (uid) => {
 
 const createBinanceApiClient = (appKey, appSecret) => new Binance().options({
     APIKEY: appKey,
-    APISECRET: appSecret,
+    APISECRET: credentialSecrets.revealSecret(appSecret),
     useServerTime: true,
     recvWindow: 60000,
     test: TEST_MODE,
@@ -2101,7 +2102,7 @@ const resolveMemberApiCredentials = async (uid) => {
     if(runtime?.appKey && runtime?.appSecret){
         return {
             appKey: runtime.appKey,
-            appSecret: runtime.appSecret,
+            appSecret: credentialSecrets.revealSecret(runtime.appSecret),
         };
     }
 
@@ -2109,7 +2110,7 @@ const resolveMemberApiCredentials = async (uid) => {
     if(member?.appKey && member?.appSecret){
         return {
             appKey: member.appKey,
-            appSecret: member.appSecret,
+            appSecret: credentialSecrets.revealSecret(member.appSecret),
         };
     }
 
@@ -8335,8 +8336,14 @@ const initAPI = async (uid, APP_KEY, APP_SECRET, options = {}) => {
         });
 
         binance[uid].futuresPositionSideDual().then((re)=>{
-            if(!re.dualSidePosition){
-                binance[uid].futuresChangePositionSideDual(true);
+            updateBinanceRuntimeMeta(uid, {
+                lastHedgeMode: Boolean(re?.dualSidePosition),
+            });
+            if(!re?.dualSidePosition){
+                logOrderRuntimeTrace('POSITION_MODE_REQUIRES_USER_APPROVED_CHANGE', {
+                    uid,
+                    action: 'WRITE_POSITION_MODE_CHANGE_DEFERRED',
+                });
             }
         }).catch((error)=>{
             handleBinanceClientError('positionSideDual', uid, error);
@@ -10681,9 +10688,10 @@ exports.validateMemberApiKeys = async (appKey, appSecret) => {
     }
 
     try{
+        const revealedSecret = credentialSecrets.revealSecret(appSecret);
         const client = new Binance().options({
             APIKEY: appKey,
-            APISECRET: appSecret,
+            APISECRET: revealedSecret,
             test: TEST_MODE,
             reconnect: true,
             verbose: false,

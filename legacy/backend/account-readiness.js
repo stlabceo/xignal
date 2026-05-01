@@ -193,7 +193,7 @@ const getAccountReadiness = async (uid, { runtimeHealth = null } = {}) => {
     hedgeMode: {
       status: positionMode,
       label: positionMode === "HEDGE" ? "헤지 모드" : positionMode === "ONE_WAY" ? "원웨이 모드" : "검증 불가",
-      endpoint: "/admin/account/ensure-hedge-mode",
+      endpoint: "/user/api/account/ensure-hedge-mode",
       actionAvailable: true,
       blockedByWriteGuard: writeDisabled,
       actionLabel: "헤지 모드 자동 설정",

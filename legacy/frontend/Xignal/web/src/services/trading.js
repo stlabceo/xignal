@@ -1,15 +1,17 @@
 import api from '../api';
 
+const USER_TRADING_API = '/user/api/trading';
+
 export const trading = {
 	candle(params, callback) {
-		api.get('/admin/candle/data', {
+		api.get(`${USER_TRADING_API}/candle/data`, {
 			params
 		}).then((res) => {
 			callback(res);
 		});
 	},
 	liveList(params, callback) {
-		api.get('/admin/live/list', {
+		api.get(`${USER_TRADING_API}/live/list`, {
 			params
 		}).then((res) => {
 			callback(res);
@@ -23,14 +25,14 @@ export const trading = {
 		});
 	},
 	livePrice(params, callback) {
-		api.get('/admin/price', {
+		api.get(`${USER_TRADING_API}/price`, {
 			params
 		}).then((res) => {
 			callback(res);
 		});
 	},
 	performanceSummary(params, callback) {
-		api.get('/admin/live/performance-summary', {
+		api.get(`${USER_TRADING_API}/live/performance-summary`, {
 			params
 		}).then((res) => {
 			callback(res);
@@ -39,7 +41,7 @@ export const trading = {
 		});
 	},
 	symbolRules(params, callback) {
-		api.get('/admin/exchange/symbol-rules', {
+		api.get(`${USER_TRADING_API}/exchange/symbol-rules`, {
 			params
 		}).then((res) => {
 			callback(res);
@@ -49,7 +51,7 @@ export const trading = {
 	},
 	strategyCatalogOptions(params, callback) {
 		api
-			.get('/admin/trading/catalog-options', {
+			.get(`${USER_TRADING_API}/trading/catalog-options`, {
 				params
 			})
 			.then((res) => {
@@ -67,7 +69,7 @@ export const trading = {
 		});
 	},
 	liveDetail(params, callback) {
-		api.get('/admin/live/detail', {
+		api.get(`${USER_TRADING_API}/live/detail`, {
 			params
 		}).then((res) => {
 			callback(res);
@@ -81,7 +83,7 @@ export const trading = {
 	// 	});
 	// },
 	liveDetailUpload(body, params, callback) {
-		api.post('/admin/live/add', body, { params })
+		api.post(`${USER_TRADING_API}/live/add`, body, { params })
 			.then((res) => {
 				callback(res);
 			})
@@ -90,7 +92,7 @@ export const trading = {
 			});
 	},
 	liveDetailEdit(body, params, callback) {
-		api.post('/admin/live/edit', body, { params })
+		api.post(`${USER_TRADING_API}/live/edit`, body, { params })
 			.then((res) => {
 				callback(res);
 			})
@@ -127,7 +129,7 @@ export const trading = {
 	// 	});
 	// },
 	liveAutoItem(body, params, callback) {
-		api.post('/admin/live/auto', body, { params })
+		api.post(`${USER_TRADING_API}/live/auto`, body, { params })
 			.then((res) => {
 				callback(res);
 			})
@@ -145,7 +147,7 @@ export const trading = {
 			});
 	},
 	gridLiveList(params, callback) {
-		api.get('/admin/grid/live/list', {
+		api.get(`${USER_TRADING_API}/grid/live/list`, {
 			params
 		}).then((res) => {
 			callback(res);
@@ -159,7 +161,7 @@ export const trading = {
 		});
 	},
 	gridLiveDetail(params, callback) {
-		api.get('/admin/grid/live/detail', {
+		api.get(`${USER_TRADING_API}/grid/live/detail`, {
 			params
 		}).then((res) => {
 			callback(res);
@@ -173,7 +175,7 @@ export const trading = {
 		});
 	},
 	gridLiveDetailUpload(body, params, callback) {
-		api.post('/admin/grid/live/add', body, { params })
+		api.post(`${USER_TRADING_API}/grid/live/add`, body, { params })
 			.then((res) => {
 				callback(res);
 			})
@@ -182,7 +184,7 @@ export const trading = {
 			});
 	},
 	gridLiveDetailEdit(body, params, callback) {
-		api.post('/admin/grid/live/edit', body, { params })
+		api.post(`${USER_TRADING_API}/grid/live/edit`, body, { params })
 			.then((res) => {
 				callback(res);
 			})
@@ -209,7 +211,7 @@ export const trading = {
 			});
 	},
 	gridLiveAutoItem(body, params, callback) {
-		api.post('/admin/grid/live/auto', body, { params })
+		api.post(`${USER_TRADING_API}/grid/live/auto`, body, { params })
 			.then((res) => {
 				callback(res);
 			})
@@ -227,7 +229,7 @@ export const trading = {
 			});
 	},
 	deleteLivePlayItems(body, params, callback) {
-		api.post('/admin/live/del', body, { params })
+		api.post(`${USER_TRADING_API}/live/del`, body, { params })
 			.then((res) => {
 				callback(res);
 			})
@@ -245,7 +247,7 @@ export const trading = {
 			});
 	},
 	gridLiveDeleteItem(body, params, callback) {
-		api.post('/admin/grid/live/del', body, { params })
+		api.post(`${USER_TRADING_API}/grid/live/del`, body, { params })
 			.then((res) => {
 				callback(res);
 			})
@@ -279,7 +281,7 @@ export const trading = {
 		});
 	},
 	userFacingMessages(params, callback) {
-		api.get('/admin/msg/user-facing', {
+		api.get(`${USER_TRADING_API}/msg/user-facing`, {
 			params
 		}).then((res) => {
 			callback(res);
@@ -311,7 +313,7 @@ export const trading = {
 		});
 	},
 	getRuntimeTrackRecord(params, callback) {
-		api.get('/admin/live/track-record/runtime/recent', {
+		api.get(`${USER_TRADING_API}/live/track-record/runtime/recent`, {
 			params
 		}).then((res) => {
 			callback(res);
@@ -320,7 +322,7 @@ export const trading = {
 		});
 	},
 	getRuntimeTrackRecordItem(params, callback) {
-		api.get('/admin/live/track-record/runtime/item', {
+		api.get(`${USER_TRADING_API}/live/track-record/runtime/item`, {
 			params
 		}).then((res) => {
 			callback(res);

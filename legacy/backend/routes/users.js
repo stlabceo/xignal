@@ -3,6 +3,7 @@ var router = express.Router();
 const axios = require('axios');
 const crypto = require('crypto');
 const refresh = require("../middleware/refresh");
+const auth = require("../middleware/auth");
 const redisClient = require('../util/redis.util');
 const jwt = require('../util/jwt.util');
 const db = require('../database/connect/config');
@@ -11,6 +12,10 @@ const seon = require('../seon');
 const dbcon = require("../dbcon");
 const gridRuntime = require("../grid-runtime");
 const gridEngine = require("../grid-engine");
+const coin = require("../coin");
+const accountReadiness = require("../account-readiness");
+const binanceWriteGuard = require("../binance-write-guard");
+const credentialSecrets = require("../credential-secrets");
 const signalStrategyIdentity = require("../signal-strategy-identity");
 const { insertWebhookEventLog, insertWebhookEventTargetLogs } = require("../webhook-event-log");
 
@@ -102,6 +107,44 @@ const reserveRedisWebhookKey = async (key, ttlSeconds) => {
       finish(null);
     }
   });
+};
+
+const trimmedString = (value) => String(value || "").trim();
+
+const sendRouteError = (res, status, message) =>
+  res.status(status).json({
+    errors: [
+      {
+        location: "body",
+        msg: message,
+        param: "body",
+        value: "body",
+      },
+    ],
+  });
+
+const sanitizeMemberForClient = (member = {}) => {
+  if (!member) {
+    return member;
+  }
+
+  const { appKey, appSecret, password, ...safeMember } = member;
+  return {
+    ...safeMember,
+    hasAppKey: Boolean(appKey),
+    hasAppSecret: Boolean(appSecret),
+    appKeyMasked: credentialSecrets.maskCredential(appKey),
+  };
+};
+
+const notifyUserUpdated = (req, userId) => {
+  const socketId = req.app?.users?.[userId];
+  if (socketId) {
+    req.app.io.to(socketId).emit("user-updated", {
+      userId,
+      message: "회원 정보가 업데이트되었습니다.",
+    });
+  }
 };
 
 const buildWebhookExecutionKey = (payload) => {
@@ -795,6 +838,136 @@ router.post('/admin/login', validateLogin, async (req, res) =>{
     });
   }
   
+});
+
+router.get('/api/account/member', auth.verifyToken, async (req, res) => {
+  const userId = req.decoded.userId;
+  const member = await dbcon.DBOneCall(`CALL SP_A_MEMBER_GET(?)`, [userId]);
+  return res.send(sanitizeMemberForClient(member));
+});
+
+router.post('/api/account/binance-keys', auth.verifyToken, async (req, res) => {
+  const userId = req.decoded.userId;
+  const nextAppKey = trimmedString(req.body.appKey);
+  const nextAppSecret = trimmedString(req.body.appSecret);
+
+  if (!nextAppKey && !nextAppSecret) {
+    return sendRouteError(res, 400, "저장할 API Key 또는 Secret Key를 입력해 주세요.");
+  }
+
+  const member = await dbcon.DBOneCall(`CALL SP_A_MEMBER_GET(?)`, [userId]);
+  if (!member) {
+    return sendRouteError(res, 404, "회원 정보를 찾을 수 없습니다.");
+  }
+
+  const finalAppKey = nextAppKey || member.appKey || null;
+  const finalAppSecret = nextAppSecret ? credentialSecrets.protectSecret(nextAppSecret) : member.appSecret || null;
+
+  if (!finalAppKey || !finalAppSecret) {
+    return sendRouteError(res, 400, "API Key와 Secret Key를 모두 준비한 뒤 저장해 주세요.");
+  }
+
+  await db.query(
+    `UPDATE admin_member SET appKey = ?, appSecret = ? WHERE id = ? LIMIT 1`,
+    [finalAppKey, finalAppSecret, userId]
+  );
+
+  notifyUserUpdated(req, userId);
+
+  return res.send({
+    success: true,
+    hasAppKey: true,
+    hasAppSecret: true,
+    appKeyMasked: credentialSecrets.maskCredential(finalAppKey),
+    message: "API Key와 Secret Key가 저장되었습니다. Secret Key 원문은 다시 표시하지 않습니다.",
+  });
+});
+
+router.post('/api/account/binance-keys/validate', auth.verifyToken, async (req, res) => {
+  const userId = req.decoded.userId;
+  const inputAppKey = trimmedString(req.body.appKey);
+  const inputAppSecret = trimmedString(req.body.appSecret);
+  const member = await dbcon.DBOneCall(`CALL SP_A_MEMBER_GET(?)`, [userId]);
+
+  if (!member) {
+    return sendRouteError(res, 404, "회원 정보를 찾을 수 없습니다.");
+  }
+
+  const finalAppKey = inputAppKey || member.appKey || null;
+  const finalAppSecret = inputAppSecret ? credentialSecrets.protectSecret(inputAppSecret) : member.appSecret || null;
+  const result = await coin.validateMemberApiKeys(finalAppKey, finalAppSecret);
+
+  if (!result.ok) {
+    return res.status(400).send(result);
+  }
+
+  return res.send(result);
+});
+
+router.get('/api/account/readiness', auth.verifyToken, async (req, res) => {
+  const userId = req.decoded.userId;
+  const runtimeHealth = await coin.getBinanceRuntimeHealth(userId).catch((error) => ({
+    status: "UNKNOWN",
+    lastErrorCode: error?.code || null,
+    lastErrorMessage: error?.message || null,
+  }));
+  const member = await dbcon.DBOneCall(`CALL SP_A_MEMBER_GET(?)`, [userId]);
+  const hasCredentials = Boolean(member?.appKey && member?.appSecret);
+
+  if (hasCredentials) {
+    runtimeHealth.apiValidation = await coin.validateMemberApiKeys(member.appKey, member.appSecret).catch((error) => ({
+      ok: false,
+      code: error?.code || "VALIDATION_ERROR",
+      message: error?.message || "Binance API validation failed.",
+    }));
+
+    if (runtimeHealth.apiValidation?.ok) {
+      const accountRisk = await coin.getBinanceAccountRiskCurrent(userId, {
+        persist: true,
+        force: true,
+      }).catch((error) => ({
+        errorCode: error?.code || "ACCOUNT_READ_ERROR",
+        message: error?.message || "Binance futures account read failed.",
+      }));
+
+      if (accountRisk && !accountRisk.errorCode) {
+        runtimeHealth.hedgeMode = accountRisk.hedgeMode;
+        runtimeHealth.lastHedgeMode = accountRisk.hedgeMode;
+      } else {
+        runtimeHealth.lastErrorCode = accountRisk?.errorCode || runtimeHealth.lastErrorCode;
+        runtimeHealth.lastErrorMessage = accountRisk?.message || runtimeHealth.lastErrorMessage;
+      }
+    }
+  }
+
+  const payload = await accountReadiness.getAccountReadiness(userId, { runtimeHealth });
+  return res.send(payload);
+});
+
+router.post('/api/account/ensure-hedge-mode', auth.verifyToken, async (req, res) => {
+  const userId = req.decoded.userId;
+  const decision = binanceWriteGuard.evaluateBinanceWriteAllowed({
+    uid: userId,
+    action: "WRITE_POSITION_MODE_CHANGE",
+    caller: "routes/users.account.ensure-hedge-mode",
+    allowLiveOrders: false,
+  });
+
+  if (!decision.allowed) {
+    return res.send({
+      ok: false,
+      blockedByWriteGuard: true,
+      guardReason: decision.reason,
+      runtimeMode: process.env.QA_DISABLE_BINANCE_WRITES ? "READ_ONLY_WRITE_DISABLED" : "WRITE_APPROVAL_REQUIRED",
+      message: "헤지 모드 자동 설정은 live-write 승인 상태에서만 실행할 수 있습니다.",
+    });
+  }
+
+  return res.status(501).send({
+    ok: false,
+    blockedByWriteGuard: false,
+    message: "헤지 모드 자동 설정 실행은 별도 승인된 live-write preflight에서만 제공됩니다.",
+  });
 });
 
 router.get('/n/image', async function(req, res){

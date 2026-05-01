@@ -30,9 +30,45 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
+const USER_TRADING_ROUTE_ALLOWLIST = new Set([
+  'GET /price',
+  'GET /candle/data',
+  'GET /live/list',
+  'GET /live/detail',
+  'GET /live/performance-summary',
+  'GET /live/track-record/runtime/recent',
+  'GET /live/track-record/runtime/item',
+  'GET /exchange/symbol-rules',
+  'GET /trading/catalog-options',
+  'GET /msg/user-facing',
+  'POST /live/add',
+  'POST /live/edit',
+  'POST /live/auto',
+  'POST /live/del',
+  'GET /grid/live/list',
+  'GET /grid/live/detail',
+  'POST /grid/live/add',
+  'POST /grid/live/edit',
+  'POST /grid/live/auto',
+  'POST /grid/live/del',
+]);
+
+const restrictUserTradingRoute = (req, res, next) => {
+  const routeKey = `${String(req.method || '').toUpperCase()} ${req.path}`;
+  if (USER_TRADING_ROUTE_ALLOWLIST.has(routeKey)) {
+    return next();
+  }
+
+  return res.status(404).json({
+    ok: false,
+    message: 'User trading API route is not available.',
+  });
+};
+
 app.use('/admin/stats', auth.verifyToken, statsRouter);
 app.use('/admin',auth.verifyToken, adminRouter);
 app.use('/user/api/stats', statsRouter);
+app.use('/user/api/trading', auth.verifyToken, restrictUserTradingRoute, adminRouter);
 app.use('/user', usersRouter);
 
 // catch 404 and forward to error handler

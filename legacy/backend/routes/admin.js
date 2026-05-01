@@ -28,6 +28,7 @@ const messageFilter = require("../message-filter");
 const accountReadiness = require("../account-readiness");
 const binanceWriteGuard = require("../binance-write-guard");
 const adminOrderMonitor = require("../admin-order-monitor");
+const credentialSecrets = require("../credential-secrets");
 
 const dt = require("../data");
 const dayjs = require("dayjs");
@@ -76,14 +77,7 @@ const isEmpty3 = function (value) {
 };
 
 const maskApiCredential = (value) => {
-  const raw = String(value || "").trim();
-  if (!raw) {
-    return null;
-  }
-  if (raw.length <= 8) {
-    return raw;
-  }
-  return `${raw.slice(0, 4)}...${raw.slice(-4)}`;
+  return credentialSecrets.maskCredential(value);
 };
 
 const sanitizeMemberForClient = (member = {}) => {
@@ -3849,7 +3843,7 @@ router.post("/member/keys", async (req, res) => {
   }
 
   const finalAppKey = nextAppKey || member.appKey || null;
-  const finalAppSecret = nextAppSecret || member.appSecret || null;
+  const finalAppSecret = nextAppSecret ? credentialSecrets.protectSecret(nextAppSecret) : member.appSecret || null;
 
   if (!finalAppKey || !finalAppSecret) {
     return sendRouteError(res, 400, "API Key와 Secret Key를 모두 준비한 뒤 저장해 주세요.");

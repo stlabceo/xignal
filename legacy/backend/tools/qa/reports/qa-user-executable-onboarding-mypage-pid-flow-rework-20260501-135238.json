@@ -1,0 +1,139 @@
+{
+  "finalClassification": "USER_EXECUTABLE_ONBOARDING_FLOW_PASS_API_KEY_INPUT_REQUIRED",
+  "previousReportAccepted": false,
+  "reasonPreviousReportWasNotEnough": "UID149 and PID 992559/992311 were Codex-created artifacts, not proof that a user can execute the full onboarding flow in the browser.",
+  "codexCreatedArtifacts": {
+    "classification": "QUARANTINED_SAFE_ARTIFACT",
+    "uid": 149,
+    "signalPid": 992559,
+    "gridPid": 992311,
+    "hasBinanceCredentials": false,
+    "signalEnabled": "N",
+    "gridEnabled": "N",
+    "ledgerRows": 0,
+    "snapshotRows": 0,
+    "activeReservations": 0,
+    "adoptAsSecondLiveQaUid": false
+  },
+  "changes": {
+    "userScopedAccountRoutes": [
+      "GET /user/api/account/member",
+      "POST /user/api/account/binance-keys",
+      "POST /user/api/account/binance-keys/validate",
+      "GET /user/api/account/readiness",
+      "POST /user/api/account/ensure-hedge-mode"
+    ],
+    "userScopedTradingRoutes": [
+      "GET /user/api/trading/live/list",
+      "POST /user/api/trading/live/add",
+      "POST /user/api/trading/live/auto",
+      "GET /user/api/trading/grid/live/list",
+      "POST /user/api/trading/grid/live/add",
+      "POST /user/api/trading/grid/live/auto"
+    ],
+    "secretHandling": {
+      "rawSecretReturnedToClient": false,
+      "newSecretStorage": "credentialSecrets.protectSecret",
+      "legacyPlaintextReadCompatibility": true
+    },
+    "hedgeMode": {
+      "mypageEndpoint": "/user/api/account/ensure-hedge-mode",
+      "readOnlyBlockedByWriteGuard": true,
+      "removedInitApiAutoWrite": true
+    }
+  },
+  "smoke": {
+    "signupValidation": {
+      "reg1": 200,
+      "reg2": 200,
+      "code": 200,
+      "finalRegCalled": false
+    },
+    "login": {
+      "status": 200,
+      "tokenPresent": true,
+      "rawPasswordReported": false
+    },
+    "uid149Readiness": {
+      "status": 200,
+      "apiConnection": "MISSING",
+      "apiPermission": "MISSING",
+      "readinessStatus": "BLOCKED",
+      "issues": [
+        "API_KEY_MISSING",
+        "ACCOUNT_SNAPSHOT_MISSING"
+      ]
+    },
+    "uid147Readiness": {
+      "status": 200,
+      "apiConnection": "OK",
+      "apiPermission": "READ_OK_ORDER_PERMISSION_UNVERIFIED",
+      "readinessStatus": "READY",
+      "apiValidation": {
+        "ok": true,
+        "code": "OK"
+      }
+    },
+    "userTradingRoutes": {
+      "signalList149": 200,
+      "gridList149": 200,
+      "catalog149": 200,
+      "invalidSignalCreate": 400,
+      "invalidGridCreate": 400,
+      "invalidSignalAuto": 404,
+      "invalidGridAuto": 404,
+      "newPidCreated": false,
+      "artifactEnabledAfterSmoke": "N"
+    },
+    "crossUidIsolation": {
+      "uid147SignalContainsArtifact": false,
+      "uid147GridContainsArtifact": false,
+      "uid149SignalContainsUid147": false,
+      "uid149GridContainsUid147": false
+    },
+    "adminUidObservability": {
+      "uid149OverviewStatus": 200,
+      "uid149OverviewUid": 149,
+      "uid147OverviewStatus": 200,
+      "uid147OverviewUid": 147
+    },
+    "browser": {
+      "signinVisible": true,
+      "signupStepsVisible": true,
+      "finalSignupSubmitClicked": false
+    }
+  },
+  "validation": {
+    "nodeCheck": "PASS",
+    "frontendBuild": "PASS",
+    "runAllLiveReadonly": {
+      "status": "PASS",
+      "runId": "QA_READONLY_2026-05-01T04-51-57-153Z",
+      "report": "C:\\Users\\tmdtk\\Xignal\\legacy\\backend\\tools\\qa\\reports\\qa-live-readonly-report-2026-05-01T04-51-59-057Z.json"
+    },
+    "runAllDataReplay": "NOT_EXECUTED_NO_OWNERSHIP_REPLAY_CHANGE"
+  },
+  "runtime": {
+    "pid": 15384,
+    "mode": "READ_ONLY_WRITE_DISABLED",
+    "qaDisableBinanceWrites": "1"
+  },
+  "didNotDo": {
+    "additionalUserCreate": true,
+    "additionalPidCreate": true,
+    "binanceOrderCreate": true,
+    "binanceOrderCancel": true,
+    "binanceClose": true,
+    "protectionCreate": true,
+    "matchedWebhook": true,
+    "uid147OnOffChange": true,
+    "rawSqlPatch": true,
+    "schemaChange": true,
+    "storedProcedureChange": true,
+    "liveWriteModeSwitch": true,
+    "unsetQaDisableBinanceWrites": true,
+    "push": true,
+    "rawSecretReported": true
+  },
+  "nextStep": "User should create or choose the real second UID and enter real Binance API key/secret in My Page; signed GET/futures account read will then complete readiness."
+}
