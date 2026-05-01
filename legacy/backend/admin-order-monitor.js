@@ -508,6 +508,14 @@ const resolveSymbols = (localRows, extraSymbols = []) =>
     ...localRows.ledgerRows.map((row) => row.symbol),
   ]).map(normalizeSymbol);
 
+const resolveSymbolsWithBinancePositions = (symbols = [], positionRows = []) =>
+  unique([
+    ...(symbols || []),
+    ...(positionRows || [])
+      .filter((row) => abs(row.positionAmt) > 0)
+      .map((row) => row.symbol),
+  ]).map(normalizeSymbol);
+
 const loadBinanceEvidence = async (uid, symbols) => {
   const [positionRiskResult, openOrdersResult, openAlgoOrdersResult] = await Promise.all([
     safeBinanceCall("positionRisk", () => qaBinance.getPositionRisk(uid), []),
@@ -636,7 +644,10 @@ const buildCurrentRiskBoard = ({ uid, symbols, localRows, binanceEvidence }) => 
         ownerPids,
         activeProtectionCount: activeProtection.length,
         expectedProtectionCount: binanceQty > 0 || localOpenQty > 0 ? 2 : 0,
-        activeProtectionQty: activeProtection.reduce((sum, order) => sum + abs(order.origQty || order.quantity), 0),
+        activeProtectionQty: activeProtection.reduce(
+          (maxQty, order) => Math.max(maxQty, abs(order.origQty || order.quantity)),
+          0
+        ),
         localReservationCount: reservations.length,
         actualTP,
         actualSTOP,
@@ -875,9 +886,16 @@ const buildAdminOrderMonitor = async (uid, options = {}) => {
         .map((item) => item.trim())
         .filter(Boolean);
   const symbols = resolveSymbols(localRows, requestedSymbols);
-  const binanceEvidence = await loadBinanceEvidence(targetUid, symbols);
+  let binanceEvidence = await loadBinanceEvidence(targetUid, symbols);
+  const expandedSymbols = resolveSymbolsWithBinancePositions(
+    symbols,
+    binanceEvidence.positionRisk.data || []
+  );
+  if (expandedSymbols.length !== symbols.length) {
+    binanceEvidence = await loadBinanceEvidence(targetUid, expandedSymbols);
+  }
   const rawBinanceOrders = buildRawRows({ localRows, binanceEvidence });
-  const currentRiskBoard = buildCurrentRiskBoard({ uid: targetUid, symbols, localRows, binanceEvidence });
+  const currentRiskBoard = buildCurrentRiskBoard({ uid: targetUid, symbols: expandedSymbols, localRows, binanceEvidence });
   const orderCycles = buildOrderCycles({ uid: targetUid, localRows, rawBinanceOrders });
   const protectionMatrix = buildProtectionMatrix({ uid: targetUid, currentRiskBoard });
   const issueCenter = buildIssueCenter({
@@ -894,7 +912,7 @@ const buildAdminOrderMonitor = async (uid, options = {}) => {
   return {
     generatedAt: new Date().toISOString(),
     uid: targetUid,
-    symbols,
+    symbols: expandedSymbols,
     sourcePolicy: {
       primaryOrderEvidence: [
         "Binance allOrders",

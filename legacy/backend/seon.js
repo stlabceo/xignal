@@ -11,6 +11,7 @@ const gridEngine = require("./grid-engine");
 const pidPositionLedger = require("./pid-position-ledger");
 const strategyControlState = require("./strategy-control-state");
 const signalStrategyIdentity = require("./signal-strategy-identity");
+const adminOrderMonitor = require("./admin-order-monitor");
 
 const coin = require("./coin");
 const dt = require("./data");
@@ -55,6 +56,7 @@ const runtimeLoopHealth = {
         complete: 0,
         stuck: 0,
     },
+    bootSafetyGate: null,
 };
 
 const TRADE_MODE_LIVE = 0;
@@ -135,6 +137,67 @@ const logRunMainFailure = (stage, error, extra = {}) => {
             ...errorPayload,
         })}`
     );
+};
+
+const isBootSafetyGateDisabled = () => (
+    String(process.env.DISABLE_BOOT_SAFETY_GATE || '').trim() === '1'
+);
+
+const loadBootSafetyGateUids = async () => {
+    const [rows] = await db.query(
+        `SELECT DISTINCT uid
+           FROM (
+                 SELECT uid FROM live_play_list WHERE enabled = 'Y'
+                 UNION
+                 SELECT uid FROM live_grid_strategy_list WHERE enabled = 'Y'
+                 UNION
+                 SELECT uid FROM live_pid_position_snapshot WHERE ABS(openQty) > 0.000000001
+                 UNION
+                 SELECT uid FROM live_pid_exit_reservation
+                  WHERE status IN ('ACTIVE','PARTIAL','CANCEL_REQUESTED','CANCEL_PENDING','UNKNOWN_CANCEL_STATE')
+                ) AS runtime_uid_scope
+          WHERE uid IS NOT NULL`
+    );
+    return (rows || [])
+        .map((row) => Number(row.uid || 0))
+        .filter((uid) => uid > 0);
+};
+
+const runBootSafetyGate = async (ownerLabel = null) => {
+    if(isBootSafetyGateDisabled()){
+        return {
+            ok: true,
+            disabled: true,
+            phase: 'SAFE_TO_TRADE',
+            status: 'DISABLED_BY_ENV',
+            ownerLabel,
+        };
+    }
+
+    const uids = await loadBootSafetyGateUids();
+    const checks = [];
+    for(const uid of uids){
+        const monitor = await adminOrderMonitor.buildAdminOrderMonitor(uid, {});
+        const sourceFailed = (monitor.sourceStatus || []).some((item) => item && item.ok === false);
+        const currentCriticalCount = Number(monitor?.summary?.currentCriticalCount || 0);
+        checks.push({
+            uid,
+            sourceFailed,
+            currentCriticalCount,
+            openIssueCount: Number(monitor?.summary?.openIssueCount || 0),
+            symbols: monitor.symbols || [],
+        });
+    }
+
+    const blocked = checks.some((check) => check.sourceFailed || check.currentCriticalCount > 0);
+    return {
+        ok: !blocked,
+        ownerLabel,
+        phase: blocked ? 'RECONCILING' : 'SAFE_TO_TRADE',
+        status: blocked ? 'BOOT_RECOVERY_BLOCKED_BY_CURRENT_RISK' : 'BOOT_RECOVERY_CLEAN',
+        uids,
+        checks,
+    };
 };
 
 const runMainStage = async (stage, worker, context = {}) => {
@@ -2079,6 +2142,27 @@ exports.startRuntime = async (options = {}) => {
             ownerLabel,
             runtimeStartedAt: runtimeLoopHealth.runtimeStartedAt,
         }, { force: true });
+
+        const bootGate = await runBootSafetyGate(ownerLabel);
+        runtimeLoopHealth.bootSafetyGate = bootGate;
+        if(!bootGate.ok){
+            logRunMainState('BOOT_SAFETY_GATE_BLOCKED', {
+                file: 'seon.js',
+                function: 'startRuntime',
+                ownerLabel,
+                bootGate,
+                action: 'runtime-loop-not-started',
+            }, { force: true });
+            runtimeStartPromise = null;
+            return {
+                started: false,
+                blocked: true,
+                ownerLabel,
+                reason: 'BOOT_SAFETY_GATE_BLOCKED',
+                bootGate,
+            };
+        }
+
         await coin.init({
             enablePublicFeeds: true,
             enableUserStreams: true,
@@ -2111,5 +2195,6 @@ exports.getRuntimeLoopHealth = () => ({
     runMainST,
 });
 
-exports.normalizeSignalStrategyType = normalizeSignalStrategyType;
+exports.runBootSafetyGateForQa = runBootSafetyGate;
 
+exports.normalizeSignalStrategyType = normalizeSignalStrategyType;

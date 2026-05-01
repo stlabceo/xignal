@@ -55,6 +55,99 @@ const toNumber = (value) => {
   return Number.isFinite(numeric) ? numeric : null;
 };
 
+const normalizeTpKey = (value) => {
+  const numeric = toNumber(value);
+  if (numeric == null) {
+    return String(value || "").trim();
+  }
+  return String(Number(numeric.toFixed(4))).replace(/\.0+$/, "");
+};
+
+const tpKeyCandidates = (tp) => {
+  const normalized = normalizeTpKey(tp);
+  const numeric = toNumber(normalized);
+  return [
+    String(tp),
+    normalized,
+    numeric == null ? null : numeric.toFixed(1),
+    numeric == null ? null : String(numeric),
+  ].filter((value, index, values) => value && values.indexOf(value) === index);
+};
+
+const readMetricValue = (cell = {}, keys = []) => {
+  for (const key of keys) {
+    if (cell[key] != null) {
+      return cell[key];
+    }
+  }
+  return null;
+};
+
+const getPeriodMatrix = (payload = {}, periodKey) => {
+  const direct = payload.matrix?.[periodKey];
+  if (direct && typeof direct === "object") {
+    return direct;
+  }
+  const nested = payload.periods?.[periodKey]?.matrix || payload.periods?.[periodKey]?.tp;
+  if (nested && typeof nested === "object") {
+    return nested;
+  }
+  if (Array.isArray(payload.tpCandidates)) {
+    const rows = payload.tpCandidates.filter((item) => String(item?.period || periodKey) === periodKey);
+    if (rows.length > 0) {
+      return rows.reduce((acc, item) => {
+        const key = normalizeTpKey(item.tpPct ?? item.tp ?? item.takeProfit);
+        if (key) {
+          acc[key] = item;
+        }
+        return acc;
+      }, {});
+    }
+  }
+  return null;
+};
+
+const getTpCell = (periodMatrix = {}, tp) => {
+  for (const key of tpKeyCandidates(tp)) {
+    if (periodMatrix?.[key] && typeof periodMatrix[key] === "object") {
+      return periodMatrix[key];
+    }
+  }
+  return null;
+};
+
+const getBestcaseCell = (payload = {}, periodKey) => {
+  const direct = payload.bestcase?.[periodKey] || payload.bestCase?.[periodKey];
+  if (direct && typeof direct === "object") {
+    return direct;
+  }
+  const period = payload.periods?.[periodKey];
+  if (period?.bestcase && typeof period.bestcase === "object") {
+    return period.bestcase;
+  }
+  if (period?.bestCase && typeof period.bestCase === "object") {
+    return period.bestCase;
+  }
+  const matrix = getPeriodMatrix(payload, periodKey);
+  if (matrix && typeof matrix === "object") {
+    return Object.entries(matrix).reduce((best, [tpKey, cell]) => {
+      const netProfit = toNumber(readMetricValue(cell, ["net_profit", "netProfit", "netPnl"]));
+      if (netProfit == null) {
+        return best;
+      }
+      if (!best || netProfit > best.net_profit) {
+        return {
+          tp: toNumber(cell.tpPct ?? cell.tp ?? cell.takeProfit ?? normalizeTpKey(tpKey)),
+          winrate: toNumber(readMetricValue(cell, ["winrate", "winRate"])),
+          net_profit: netProfit,
+        };
+      }
+      return best;
+    }, null);
+  }
+  return null;
+};
+
 const stableJson = (value) => {
   if (Array.isArray(value)) {
     return `[${value.map(stableJson).join(",")}]`;
@@ -74,7 +167,7 @@ const computeStatsPayloadHash = (payload) =>
 const validateGridStatsPayload = (payload = {}) => {
   const errors = [];
   const symbol = normalizeGridStatsSymbol(payload.symbol);
-  const timeframe = normalizeGridStatsTimeframe(payload.timeframe);
+  const timeframe = normalizeGridStatsTimeframe(payload.timeframe ?? payload.candle_min ?? payload.candleMin);
   const calcMode = String(payload.calc_mode || payload.calcMode || "").trim();
 
   if (String(payload.type || "").trim() !== STATS_TYPE) {
@@ -91,37 +184,37 @@ const validateGridStatsPayload = (payload = {}) => {
   }
 
   for (const periodKey of REQUIRED_PERIODS) {
-    const periodMatrix = payload.matrix?.[periodKey];
+    const periodMatrix = getPeriodMatrix(payload, periodKey);
     if (!periodMatrix || typeof periodMatrix !== "object") {
       errors.push(`MATRIX_PERIOD_MISSING:${periodKey}`);
       continue;
     }
 
     for (const tp of TP_CANDIDATES) {
-      const cell = periodMatrix[tp];
+      const cell = getTpCell(periodMatrix, tp);
       if (!cell || typeof cell !== "object") {
         errors.push(`MATRIX_CELL_MISSING:${periodKey}:${tp}`);
         continue;
       }
-      if (toNumber(cell.winrate) == null) {
+      if (toNumber(readMetricValue(cell, ["winrate", "winRate"])) == null) {
         errors.push(`MATRIX_WINRATE_INVALID:${periodKey}:${tp}`);
       }
-      if (toNumber(cell.net_profit) == null) {
+      if (toNumber(readMetricValue(cell, ["net_profit", "netProfit", "netPnl"])) == null) {
         errors.push(`MATRIX_NET_PROFIT_INVALID:${periodKey}:${tp}`);
       }
     }
 
-    const best = payload.bestcase?.[periodKey];
+    const best = getBestcaseCell(payload, periodKey);
     if (!best || typeof best !== "object") {
       errors.push(`BESTCASE_MISSING:${periodKey}`);
     } else {
-      if (toNumber(best.tp) == null) {
+      if (toNumber(best.tp ?? best.tpPct ?? best.takeProfit) == null) {
         errors.push(`BESTCASE_TP_INVALID:${periodKey}`);
       }
-      if (toNumber(best.winrate) == null) {
+      if (toNumber(readMetricValue(best, ["winrate", "winRate"])) == null) {
         errors.push(`BESTCASE_WINRATE_INVALID:${periodKey}`);
       }
-      if (toNumber(best.net_profit) == null) {
+      if (toNumber(readMetricValue(best, ["net_profit", "netProfit", "netPnl"])) == null) {
         errors.push(`BESTCASE_NET_PROFIT_INVALID:${periodKey}`);
       }
     }
@@ -158,7 +251,7 @@ const expandGridStatsMetrics = (payload = {}) => {
   const rows = [];
   for (const periodKey of REQUIRED_PERIODS) {
     for (const tp of TP_CANDIDATES) {
-      const cell = payload.matrix[periodKey][tp];
+      const cell = getTpCell(getPeriodMatrix(payload, periodKey), tp);
       rows.push({
         category: base.category,
         strategyCode: base.strategyCode,
@@ -167,8 +260,8 @@ const expandGridStatsMetrics = (payload = {}) => {
         timeframe: base.timeframe,
         periodKey,
         tp: Number(tp),
-        winRate: toNumber(cell.winrate),
-        netProfit: toNumber(cell.net_profit),
+        winRate: toNumber(readMetricValue(cell, ["winrate", "winRate"])),
+        netProfit: toNumber(readMetricValue(cell, ["net_profit", "netProfit", "netPnl"])),
         source: base.source,
       });
     }
@@ -183,7 +276,7 @@ const extractGridStatsBestcases = (payload = {}) => {
   }
   const base = validation.normalized;
   return REQUIRED_PERIODS.map((periodKey) => {
-    const best = payload.bestcase[periodKey];
+    const best = getBestcaseCell(payload, periodKey);
     return {
       category: base.category,
       strategyCode: base.strategyCode,
@@ -191,9 +284,9 @@ const extractGridStatsBestcases = (payload = {}) => {
       symbol: base.symbol,
       timeframe: base.timeframe,
       periodKey,
-      bestTp: toNumber(best.tp),
-      bestWinRate: toNumber(best.winrate),
-      bestNetProfit: toNumber(best.net_profit),
+      bestTp: toNumber(best.tp ?? best.tpPct ?? best.takeProfit),
+      bestWinRate: toNumber(readMetricValue(best, ["winrate", "winRate"])),
+      bestNetProfit: toNumber(readMetricValue(best, ["net_profit", "netProfit", "netPnl"])),
       source: base.source,
     };
   });
@@ -229,6 +322,7 @@ module.exports = {
   LANDING_PERIOD_MAP,
   normalizeGridStatsSymbol,
   normalizeGridStatsTimeframe,
+  normalizeTpKey,
   validateGridStatsPayload,
   computeStatsPayloadHash,
   expandGridStatsMetrics,

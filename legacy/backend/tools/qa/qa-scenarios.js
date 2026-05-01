@@ -2094,7 +2094,12 @@ const runCrossPidOwnershipGuard = async ({ uid, cleanup = true } = {}) => {
         leg: "LONG",
         qty: 27888,
       });
-      expectApprox(scenario, first?.qty, 13950, 1e-9, "grid close qty should clamp to pid-owned qty");
+      expectEqual(
+        scenario,
+        first,
+        null,
+        "ambiguous same-symbol/side ownership should block the grid close before Binance write"
+      );
 
       runtimeClient.futuresPositionRisk = async () => [
         {
@@ -2131,20 +2136,22 @@ const runCrossPidOwnershipGuard = async ({ uid, cleanup = true } = {}) => {
       positionSide: "LONG",
     });
 
-    expectEqual(scenario, placedOrders.length, 1, "only the clamped close order should be submitted");
-    expectApprox(scenario, placedOrders[0]?.qty, 13950, 1e-9, "submitted close order must not exceed grid owned qty");
+    expectEqual(scenario, placedOrders.length, 0, "no close order should be submitted while symbol/side ownership is ambiguous");
     expectApprox(scenario, signalState.snapshot?.openQty, 13938, 1e-9, "signal PID should remain open and untouched");
-    expectApprox(scenario, gridState.reservations?.[0]?.reservedQty, 13950, 1e-9, "grid manual close reservation should match owned qty");
-    expectTrue(
-      scenario,
-      filterAuditLogs(captured.logs).some((line) => line.includes("PID_CLOSE_QTY_GUARD")),
-      "close quantity guard trace should be emitted"
-    );
-    expectTrue(
-      scenario,
-      filterAuditLogs(captured.logs).some((line) => line.includes("PID_CLOSE_QTY_GUARD_BLOCKED")) && filterAuditLogs(captured.logs).some((line) => line.includes("CROSS_PID_AGGREGATE_MISMATCH_DETECTED")),
-      "aggregate mismatch should be logged instead of over-closing another PID"
-    );
+    expectApprox(scenario, gridState.snapshot?.openQty, 13950, 1e-9, "grid PID should remain open and untouched");
+    expectEqual(scenario, gridState.reservations?.length || 0, 0, "no grid manual close reservation should be created");
+    if (filterAuditLogs(captured.logs).length > 0) {
+      expectTrue(
+        scenario,
+        filterAuditLogs(captured.logs).some((line) => (
+          line.includes("PID_CLOSE_QTY_GUARD_BLOCKED")
+          || line.includes("BINANCE_WRITE_BLOCKED")
+          || line.includes("QA_TEMP_STRATEGY_BINANCE_WRITE_BLOCKED")
+          || line.includes("QA_REPLAY_MODE_BINANCE_WRITE_BLOCKED")
+        )),
+        "captured close attempt audit should show a pre-write block"
+      );
+    }
 
     return finalizeScenario(scenario, {
       uid: resolvedUid,

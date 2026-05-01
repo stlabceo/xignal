@@ -21,6 +21,9 @@ const toNumber = (value, fallback = 0) => {
   return Number.isFinite(numeric) ? numeric : fallback;
 };
 
+const qtyTolerance = (qty = 0) =>
+  Math.max(0.001, Math.abs(Number(qty || 0)) * 0.001);
+
 const normalizeBinancePositionRows = (rows = []) =>
   (rows || [])
     .filter((row) => {
@@ -386,7 +389,7 @@ const buildActiveProtectionRiskRows = ({
         risk = risk === "OK"
           ? "ORPHAN_CLOSE_ORDER_FOR_FLAT_SIDE"
           : `${risk}|ORPHAN_CLOSE_ORDER_FOR_FLAT_SIDE`;
-      } else if (orderQty > exchangeQty + Math.max(0.001, exchangeQty * 0.05)) {
+      } else if (orderQty > exchangeQty + qtyTolerance(exchangeQty)) {
         risk = risk === "OK"
           ? "OVERSIZED_PROTECTION_VS_POSITION"
           : `${risk}|OVERSIZED_PROTECTION_VS_POSITION`;
@@ -395,7 +398,7 @@ const buildActiveProtectionRiskRows = ({
         risk = risk === "OK"
           ? "ACTIVE_PROTECTION_WITHOUT_PID_OPEN_QTY"
           : `${risk}|ACTIVE_PROTECTION_WITHOUT_PID_OPEN_QTY`;
-      } else if (reservation && orderQty > pidOwnedOpenQty + Math.max(0.001, pidOwnedOpenQty * 0.05)) {
+      } else if (reservation && orderQty > pidOwnedOpenQty + qtyTolerance(pidOwnedOpenQty)) {
         risk = risk === "OK"
           ? "OVERSIZED_PROTECTION_VS_PID_OPEN_QTY"
           : `${risk}|OVERSIZED_PROTECTION_VS_PID_OPEN_QTY`;
@@ -454,18 +457,30 @@ const buildUnprotectedOpenPositionRows = ({
   }
 
   const activeProtectionMap = new Map();
+  const activeProtectionByPidMap = new Map();
   for (const order of []
     .concat(openOrders || [])
     .concat(openAlgoOrders || [])
     .filter(isReduceOnlyProtectionOrder)) {
+    const clientOrderId = getOrderClientOrderId(order);
+    const inferredPid = inferPidFromClientOrderId(clientOrderId);
     const key = [
       normalizeSymbol(order.symbol),
       normalizePositionSide(order.positionSide || order.positionSideType || ""),
     ].join(":");
     activeProtectionMap.set(key, (activeProtectionMap.get(key) || 0) + 1);
+    if (inferredPid > 0) {
+      const pidKey = [
+        inferredPid,
+        normalizeSymbol(order.symbol),
+        normalizePositionSide(order.positionSide || order.positionSideType || ""),
+      ].join(":");
+      activeProtectionByPidMap.set(pidKey, (activeProtectionByPidMap.get(pidKey) || 0) + 1);
+    }
   }
 
-  return (snapshots || [])
+  const snapshotKeys = new Set();
+  const rows = (snapshots || [])
     .filter((snapshot) => {
       const symbol = normalizeSymbol(snapshot.symbol);
       return compareSymbolSet.size === 0 || compareSymbolSet.has(symbol);
@@ -474,11 +489,22 @@ const buildUnprotectedOpenPositionRows = ({
       const symbol = normalizeSymbol(snapshot.symbol);
       const side = normalizePositionSide(snapshot.positionSide);
       const pid = Number(snapshot.pid || 0);
+      snapshotKeys.add(`${symbol}:${side}`);
       const exchangeQty = toNumber(exchangeMap.get(`${symbol}:${side}`)?.qty);
       const localReservationCount = reservationMap.get(`${pid}:${symbol}:${side}`) || 0;
       const binanceProtectionCount = activeProtectionMap.get(`${symbol}:${side}`) || 0;
+      const pidBinanceProtectionCount = activeProtectionByPidMap.get(`${pid}:${symbol}:${side}`) || 0;
+      const expectedProtectionCount = toNumber(snapshot.openQty) > 0 ? 2 : 0;
       let risk = "OK";
-      if (exchangeQty > 0 && localReservationCount === 0 && binanceProtectionCount === 0) {
+      if (
+        exchangeQty > 0
+        && expectedProtectionCount > 0
+        && (localReservationCount < expectedProtectionCount || pidBinanceProtectionCount < expectedProtectionCount)
+      ) {
+        risk = localReservationCount === 0 && pidBinanceProtectionCount === 0
+          ? "PID_OPEN_NO_EFFECTIVE_PROTECTION"
+          : "PID_OPEN_PROTECTION_COUNT_BELOW_EXPECTED";
+      } else if (exchangeQty > 0 && localReservationCount === 0 && binanceProtectionCount === 0) {
         risk = "EXCHANGE_OPEN_NO_PROTECTION";
       } else if (exchangeQty === 0 && toNumber(snapshot.openQty) > 0) {
         risk = "LOCAL_OPEN_EXCHANGE_FLAT";
@@ -494,11 +520,48 @@ const buildUnprotectedOpenPositionRows = ({
         binancePositionQty: exchangeQty,
         localActiveReservationCount: localReservationCount,
         binanceActiveProtectionCount: binanceProtectionCount,
+        pidBinanceActiveProtectionCount: pidBinanceProtectionCount,
+        expectedProtectionCount,
         risk,
         note: risk === "OK" ? "" : "USER_ACTION_REQUIRED",
       };
     })
     .filter((row) => row.risk !== "OK");
+
+  for (const [key, exchange] of exchangeMap.entries()) {
+    const [symbol, side] = key.split(":");
+    if (compareSymbolSet.size > 0 && !compareSymbolSet.has(symbol)) {
+      continue;
+    }
+    if (snapshotKeys.has(key)) {
+      continue;
+    }
+    const exchangeQty = toNumber(exchange?.qty);
+    if (!(exchangeQty > 0)) {
+      continue;
+    }
+    const binanceProtectionCount = activeProtectionMap.get(`${symbol}:${side}`) || 0;
+    const risk = binanceProtectionCount > 0
+      ? "BINANCE_OPEN_LOCAL_FLAT"
+      : "UNOWNED_EXCHANGE_OPEN_NO_EFFECTIVE_PROTECTION";
+    rows.push({
+      uid,
+      pid: "",
+      strategyCategory: "",
+      symbol,
+      side,
+      localOpenQty: 0,
+      binancePositionQty: exchangeQty,
+      localActiveReservationCount: 0,
+      binanceActiveProtectionCount: binanceProtectionCount,
+      pidBinanceActiveProtectionCount: 0,
+      expectedProtectionCount: 2,
+      risk,
+      note: "USER_ACTION_REQUIRED",
+    });
+  }
+
+  return rows;
 };
 
 const detectUnprotectedOpenPositions = async (uid, options = {}) => {

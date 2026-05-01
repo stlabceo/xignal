@@ -5334,6 +5334,48 @@ const resolvePidOwnedCloseQtyGuard = async ({
         };
     }
 
+    const [ownerRows] = await db.query(
+        `SELECT pid, strategyCategory, openQty
+           FROM live_pid_position_snapshot
+          WHERE uid = ?
+            AND symbol = ?
+            AND positionSide = ?
+            AND ABS(openQty) > 0.000000001`,
+        [uid, symbol, normalizedPositionSide]
+    );
+    const openOwners = (ownerRows || []).map((owner) => ({
+        pid: Number(owner?.pid || 0),
+        strategyCategory: String(owner?.strategyCategory || '').trim().toLowerCase(),
+        openQty: Number(owner?.openQty || 0),
+    }));
+    const targetOwnerOnly = openOwners.length === 1
+        && Number(openOwners[0]?.pid || 0) === Number(pid || 0)
+        && String(openOwners[0]?.strategyCategory || '') === normalizedCategory;
+    if(!targetOwnerOnly){
+        logOrderRuntimeTrace('PID_CLOSE_QTY_GUARD_BLOCKED', {
+            uid,
+            pid,
+            strategyCategory: normalizedCategory,
+            symbol,
+            positionSide: normalizedPositionSide,
+            clientOrderId,
+            reason: reason || 'ambiguous-symbol-side-owners',
+            pidOwnedQty,
+            requestedCloseQty,
+            exchangeAggregateQty: hasExchangeAggregateQty ? resolvedExchangeAggregateQty : null,
+            owners: openOwners,
+        });
+        return {
+            allowed: false,
+            reason: 'AMBIGUOUS_SYMBOL_SIDE_PID_OWNERS',
+            pidOwnedQty,
+            requestedCloseQty,
+            exchangeAggregateQty: hasExchangeAggregateQty ? resolvedExchangeAggregateQty : null,
+            finalCloseQty: 0,
+            owners: openOwners,
+        };
+    }
+
     if(hasExchangeAggregateQty && resolvedExchangeAggregateQty + 1e-9 < pidOwnedQty){
         logOrderRuntimeTrace('CROSS_PID_AGGREGATE_MISMATCH_DETECTED', {
             uid,

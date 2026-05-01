@@ -1719,6 +1719,7 @@ const restoreLiveGridLegAfterRecoveredEntryFill = async (row, leg, execution, is
   }
 
   const prefix = getLegFieldPrefix(leg);
+  await pidPositionLedger.syncGridLegSnapshot(row.id, leg);
   const snapshot = await pidPositionLedger.loadSnapshot({
     uid: row.uid,
     pid: row.id,
@@ -1727,7 +1728,6 @@ const restoreLiveGridLegAfterRecoveredEntryFill = async (row, leg, execution, is
   });
   const qty = toNumber(snapshot?.openQty);
   const entryPrice = toNumber(snapshot?.avgEntryPrice);
-  await pidPositionLedger.syncGridLegSnapshot(row.id, leg);
 
   if (!(qty > 0) || !(entryPrice > 0)) {
     return false;
@@ -3053,7 +3053,7 @@ const handleLiveOrderTradeUpdate = async (uid, data) => {
 
     const execType = reData.x;
     const endStatus = reData.X;
-    if (endStatus === "CANCELED" || endStatus === "EXPIRED" || endStatus === "REJECTED") {
+    if (endStatus === "CANCELED" || endStatus === "EXPIRED" || endStatus === "EXPIRED_IN_MATCH" || endStatus === "REJECTED") {
       if (parsed.type === "GTP" || parsed.type === "GSTOP" || parsed.type === "GMANUAL") {
         await pidPositionLedger.markReservationsCanceled([parsed.clientOrderId]);
       }

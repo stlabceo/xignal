@@ -1,0 +1,139 @@
+{
+  "finalClassification": "P0_LIVEQA_FAILURE_ROOT_CAUSE_FIXED_WAITING_FOR_USER_CLEANUP",
+  "currentBinanceRisk": "FLAT_AFTER_USER_WEB_CLEANUP",
+  "currentLocalStale": true,
+  "initialRisks": [
+    {
+      "category": "OPEN_EXPOSURE_WITHOUT_EFFECTIVE_PROTECTION",
+      "symbol": "XRPUSDT",
+      "side": "LONG",
+      "qty": "3.4",
+      "ownerCandidate": 991501,
+      "protection": "none"
+    },
+    {
+      "category": "OPEN_EXPOSURE_WITHOUT_EFFECTIVE_PROTECTION",
+      "symbol": "PUMPUSDT",
+      "side": "SHORT",
+      "qty": "14116",
+      "ownerCandidate": 991502,
+      "protection": "none"
+    },
+    {
+      "category": "PROTECTION_SIDE_OR_QTY_MISMATCH",
+      "symbol": "PUMPUSDT",
+      "side": "LONG",
+      "qty": "14116/14188",
+      "protection": "Close Long orders orphan/wrong-side for actual short exposure"
+    }
+  ],
+  "postUserCleanup": {
+    "observedAtKst": "2026-05-01 10:34:02",
+    "orders": [
+      {
+        "symbol": "PUMPUSDT",
+        "orderId": 4299263183,
+        "clientOrderId": "web_Bwkv9iyH6bBL4zKgn9y7",
+        "side": "BUY",
+        "positionSide": "SHORT",
+        "qty": "14116"
+      },
+      {
+        "symbol": "XRPUSDT",
+        "orderId": 147883985483,
+        "clientOrderId": "web_fJW6ZgN65aViY3gaGkCj",
+        "side": "SELL",
+        "positionSide": "LONG",
+        "qty": "3.4"
+      },
+      {
+        "symbol": "XRPUSDT",
+        "orderId": 147883985484,
+        "clientOrderId": "web_ec6JjjyTRmBZCdEB8VNW",
+        "side": "BUY",
+        "positionSide": "SHORT",
+        "qty": "18.3"
+      }
+    ],
+    "binanceOpenOrders": 0,
+    "binanceOpenAlgoOrders": 0,
+    "binancePositionAbsQty": 0
+  },
+  "currentLocalStaleDetails": [
+    {
+      "pid": 991501,
+      "symbol": "XRPUSDT",
+      "side": "LONG",
+      "localOpenQty": "18.2",
+      "binanceQty": "0",
+      "risk": "LOCAL_OPEN_BINANCE_FLAT"
+    },
+    {
+      "pid": 991749,
+      "symbol": "XRPUSDT",
+      "side": "SHORT",
+      "localOpenQty": "18.3",
+      "binanceQty": "0",
+      "risk": "LOCAL_OPEN_BINANCE_FLAT"
+    },
+    {
+      "pid": 991502,
+      "symbol": "PUMPUSDT",
+      "side": "LONG",
+      "reservation": "GSTOP_L_147_991502_48618296",
+      "risk": "LOCAL_ACTIVE_MISSING_ON_BINANCE"
+    }
+  ],
+  "rootCauseCategories": {
+    "OPEN_EXPOSURE_WITHOUT_EFFECTIVE_PROTECTION": "confirmed",
+    "RESIDUAL_OR_UNOWNED_EXPOSURE_AFTER_PARTIAL_OR_SHRINK": "confirmed",
+    "PROTECTION_SIDE_OR_QTY_MISMATCH": "confirmed",
+    "PROTECTION_RESIZE_OR_ORPHAN_CLEANUP_FAILURE": "confirmed",
+    "FILL_UNIT_IDENTITY_OR_DEDUPE_REGRESSION": "recurring-category-covered",
+    "BOOT_RESTART_OBSERVABILITY_OUTAGE": "confirmed",
+    "GRID_STATS_JSON_CONTRACT_MISMATCH": "fixed",
+    "ADMIN_MONITOR_FALSE_OK_OR_FALSE_NORMAL": "fixed",
+    "USER_TABLE_LIVE_DATA_MISMATCH": "detected-not-hidden"
+  },
+  "fixes": [
+    "coin.js: block grid market close when same uid/symbol/side has multiple local open PID owners",
+    "grid-engine.js: sync grid leg snapshot before recovered entry fill protection decision",
+    "admin-order-monitor.js: include Binance-position symbols and avoid TP+STOP qty false oversized",
+    "qa-live.js: detect unowned exchange open and tighten protection qty tolerance",
+    "seon.js: boot safety gate blocks runtime loop before coin.init on current risk",
+    "grid-stats-ingest.js/routes/stats.js: tolerant Pine contract, dry-run validate route, rejected raw persistence"
+  ],
+  "validation": {
+    "nodeCheck": "PASS",
+    "frontendBuild": "PASS",
+    "targetedReplay": "PASS",
+    "runAllDataReplay": "PASS",
+    "binanceDeltaDuringReplay": 0,
+    "runAllLiveReadonly": {
+      "status": "FAIL",
+      "expected": true,
+      "reason": "current local stale after user web cleanup"
+    }
+  },
+  "runtime": {
+    "backendPid": 7984,
+    "frontendPid": 19496,
+    "mode": "READ_ONLY_WRITE_DISABLED_ROUTE_ONLY",
+    "qaDisableBinanceWrites": "1",
+    "runtimeOwnerPort": "0",
+    "ngrok": "not restored while stale/risk remains"
+  },
+  "codexDidNotDo": {
+    "binanceOrderCreate": true,
+    "binanceOrderCancel": true,
+    "binancePositionClose": true,
+    "protectionCreate": true,
+    "matchedWebhook": true,
+    "tradingViewAlertEdit": true,
+    "strategyOnOffChange": true,
+    "rawSqlProductionPatch": true,
+    "schemaChange": true,
+    "storedProcedureChange": true,
+    "push": true
+  }
+}

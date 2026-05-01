@@ -12,11 +12,70 @@ const jsonOnly = (req, res, next) => {
   return next();
 };
 
+const normalizeRawValue = (value, fallback = "UNKNOWN") =>
+  String(value || fallback).trim() || fallback;
+
+const persistRawStatsAttempt = async ({ payload, validation, status }) => {
+  const normalized = validation?.normalized || {};
+  const payloadHash = gridStats.computeStatsPayloadHash(payload);
+  const now = new Date();
+  const [result] = await db.query(
+    `INSERT INTO strategy_stats_raw
+      (source, category, strategyCode, strategyDisplayName, symbol, timeframe, calcMode,
+       payloadHash, rawJson, receivedAt, validationStatus)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       rawJson = VALUES(rawJson),
+       receivedAt = VALUES(receivedAt),
+       validationStatus = VALUES(validationStatus),
+       id = LAST_INSERT_ID(id)`,
+    [
+      normalizeRawValue(normalized.source, "tradingview"),
+      normalizeRawValue(normalized.category, "grid"),
+      normalizeRawValue(normalized.strategyCode, "SQZGRID"),
+      normalizeRawValue(normalized.strategyDisplayName, "SQZ+GRID"),
+      normalizeRawValue(normalized.symbol),
+      normalizeRawValue(normalized.timeframe),
+      normalizeRawValue(normalized.calcMode),
+      payloadHash,
+      JSON.stringify(payload || {}),
+      now,
+      status,
+    ]
+  );
+  return {
+    rawId: Number(result.insertId || 0),
+    payloadHash,
+  };
+};
+
+router.post("/grid/validate", jsonOnly, async (req, res) => {
+  const payload = req.body || {};
+  const validation = gridStats.validateGridStatsPayload(payload);
+  return res.status(validation.ok ? 200 : 400).json({
+    ok: validation.ok,
+    errors: validation.errors,
+    normalized: validation.normalized,
+  });
+});
+
 router.post("/grid", jsonOnly, async (req, res) => {
   const payload = req.body || {};
   const validation = gridStats.validateGridStatsPayload(payload);
   if (!validation.ok) {
-    return res.status(400).json({ ok: false, errors: validation.errors });
+    const rejected = await persistRawStatsAttempt({
+      payload,
+      validation,
+      status: "REJECTED",
+    }).catch(() => null);
+    return res.status(400).json({
+      ok: false,
+      error: "GRID_STATS_VALIDATION_FAILED",
+      errors: validation.errors,
+      normalized: validation.normalized,
+      rejectedRawId: rejected?.rawId || null,
+      payloadHash: rejected?.payloadHash || gridStats.computeStatsPayloadHash(payload),
+    });
   }
 
   const payloadHash = gridStats.computeStatsPayloadHash(payload);
