@@ -1,0 +1,125 @@
+{
+  "finalClassification": "TWO_UID_ONBOARDING_READY_WITH_API_KEY_USER_INPUT_REQUIRED",
+  "baseline": {
+    "convergenceCommit": "b580694",
+    "binancePumpXrpFlat": true,
+    "localOpenQtyZero": true,
+    "activeReservationZero": true,
+    "runtimeMode": "READ_ONLY_WRITE_DISABLED",
+    "qaDisableBinanceWrites": "1",
+    "runAllLiveReadonly": "PASS",
+    "runAllLiveReadonlyRunId": "QA_READONLY_2026-05-01T04-18-17-948Z"
+  },
+  "newUid": {
+    "uid": 149,
+    "signup": {
+      "created": true,
+      "loginSuccess": true,
+      "correctedSignupValidationSmoke": {
+        "reg1": 200,
+        "reg2": 200,
+        "code": 200
+      }
+    },
+    "apiCredentials": {
+      "realKeyProvided": false,
+      "stored": false,
+      "signedGet": "WAITING_USER_INPUT",
+      "futuresAccountRead": "WAITING_USER_INPUT",
+      "readinessApiConnection": "MISSING",
+      "readinessApiPermission": "MISSING",
+      "issues": [
+        "API_KEY_MISSING",
+        "ACCOUNT_SNAPSHOT_MISSING"
+      ],
+      "fakeOkDisplayed": false
+    },
+    "createdPids": [
+      {
+        "pid": 992559,
+        "category": "signal",
+        "uid": 149,
+        "strategyDisplayName": "SQZ+GRID+BREAKOUT",
+        "strategyCode": "SQZGBRK",
+        "symbol": "PUMPUSDT",
+        "timeframe": "5",
+        "finalEnabled": "N",
+        "status": "READY"
+      },
+      {
+        "pid": 992311,
+        "category": "grid",
+        "uid": 149,
+        "strategy": "SQZ+GRID",
+        "symbol": "PUMPUSDT",
+        "timeframe": "1H",
+        "finalEnabled": "N",
+        "regimeStatus": "WAITING_WEBHOOK"
+      }
+    ],
+    "onOff": {
+      "signalOn": "PASS",
+      "signalOff": "PASS",
+      "gridOn": "PASS",
+      "gridOff": "PASS",
+      "finalEnabledN": true,
+      "auditPresent": true
+    }
+  },
+  "security": {
+    "memberApiRawAppKey": false,
+    "memberApiRawAppSecret": false,
+    "memberApiPassword": false,
+    "uid147ControlHasMaskedKey": true,
+    "secretFullValueReported": false
+  },
+  "adminUidObservability": {
+    "opsOverviewHasUid147": true,
+    "opsOverviewHasNewUid": true,
+    "orderMonitorUid147": 200,
+    "orderMonitorNewUid": 200,
+    "separatedByUid": true
+  },
+  "crossUidIsolation": {
+    "newUserSignalListContainsNewPid": true,
+    "newUserGridListContainsNewPid": true,
+    "newUserListContainsUid147Pid": false,
+    "uid147ListContainsNewPid": false,
+    "uid147StrategyCountsUnchanged": true,
+    "uid147AuditOnNewPid": 0,
+    "uid147MsgOnNewPid": 0,
+    "newPidLedgerRows": 0,
+    "newPidOpenSnapshots": 0,
+    "newPidActiveReservations": 0
+  },
+  "statsRegression": {
+    "rankingsGet": 200,
+    "latestGet": 200,
+    "tradingWebhookSeparated": true,
+    "tradingTableMutation": 0
+  },
+  "validation": {
+    "nodeCheck": "PASS",
+    "frontendBuild": "PASS",
+    "targetedTests": "PASS",
+    "runAllLiveReadonly": "PASS",
+    "runAllDataReplay": "NOT_EXECUTED_NOT_REQUIRED",
+    "localUnmatchedSmoke": "PASS"
+  },
+  "didNotDo": {
+    "binanceOrderCreate": true,
+    "binanceOrderCancel": true,
+    "binancePositionClose": true,
+    "protectionOrderCreate": true,
+    "matchedWebhook": true,
+    "tradingViewAlertEdit": true,
+    "uid147StrategyChange": true,
+    "rawSqlPatch": true,
+    "dbSchemaChange": true,
+    "storedProcedureChange": true,
+    "liveWriteModeSwitch": true,
+    "qaDisableBinanceWritesUnset": true,
+    "push": true,
+    "secretFullValueLogOrReport": true
+  }
+}

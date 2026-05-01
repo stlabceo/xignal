@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuthStore } from '../../store/authState';
 import { auth } from '../../services/auth';
 import AccountBalancePanel from '../../components/account/AccountBalancePanel';
@@ -26,10 +26,10 @@ const formatMetric = (value, digits = 4) => {
 
 const getReadinessTone = (status) => {
 	const normalized = String(status || '').toUpperCase();
-	if (normalized === 'READY' || normalized === 'OK' || normalized === 'CONNECTED' || normalized === 'READ_OK_ORDER_PERMISSION_UNVERIFIED' || normalized === 'HEDGE') {
+	if (['READY', 'OK', 'CONNECTED', 'READ_OK_ORDER_PERMISSION_UNVERIFIED', 'HEDGE'].includes(normalized)) {
 		return 'border-emerald-200 bg-emerald-50 text-emerald-700';
 	}
-	if (normalized === 'ACTION_REQUIRED' || normalized === 'CHECK_RUNTIME_HEALTH' || normalized === 'UNKNOWN' || normalized === 'ONE_WAY') {
+	if (['ACTION_REQUIRED', 'CHECK_RUNTIME_HEALTH', 'UNKNOWN', 'ONE_WAY'].includes(normalized)) {
 		return 'border-amber-200 bg-amber-50 text-amber-700';
 	}
 	return 'border-red-200 bg-red-50 text-red-700';
@@ -37,17 +37,17 @@ const getReadinessTone = (status) => {
 
 const formatReadinessBadgeLabel = (status) => {
 	const normalized = String(status || '').toUpperCase();
-	if (normalized === 'OK' || normalized === 'READY' || normalized === 'CONNECTED' || normalized === 'HEDGE') return '정상';
+	if (['OK', 'READY', 'CONNECTED', 'HEDGE'].includes(normalized)) return '정상';
 	if (normalized === 'READ_OK_ORDER_PERMISSION_UNVERIFIED') return '읽기 정상';
 	if (normalized === 'UNKNOWN') return '검증 불가';
 	if (normalized === 'ONE_WAY') return '자동 설정 필요';
-	if (normalized === 'ACTION_REQUIRED' || normalized === 'CHECK_RUNTIME_HEALTH') return '확인 필요';
+	if (['ACTION_REQUIRED', 'CHECK_RUNTIME_HEALTH', 'MISSING'].includes(normalized)) return '확인 필요';
 	return status || '-';
 };
 
 const ReadinessBadge = ({ value, label }) => (
 	<span className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${getReadinessTone(value)}`}>
-		{label || value || '-'}
+		{label || formatReadinessBadgeLabel(value)}
 	</span>
 );
 
@@ -58,7 +58,7 @@ const ReadinessItem = ({ label, value, status, action }) => (
 				<p className="text-sm font-semibold text-slate-900">{label}</p>
 				<p className="mt-1 text-sm text-slate-600">{value || '-'}</p>
 			</div>
-			<ReadinessBadge value={status} label={formatReadinessBadgeLabel(status)} />
+			<ReadinessBadge value={status} />
 		</div>
 		{action ? <p className="mt-2 text-xs text-amber-700">{action}</p> : null}
 	</div>
@@ -120,11 +120,6 @@ const Mypage = () => {
 		refreshAll();
 	}, []);
 
-	const maskedKeyInfo = useMemo(() => {
-		if (!memberInfo?.appKey) return '미등록';
-		return `${String(memberInfo.appKey).slice(0, 6)}******`;
-	}, [memberInfo]);
-
 	const handleSave = () => {
 		setIsSaving(true);
 		setSaveMessage('');
@@ -147,7 +142,7 @@ const Mypage = () => {
 		setValidateMessage('');
 
 		auth.validateMemberKeys({ appKey, appSecret }, (res) => {
-			setValidateMessage(res?.message || res?.msg || 'API 검증에 실패했습니다.');
+			setValidateMessage(res?.message || res?.msg || 'API 연결 검증에 실패했습니다.');
 			setIsValidating(false);
 			loadRuntimeInfo();
 		});
@@ -164,6 +159,8 @@ const Mypage = () => {
 	};
 
 	const futuresBalanceIssue = readiness?.issues?.find((issue) => issue.code === 'FUTURES_BALANCE_USDT_EMPTY');
+	const maskedKeyInfo = memberInfo?.appKeyMasked || (memberInfo?.hasAppKey ? '등록됨' : '미등록');
+	const secretStatus = memberInfo?.hasAppSecret ? '등록됨' : '미등록';
 
 	return (
 		<div className="inner-container">
@@ -189,7 +186,7 @@ const Mypage = () => {
 					</div>
 					<div className="divide-y divide-slate-200 text-sm">
 						<div className="flex flex-col gap-1 py-4 sm:flex-row sm:gap-4">
-							<p className="w-full font-medium text-slate-500 sm:w-[160px]">회원 아이디</p>
+							<p className="w-full font-medium text-slate-500 sm:w-[160px]">회원 ID</p>
 							<p className="w-full break-all text-black">{memberInfo?.mem_id || userInfo.loginId || '-'}</p>
 						</div>
 						<div className="flex flex-col gap-1 py-4 sm:flex-row sm:gap-4">
@@ -215,7 +212,8 @@ const Mypage = () => {
 
 					<div className="mt-4 rounded-md bg-slate-100 px-4 py-3 text-sm text-slate-600">
 						<p>현재 등록된 API Key: <span className="font-medium text-black">{maskedKeyInfo}</span></p>
-						<p className="mt-1">현재 등록된 Secret Key: <span className="font-medium text-black">{memberInfo?.appSecret ? '등록됨' : '미등록'}</span></p>
+						<p className="mt-1">현재 등록된 Secret Key: <span className="font-medium text-black">{secretStatus}</span></p>
+						<p className="mt-2 text-xs text-slate-500">Secret Key 원문은 저장 후 다시 표시하지 않습니다.</p>
 					</div>
 
 					<div className="mt-4 space-y-3">
@@ -247,26 +245,26 @@ const Mypage = () => {
 				<div className="flex flex-col gap-3 border-b border-slate-200 pb-4 sm:flex-row sm:items-center sm:justify-between">
 					<div>
 						<h4 className="text-[18px] font-semibold text-black">자동매매 준비 상태</h4>
-						<p className="mt-1 text-sm text-slate-500">지금 운용을 켜도 되는지 API, 권한, 선물 지갑 상태를 확인합니다.</p>
+						<p className="mt-1 text-sm text-slate-500">API, 권한, 투자 가능 잔고, 포지션 모드를 근거 기반으로 표시합니다.</p>
 					</div>
 					<ReadinessBadge value={readiness?.readinessStatus} label={readiness?.readinessStatus === 'READY' ? '운용 가능' : '조치 필요'} />
 				</div>
 
 				{futuresBalanceIssue ? (
 					<div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-						선물 지갑에 사용 가능한 USDT가 없습니다. Binance에서 현물 지갑 → 선물 지갑으로 USDT를 이동한 뒤 다시 운용을 켜주세요.
+						투자 가능 USDT가 없습니다. Binance 현물 지갑에서 선물 지갑으로 USDT를 이동해야 합니다.
 					</div>
 				) : null}
 
 				<div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-					<ReadinessItem label="API 연결" value={readiness?.apiConnectionLabel || (readiness?.apiConnection === 'OK' ? '연결 정상' : 'API Key 확인 필요')} status={readiness?.apiConnection} action={readiness?.apiConnection === 'OK' ? '' : 'API Key를 등록해주세요.'} />
-					<ReadinessItem label="API 권한" value={readiness?.apiPermissionLabel || '검증 불가'} status={readiness?.apiPermission} action={readiness?.apiPermission === 'ACTION_REQUIRED' ? 'Futures 권한 또는 IP 허용 목록을 확인해주세요.' : ''} />
+					<ReadinessItem label="API 연결" value={readiness?.apiConnectionLabel || '검증 불가'} status={readiness?.apiConnection} action={readiness?.apiConnection === 'OK' ? '' : 'API Key를 등록하거나 Binance 오류를 확인해 주세요.'} />
+					<ReadinessItem label="API 권한" value={readiness?.apiPermissionLabel || '검증 불가'} status={readiness?.apiPermission} action={readiness?.apiPermission === 'ACTION_REQUIRED' ? 'Futures 권한 또는 IP 허용 목록을 확인해 주세요.' : ''} />
 					<ReadinessItem label="투자 가능 잔고" value={readiness?.futuresBalanceUsdt == null ? '데이터 준비중' : `${formatMetric(readiness.futuresBalanceUsdt, 2)} USDT`} status={readiness?.futuresBalanceUsdt > 0 ? 'OK' : 'ACTION_REQUIRED'} action={readiness?.futuresBalanceUsdt > 0 ? '자동매매에 사용할 수 있는 선물 지갑 USDT입니다.' : '투자 가능 USDT가 없습니다. Binance 현물 지갑에서 선물 지갑으로 USDT를 이동해야 합니다.'} />
 					<div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
 						<div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
 							<div>
 								<p className="text-sm font-semibold text-slate-900">포지션 모드</p>
-								<p className="mt-1 text-sm text-slate-600">{readiness?.positionModeLabel || readiness?.hedgeMode?.label || '확인 불가'}</p>
+								<p className="mt-1 text-sm text-slate-600">{readiness?.positionModeLabel || readiness?.hedgeMode?.label || '검증 불가'}</p>
 							</div>
 							<ReadinessBadge value={readiness?.positionMode || readiness?.hedgeMode?.status} label={readiness?.positionMode === 'HEDGE' ? '정상' : readiness?.positionMode === 'ONE_WAY' ? '자동 설정 필요' : '검증 불가'} />
 						</div>
@@ -278,10 +276,21 @@ const Mypage = () => {
 						</div>
 						{hedgeModeMessage ? <p className="mt-2 text-xs text-amber-700">{hedgeModeMessage}</p> : null}
 					</div>
-					<ReadinessItem label="자산 모드" value="USDT 선물 지원" status="OK" />
+					<ReadinessItem label="자산 모드" value={readiness?.assetModeLabel || 'USDT 선물 지원'} status="OK" />
 					<ReadinessItem label="마지막 동기화" value={formatDateTime(readiness?.lastSyncedAt)} status={readiness?.lastSyncedAt ? 'OK' : 'ACTION_REQUIRED'} action={readiness?.lastSyncedAt ? '' : '새로고침 또는 API 연결 확인이 필요합니다.'} />
 					<ReadinessItem label="User Stream" value={runtimeHealth?.statusLabel || runtimeHealth?.status || '미확인'} status={runtimeHealth?.status || 'ACTION_REQUIRED'} action={runtimeHealth?.lastErrorMessage || ''} />
 				</div>
+
+				{readiness?.issues?.length ? (
+					<div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+						<p className="text-sm font-semibold text-amber-900">확인할 항목</p>
+						<ul className="mt-2 space-y-1 text-sm text-amber-800">
+							{readiness.issues.map((issue) => (
+								<li key={issue.code}>{issue.label} {issue.action ? `- ${issue.action}` : ''}</li>
+							))}
+						</ul>
+					</div>
+				) : null}
 			</div>
 
 			<div className="mt-6 grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">

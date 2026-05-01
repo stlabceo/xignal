@@ -75,6 +75,31 @@ const isEmpty3 = function (value) {
   }
 };
 
+const maskApiCredential = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+  if (raw.length <= 8) {
+    return raw;
+  }
+  return `${raw.slice(0, 4)}...${raw.slice(-4)}`;
+};
+
+const sanitizeMemberForClient = (member = {}) => {
+  if (!member) {
+    return member;
+  }
+
+  const { appKey, appSecret, password, ...safeMember } = member;
+  return {
+    ...safeMember,
+    hasAppKey: Boolean(appKey),
+    hasAppSecret: Boolean(appSecret),
+    appKeyMasked: maskApiCredential(appKey),
+  };
+};
+
 const normalizeSignalRuntimeTypePayload = (body = {}) => {
   const normalizedType = adminManagement.normalizeSignalStrategyCode(body.type);
   if (normalizedType) {
@@ -3806,7 +3831,7 @@ router.get("/member", async (req, res) => {
 
   let reData = await dbcon.DBOneCall(`CALL SP_A_MEMBER_GET(?)`, [userId]);
 
-  return res.send(reData);
+  return res.send(sanitizeMemberForClient(reData));
 });
 
 router.post("/member/keys", async (req, res) => {
@@ -5793,6 +5818,15 @@ router.get("/account/readiness", async (req, res) => {
     lastErrorCode: error?.code || null,
     lastErrorMessage: error?.message || null,
   }));
+  const member = await dbcon.DBOneCall(`CALL SP_A_MEMBER_GET(?)`, [userId]);
+  const hasCredentials = Boolean(member?.appKey && member?.appSecret);
+  if (hasCredentials) {
+    runtimeHealth.apiValidation = await coin.validateMemberApiKeys(member.appKey, member.appSecret).catch((error) => ({
+      ok: false,
+      code: error?.code || "VALIDATION_ERROR",
+      message: error?.message || "Binance API validation failed.",
+    }));
+  }
   const payload = await accountReadiness.getAccountReadiness(userId, { runtimeHealth });
   return res.send(payload);
 });
