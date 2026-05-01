@@ -27,17 +27,16 @@ const normalizeApiValidationIssue = (apiValidation = null) => {
     return null;
   }
 
-  const code = String(apiValidation.code || "").trim();
+  const code = String(apiValidation.code || apiValidation.errorCode || "").trim();
   const action = String(apiValidation.action || "").trim();
-  const message = String(apiValidation.message || "").trim();
+  const message = String(apiValidation.messageKo || apiValidation.message || "").trim();
   const combined = `${code} ${action} ${message}`.toUpperCase();
 
   if (combined.includes("-2015") || combined.includes("IP")) {
     return buildIssue({
       code: "API_IP_RESTRICTION_OR_KEY_INVALID",
-      label: "Binance API key 또는 IP 허용 목록 확인이 필요합니다.",
-      action:
-        "Binance API key가 활성 상태인지, 현재 서버 IP가 허용 목록에 포함되어 있는지 확인해 주세요.",
+      label: "Binance API Key 또는 IP 허용 목록 확인이 필요합니다.",
+      action: "API Key 활성 상태, Secret Key, 서버 IP 허용 목록을 확인해 주세요.",
     });
   }
 
@@ -50,10 +49,18 @@ const normalizeApiValidationIssue = (apiValidation = null) => {
     });
   }
 
+  if (combined.includes("TIMEOUT") || combined.includes("ECONNABORTED")) {
+    return buildIssue({
+      code: "BINANCE_API_TIMEOUT",
+      label: "Binance API 연결 검증 요청이 시간 초과되었습니다.",
+      action: "잠시 후 다시 시도해 주세요.",
+    });
+  }
+
   return buildIssue({
     code: code ? `BINANCE_API_${code}` : "BINANCE_API_VALIDATION_FAILED",
     label: "Binance API 연결 검증에 실패했습니다.",
-    action: message || "API key/secret 및 Binance 계정 권한을 확인해 주세요.",
+    action: message || "API Key, Secret Key, Binance 계정 권한을 확인해 주세요.",
   });
 };
 
@@ -142,7 +149,7 @@ const getAccountReadiness = async (uid, { runtimeHealth = null } = {}) => {
     issues.push(
       buildIssue({
         code: "RUNTIME_UID_EXCLUDED",
-        label: "현재 이 UID는 runtime 연결 대상에서 제외되어 있습니다.",
+        label: "현재 UID가 runtime 연결 대상에서 제외되어 있습니다.",
         action: "Live QA 대상으로 사용하려면 별도 preflight에서 runtime 제외 설정을 해제해야 합니다.",
       })
     );

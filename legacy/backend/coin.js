@@ -2192,6 +2192,7 @@ const privateFuturesSignedRequest = async (uid, path, params = {}, method = 'GET
         const response = await axios({
             method: normalizedMethod,
             url,
+            timeout: 10000,
             headers: {
                 'X-MBX-APIKEY': credentials.appKey,
             },
@@ -10678,7 +10679,89 @@ exports.msgAdd = async (
     })
 }
 
+const getApiValidationMessageKo = (info = {}, action = null) => {
+    const code = String(info.code || '').trim();
+    const rawMessage = String(info.msg || info.message || '').trim();
+    const combined = `${code} ${rawMessage} ${action || ''}`.toUpperCase();
+
+    if(code === 'API_KEY_MISSING' || code === 'EMPTY_KEYS' || code === '-90021'){
+        return 'API 키를 먼저 등록해 주세요.';
+    }
+    if(code === 'REQUEST_TIMEOUT' || combined.includes('TIMEOUT') || combined.includes('ECONNABORTED')){
+        return '요청 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.';
+    }
+    if(code === '-1021'){
+        return 'Binance 서버 시간과 로컬 시간이 맞지 않습니다. 잠시 후 다시 시도해 주세요.';
+    }
+    if(code === '-2015' || combined.includes('INVALID API-KEY') || combined.includes('IP')){
+        return 'Binance API 연결 검증에 실패했습니다. API 권한, IP 제한, Secret Key를 확인해 주세요.';
+    }
+    if(combined.includes('PERMISSION') || combined.includes('FUTURES')){
+        return '선물 계정 정보를 읽을 수 없습니다. Futures 권한을 확인해 주세요.';
+    }
+    return 'Binance API 연결 검증에 실패했습니다. API 권한, IP 제한, Secret Key를 확인해 주세요.';
+};
+
+const validateProvidedBinanceKeysReadOnly = async (appKey, appSecret) => {
+    if(!appKey || !appSecret){
+        return {
+            ok: false,
+            code: 'API_KEY_MISSING',
+            status: 'API_KEY_MISSING',
+            action: 'register_credentials',
+            messageKo: 'API 키를 먼저 등록해 주세요.',
+            message: 'API 키를 먼저 등록해 주세요.',
+            secretReturned: false,
+        };
+    }
+
+    try{
+        const revealedSecret = credentialSecrets.revealSecret(appSecret);
+        await syncFuturesServerTime(false).catch(() => {});
+        const signedQuery = buildSignedQuery(revealedSecret, {
+            recvWindow: 10000,
+            timestamp: getFuturesTimestamp(),
+        });
+        const response = await axios({
+            method: 'GET',
+            url: `${FUTURES_BASE_URL}/fapi/v3/account?${signedQuery}`,
+            timeout: 10000,
+            headers: {
+                'X-MBX-APIKEY': appKey,
+            },
+        });
+
+        return {
+            ok: true,
+            code: 'OK',
+            status: 'CONNECTED',
+            messageKo: 'Binance API 연결 검증에 성공했습니다.',
+            message: 'Binance API 연결 검증에 성공했습니다.',
+            futuresAccountRead: Boolean(response?.data),
+            secretReturned: false,
+        };
+    }catch(error){
+        const info = extractBinanceError(error);
+        const action = classifyBinanceError(info.code);
+        const isTimeout = error?.code === 'ECONNABORTED' || /timeout/i.test(String(error?.message || ''));
+        const code = isTimeout ? 'REQUEST_TIMEOUT' : info.code;
+        const messageKo = getApiValidationMessageKo({ ...info, code }, action);
+        return {
+            ok: false,
+            code,
+            status: code === 'REQUEST_TIMEOUT' ? 'TIMEOUT' : 'VALIDATION_FAILED',
+            action,
+            messageKo,
+            message: messageKo,
+            binanceCode: info.code || null,
+            binanceMessage: info.msg || null,
+            secretReturned: false,
+        };
+    }
+};
+
 exports.validateMemberApiKeys = async (appKey, appSecret) => {
+    return validateProvidedBinanceKeysReadOnly(appKey, appSecret);
     if(!appKey || !appSecret){
         return {
             ok: false,

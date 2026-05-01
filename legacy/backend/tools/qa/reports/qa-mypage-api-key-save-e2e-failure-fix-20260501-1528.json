@@ -1,0 +1,126 @@
+{
+  "finalClassification": "MYPAGE_API_KEY_SAVE_E2E_PASS_API_KEY_ROTATION_RECOMMENDED",
+  "previousPassInvalidatedBy": [
+    "browser save button stuck at saving",
+    "credential remained unregistered after save",
+    "validate message rendered mojibake"
+  ],
+  "rootCause": {
+    "saveRoute": "admin_member.appSecret is char(64); protected enc:v1 secret exceeded column length and DB update returned 500",
+    "validateRoute": "legacy validateMemberApiKeys used mojibake message path and lacked structured messageKo/timeout result",
+    "frontend": "Mypage loading state depended on callback/refresh completion without a robust finally path and contained mojibake strings"
+  },
+  "fix": {
+    "frontend": [
+      "Mypage save/validate uses async try/catch/finally",
+      "loading state resets on success, failure, and exception",
+      "messageKo preferred with mojibake-safe fallback",
+      "registered API key display remains masked",
+      "secret input is cleared after save and never displayed as registered raw value"
+    ],
+    "backend": [
+      "user-scoped binance key save returns structured UTF-8 JSON",
+      "save route does not perform Binance validation",
+      "validate route returns structured messageKo and read-only signed GET result",
+      "clear route added for user-scoped credential removal/restoration",
+      "secretReturned is false on all account credential responses"
+    ]
+  },
+  "security": {
+    "rawApiKeyInReport": false,
+    "rawSecretInReport": false,
+    "rawSecretInUserMemberApi": false,
+    "rawPasswordInUserMemberApi": false,
+    "rawSecretInAdminMemberApi": false,
+    "rawPasswordInAdminMemberApi": false,
+    "browserConsoleRawKey": false,
+    "browserConsoleRawSecret": false,
+    "recommendApiKeyRotation": true
+  },
+  "apiSmoke": {
+    "uid149Before": { "hasKey": 0, "hasSecret": 0 },
+    "readinessNoKey": {
+      "status": 200,
+      "apiConnection": "MISSING",
+      "issueCodes": ["API_KEY_MISSING", "ACCOUNT_SNAPSHOT_MISSING"],
+      "mojibake": false
+    },
+    "missingValidate": {
+      "status": 400,
+      "code": "API_KEY_MISSING",
+      "messageKo": "API 키를 먼저 등록해 주세요.",
+      "secretReturned": false,
+      "mojibake": false
+    },
+    "saveActualWithDummy": {
+      "status": 200,
+      "ok": true,
+      "statusCode": "SAVED_VALIDATION_REQUIRED",
+      "secretReturned": false,
+      "rawKeyEchoed": false,
+      "rawSecretEchoed": false,
+      "mojibake": false
+    },
+    "invalidValidateWithDummy": {
+      "status": 400,
+      "code": -2014,
+      "messageKo": "Binance API 연결 검증에 실패했습니다. API 권한, IP 제한, Secret Key를 확인해 주세요.",
+      "secretReturned": false,
+      "mojibake": false
+    },
+    "uid149AfterClear": { "hasKey": 0, "hasSecret": 0 }
+  },
+  "browserE2E": {
+    "testAccount": "existing DEV test UID 1",
+    "productionUserCreated": false,
+    "productionPidCreated": false,
+    "saveMessageVisible": true,
+    "saveButtonRestored": true,
+    "stuckButtonCount": 0,
+    "currentKeyMaskedOrRegistered": true,
+    "rawKeyVisible": false,
+    "rawSecretVisible": false,
+    "validateMessageVisible": true,
+    "validateButtonRestored": true,
+    "validatingStuckCount": 0,
+    "mojibake": false,
+    "credentialRestoredAfterTest": true
+  },
+  "validation": {
+    "nodeCheckBackendRoutesUsers": "PASS",
+    "nodeCheckBackendAccountReadiness": "PASS",
+    "nodeCheckBackendCoin": "PASS",
+    "nodeCheckFrontendAuthService": "PASS",
+    "frontendBuild": "PASS",
+    "staticMojibakeCheckModifiedUserFacingPaths": "PASS",
+    "runAllLiveReadonly": "PASS",
+    "runAllLiveReadonlyRunId": "QA_READONLY_2026-05-01T06-23-56-895Z",
+    "runAllLiveReadonlyReport": "legacy/backend/tools/qa/reports/qa-live-readonly-report-2026-05-01T06-23-58-335Z.json"
+  },
+  "runtime": {
+    "port": 3079,
+    "runtimeMode": "READ_ONLY_WRITE_DISABLED",
+    "qaDisableBinanceWrites": "1",
+    "binanceLiveWritesEnabled": "0",
+    "qaReplayMode": "0"
+  },
+  "didNotDo": [
+    "Binance order create",
+    "Binance order cancel",
+    "Binance position close",
+    "protection order create",
+    "matched webhook",
+    "TradingView alert edit",
+    "UID147 strategy ON/OFF",
+    "UID147 PID enabled change",
+    "new production user creation",
+    "new production PID creation",
+    "raw SQL production patch",
+    "DB schema change",
+    "stored procedure change",
+    "live-write-mode switch",
+    "QA_DISABLE_BINANCE_WRITES unset",
+    "push",
+    "raw API secret logging/reporting/screen exposure"
+  ]
+}

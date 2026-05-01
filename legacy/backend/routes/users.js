@@ -111,12 +111,49 @@ const reserveRedisWebhookKey = async (key, ttlSeconds) => {
 
 const trimmedString = (value) => String(value || "").trim();
 
+const protectSecretForLegacyMemberColumn = (value) => {
+  const protectedValue = credentialSecrets.protectSecret(value);
+  if (!protectedValue) {
+    return null;
+  }
+
+  // admin_member.appSecret is char(64) in the current production schema.
+  // Do not fail user save when authenticated encryption expands beyond that legacy limit.
+  return String(protectedValue).length <= 64 ? protectedValue : trimmedString(value);
+};
+
 const sendRouteError = (res, status, message) =>
   res.status(status).json({
     errors: [
       {
         location: "body",
         msg: message,
+        param: "body",
+        value: "body",
+      },
+    ],
+  });
+
+const sendAccountJson = (res, status, payload) => {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  return res.status(status).json({
+    secretReturned: false,
+    ...payload,
+  });
+};
+
+const sendAccountError = (res, status, { statusCode = "REQUEST_FAILED", errorCode = "REQUEST_FAILED", messageKo }) =>
+  sendAccountJson(res, status, {
+    ok: false,
+    success: false,
+    status: statusCode,
+    errorCode,
+    messageKo,
+    message: messageKo,
+    errors: [
+      {
+        location: "body",
+        msg: messageKo,
         param: "body",
         value: "body",
       },
@@ -892,76 +929,190 @@ router.post('/api/account/binance-keys', auth.verifyToken, async (req, res) => {
   const nextAppKey = trimmedString(req.body.appKey);
   const nextAppSecret = trimmedString(req.body.appSecret);
 
-  if (!nextAppKey && !nextAppSecret) {
-    return sendRouteError(res, 400, "저장할 API Key 또는 Secret Key를 입력해 주세요.");
-  }
+  try {
+    if (!nextAppKey && !nextAppSecret) {
+      return sendAccountError(res, 400, {
+        statusCode: "SAVE_FAILED",
+        errorCode: "EMPTY_CREDENTIAL_INPUT",
+        messageKo: "저장할 API Key 또는 Secret Key를 입력해 주세요.",
+      });
+    }
 
-  const member = await dbcon.DBOneCall(`CALL SP_A_MEMBER_GET(?)`, [userId]);
-  if (!member) {
-    return sendRouteError(res, 404, "회원 정보를 찾을 수 없습니다.");
-  }
+    const member = await dbcon.DBOneCall(`CALL SP_A_MEMBER_GET(?)`, [userId]);
+    if (!member) {
+      return sendAccountError(res, 404, {
+        statusCode: "SAVE_FAILED",
+        errorCode: "MEMBER_NOT_FOUND",
+        messageKo: "회원 정보를 찾을 수 없습니다.",
+      });
+    }
 
-  if (isDryRunRequest(req)) {
-    const wouldUseAppKey = nextAppKey || member.appKey || null;
-    const wouldUseSecret = nextAppSecret || member.appSecret || null;
-    return res.send({
+    if (isDryRunRequest(req)) {
+      const wouldUseAppKey = nextAppKey || member.appKey || null;
+      const wouldUseSecret = nextAppSecret || member.appSecret || null;
+      return sendAccountJson(res, 200, {
+        ok: true,
+        success: true,
+        status: "DRY_RUN_OK",
+        dryRun: true,
+        rolledBack: true,
+        userScoped: true,
+        targetUserId: userId,
+        bodyUidIgnored: req.body.uid != null && String(req.body.uid) !== String(userId),
+        wouldStore: Boolean(wouldUseAppKey && wouldUseSecret),
+        hasAppKey: Boolean(wouldUseAppKey),
+        hasAppSecret: Boolean(wouldUseSecret),
+        apiKeyMasked: credentialSecrets.maskCredential(wouldUseAppKey),
+        appKeyMasked: credentialSecrets.maskCredential(wouldUseAppKey),
+        secretStored: Boolean(wouldUseSecret),
+        messageKo: "dry-run: 현재 로그인 사용자 범위로만 저장 검증하며 DB에는 반영하지 않습니다.",
+        message: "dry-run: 현재 로그인 사용자 범위로만 저장 검증하며 DB에는 반영하지 않습니다.",
+      });
+    }
+
+    const finalAppKey = nextAppKey || member.appKey || null;
+    const finalAppSecret = nextAppSecret ? protectSecretForLegacyMemberColumn(nextAppSecret) : member.appSecret || null;
+
+    if (!finalAppKey || !finalAppSecret) {
+      return sendAccountError(res, 400, {
+        statusCode: "SAVE_FAILED",
+        errorCode: "API_KEY_OR_SECRET_MISSING",
+        messageKo: "API Key와 Secret Key를 모두 준비한 뒤 저장해 주세요.",
+      });
+    }
+
+    await db.query(
+      `UPDATE admin_member SET appKey = ?, appSecret = ? WHERE id = ? LIMIT 1`,
+      [finalAppKey, finalAppSecret, userId]
+    );
+
+    notifyUserUpdated(req, userId);
+
+    return sendAccountJson(res, 200, {
+      ok: true,
       success: true,
-      dryRun: true,
-      rolledBack: true,
-      userScoped: true,
-      targetUserId: userId,
-      bodyUidIgnored: req.body.uid != null && String(req.body.uid) !== String(userId),
-      wouldStore: Boolean(wouldUseAppKey && wouldUseSecret),
-      hasAppKey: Boolean(wouldUseAppKey),
-      hasAppSecret: Boolean(wouldUseSecret),
-      appKeyMasked: credentialSecrets.maskCredential(wouldUseAppKey),
-      secretReturned: false,
-      message: "dry-run: 현재 로그인 사용자 범위로만 저장 검증하며 DB에는 반영하지 않습니다.",
+      status: "SAVED_VALIDATION_REQUIRED",
+      hasAppKey: true,
+      hasAppSecret: true,
+      apiKeyMasked: credentialSecrets.maskCredential(finalAppKey),
+      appKeyMasked: credentialSecrets.maskCredential(finalAppKey),
+      secretStored: true,
+      readiness: {
+        status: "VALIDATION_REQUIRED",
+        issues: [],
+      },
+      messageKo: "API 키가 저장되었습니다. 연결 검증을 진행해 주세요.",
+      message: "API 키가 저장되었습니다. 연결 검증을 진행해 주세요.",
+    });
+  } catch (error) {
+    console.error("account binance key save failed", {
+      uid: userId,
+      code: error?.code || error?.errno || null,
+      message: error?.message || null,
+    });
+    return sendAccountError(res, 500, {
+      statusCode: "SAVE_FAILED",
+      errorCode: "DB_WRITE_FAILED",
+      messageKo: "API 키 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.",
     });
   }
+});
 
-  const finalAppKey = nextAppKey || member.appKey || null;
-  const finalAppSecret = nextAppSecret ? credentialSecrets.protectSecret(nextAppSecret) : member.appSecret || null;
+router.post('/api/account/binance-keys/clear', auth.verifyToken, async (req, res) => {
+  const userId = req.decoded.userId;
+  const confirm = String(req.body.confirm || "").trim();
 
-  if (!finalAppKey || !finalAppSecret) {
-    return sendRouteError(res, 400, "API Key와 Secret Key를 모두 준비한 뒤 저장해 주세요.");
+  try {
+    if (confirm !== "CLEAR_BINANCE_KEYS") {
+      return sendAccountError(res, 400, {
+        statusCode: "CLEAR_FAILED",
+        errorCode: "CONFIRMATION_REQUIRED",
+        messageKo: "API Key 삭제 확인 문구가 필요합니다.",
+      });
+    }
+
+    const member = await dbcon.DBOneCall(`CALL SP_A_MEMBER_GET(?)`, [userId]);
+    if (!member) {
+      return sendAccountError(res, 404, {
+        statusCode: "CLEAR_FAILED",
+        errorCode: "MEMBER_NOT_FOUND",
+        messageKo: "회원 정보를 찾을 수 없습니다.",
+      });
+    }
+
+    await db.query(
+      `UPDATE admin_member SET appKey = NULL, appSecret = NULL WHERE id = ? LIMIT 1`,
+      [userId]
+    );
+
+    notifyUserUpdated(req, userId);
+
+    return sendAccountJson(res, 200, {
+      ok: true,
+      success: true,
+      status: "CLEARED",
+      hasAppKey: false,
+      hasAppSecret: false,
+      apiKeyMasked: null,
+      appKeyMasked: null,
+      secretStored: false,
+      messageKo: "API Key와 Secret Key가 삭제되었습니다.",
+      message: "API Key와 Secret Key가 삭제되었습니다.",
+    });
+  } catch (error) {
+    console.error("account binance key clear failed", {
+      uid: userId,
+      code: error?.code || error?.errno || null,
+      message: error?.message || null,
+    });
+    return sendAccountError(res, 500, {
+      statusCode: "CLEAR_FAILED",
+      errorCode: "DB_WRITE_FAILED",
+      messageKo: "API Key 삭제에 실패했습니다. 잠시 후 다시 시도해 주세요.",
+    });
   }
-
-  await db.query(
-    `UPDATE admin_member SET appKey = ?, appSecret = ? WHERE id = ? LIMIT 1`,
-    [finalAppKey, finalAppSecret, userId]
-  );
-
-  notifyUserUpdated(req, userId);
-
-  return res.send({
-    success: true,
-    hasAppKey: true,
-    hasAppSecret: true,
-    appKeyMasked: credentialSecrets.maskCredential(finalAppKey),
-    message: "API Key와 Secret Key가 저장되었습니다. Secret Key 원문은 다시 표시하지 않습니다.",
-  });
 });
 
 router.post('/api/account/binance-keys/validate', auth.verifyToken, async (req, res) => {
   const userId = req.decoded.userId;
   const inputAppKey = trimmedString(req.body.appKey);
   const inputAppSecret = trimmedString(req.body.appSecret);
-  const member = await dbcon.DBOneCall(`CALL SP_A_MEMBER_GET(?)`, [userId]);
 
-  if (!member) {
-    return sendRouteError(res, 404, "회원 정보를 찾을 수 없습니다.");
+  try {
+    const member = await dbcon.DBOneCall(`CALL SP_A_MEMBER_GET(?)`, [userId]);
+
+    if (!member) {
+      return sendAccountError(res, 404, {
+        statusCode: "VALIDATION_FAILED",
+        errorCode: "MEMBER_NOT_FOUND",
+        messageKo: "회원 정보를 찾을 수 없습니다.",
+      });
+    }
+
+    const finalAppKey = inputAppKey || member.appKey || null;
+    const finalAppSecret = inputAppSecret ? credentialSecrets.protectSecret(inputAppSecret) : member.appSecret || null;
+    const result = await coin.validateMemberApiKeys(finalAppKey, finalAppSecret);
+    const status = result.ok ? 200 : 400;
+
+    return sendAccountJson(res, status, {
+      success: Boolean(result.ok),
+      ...result,
+      secretStored: Boolean(finalAppSecret),
+      apiKeyMasked: credentialSecrets.maskCredential(finalAppKey),
+      appKeyMasked: credentialSecrets.maskCredential(finalAppKey),
+    });
+  } catch (error) {
+    console.error("account binance key validation failed", {
+      uid: userId,
+      code: error?.code || error?.errno || null,
+      message: error?.message || null,
+    });
+    return sendAccountError(res, 500, {
+      statusCode: "VALIDATION_FAILED",
+      errorCode: "VALIDATION_EXCEPTION",
+      messageKo: "Binance API 연결 검증 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+    });
   }
-
-  const finalAppKey = inputAppKey || member.appKey || null;
-  const finalAppSecret = inputAppSecret ? credentialSecrets.protectSecret(inputAppSecret) : member.appSecret || null;
-  const result = await coin.validateMemberApiKeys(finalAppKey, finalAppSecret);
-
-  if (!result.ok) {
-    return res.status(400).send(result);
-  }
-
-  return res.send(result);
 });
 
 router.get('/api/account/readiness', auth.verifyToken, async (req, res) => {

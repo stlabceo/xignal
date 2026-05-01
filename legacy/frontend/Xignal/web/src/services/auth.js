@@ -20,6 +20,26 @@ const performLogin = async ({ userId, password, adminSession = false }) => {
 	return res;
 };
 
+const asResponsePayload = (error, fallbackMessage) =>
+	error?.response?.data || {
+		ok: false,
+		success: false,
+		messageKo: fallbackMessage,
+		message: fallbackMessage
+	};
+
+const withOptionalCallback = (promise, callback) =>
+	promise
+		.then((res) => {
+			if (typeof callback === 'function') callback(res);
+			return res;
+		})
+		.catch((error) => {
+			const payload = error?.payload || error;
+			if (typeof callback === 'function') callback(payload);
+			return payload;
+		});
+
 export const auth = {
 	login(body, callback) {
 		performLogin({ ...body, adminSession: false })
@@ -74,6 +94,14 @@ export const auth = {
 			});
 	},
 	saveMemberKeys(body, callback) {
+		const request = api
+			.post('/user/api/account/binance-keys', body)
+			.catch((error) => {
+				throw {
+					payload: asResponsePayload(error, 'API 키 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.')
+				};
+			});
+		return withOptionalCallback(request, callback);
 		api
 			.post('/user/api/account/binance-keys', body)
 			.then((res) => {
@@ -84,6 +112,14 @@ export const auth = {
 			});
 	},
 	validateMemberKeys(body, callback) {
+		const request = api
+			.post('/user/api/account/binance-keys/validate', body)
+			.catch((error) => {
+				throw {
+					payload: asResponsePayload(error, 'Binance API 연결 검증에 실패했습니다. API 권한, IP 제한, Secret Key를 확인해 주세요.')
+				};
+			});
+		return withOptionalCallback(request, callback);
 		api
 			.post('/user/api/account/binance-keys/validate', body)
 			.then((res) => {
@@ -294,14 +330,14 @@ export const auth = {
 			});
 	},
 	ensureHedgeMode(body, callback) {
-		api
+		const request = api
 			.post('/user/api/account/ensure-hedge-mode', body)
-			.then((res) => {
-				callback(res);
-			})
-			.catch((res) => {
-				callback(res.response?.data || false);
+			.catch((error) => {
+				throw {
+					payload: asResponsePayload(error, '헤지 모드 자동 설정은 현재 실행할 수 없습니다.')
+				};
 			});
+		return withOptionalCallback(request, callback);
 	},
 	runtimeOpsOverview(params, callback) {
 		api
