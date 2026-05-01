@@ -147,6 +147,47 @@ const notifyUserUpdated = (req, userId) => {
   }
 };
 
+const isDryRunRequest = (req) => {
+  const value = req?.body?.dryRun ?? req?.query?.dryRun;
+  return ["1", "Y", "YES", "TRUE"].includes(String(value || "").trim().toUpperCase());
+};
+
+const runSignupCreateDryRun = async (body = {}) => {
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [rows] = await connection.query(`CALL SP_U_USER_ADD(?,?,?,?,?,?)`, [
+      body.memberid,
+      body.username,
+      body.mobile || "01000000000",
+      body.password,
+      body.email,
+      body.recom,
+    ]);
+    const firstRow = Array.isArray(rows?.[0]) ? rows[0][0] : rows?.[0];
+    const userID = firstRow?.userID || firstRow?.id || null;
+    await connection.rollback();
+    return {
+      ok: true,
+      dryRun: true,
+      rolledBack: true,
+      finalPath: "/user/reg",
+      wouldCreateUser: Boolean(userID),
+      userIdAllocated: Boolean(userID),
+    };
+  } catch (error) {
+    try {
+      await connection.rollback();
+    } catch (_) {
+      // Best-effort rollback; the original error is more useful to the caller.
+    }
+    error.dryRun = true;
+    throw error;
+  } finally {
+    connection.release();
+  }
+};
+
 const buildWebhookExecutionKey = (payload) => {
   const stablePayload = {
     db_type: String(payload?.db_type || '').trim(),
@@ -860,6 +901,25 @@ router.post('/api/account/binance-keys', auth.verifyToken, async (req, res) => {
     return sendRouteError(res, 404, "회원 정보를 찾을 수 없습니다.");
   }
 
+  if (isDryRunRequest(req)) {
+    const wouldUseAppKey = nextAppKey || member.appKey || null;
+    const wouldUseSecret = nextAppSecret || member.appSecret || null;
+    return res.send({
+      success: true,
+      dryRun: true,
+      rolledBack: true,
+      userScoped: true,
+      targetUserId: userId,
+      bodyUidIgnored: req.body.uid != null && String(req.body.uid) !== String(userId),
+      wouldStore: Boolean(wouldUseAppKey && wouldUseSecret),
+      hasAppKey: Boolean(wouldUseAppKey),
+      hasAppSecret: Boolean(wouldUseSecret),
+      appKeyMasked: credentialSecrets.maskCredential(wouldUseAppKey),
+      secretReturned: false,
+      message: "dry-run: 현재 로그인 사용자 범위로만 저장 검증하며 DB에는 반영하지 않습니다.",
+    });
+  }
+
   const finalAppKey = nextAppKey || member.appKey || null;
   const finalAppSecret = nextAppSecret ? credentialSecrets.protectSecret(nextAppSecret) : member.appSecret || null;
 
@@ -1459,6 +1519,14 @@ router.post('/api/backtest/hook', async function(req, res){
 router.post('/reg', async function(req, res){
   try{
     req.body.mobile = '01000000000'
+
+    if (isDryRunRequest(req)) {
+      const result = await runSignupCreateDryRun(req.body);
+      return res.status(200).json({
+        status: 200,
+        ...result,
+      });
+    }
 
     const {userID} = await dbcon.DBOneCall(`CALL SP_U_USER_ADD(?,?,?,?,?,?)`,[
       req.body.memberid,

@@ -127,6 +127,136 @@ const sendRouteError = (res, status, message) =>
     ],
   });
 
+const isDryRunRequest = (req) => {
+  const value = req?.body?.dryRun ?? req?.query?.dryRun;
+  return ["1", "Y", "YES", "TRUE"].includes(String(value || "").trim().toUpperCase());
+};
+
+const trimAuditText = (value, maxLength = 255) => {
+  const text = String(value || "").trim();
+  if (!text) {
+    return null;
+  }
+  return text.length > maxLength ? text.slice(0, maxLength) : text;
+};
+
+const writeControlAuditInTransaction = async (
+  connection,
+  {
+    actorUserId = null,
+    targetUserId = null,
+    strategyCategory = null,
+    strategyMode = null,
+    pid = null,
+    actionCode = null,
+    previousEnabled = "N",
+    nextEnabled = "N",
+    requestIp = null,
+    note = null,
+    metadata = null,
+  } = {}
+) => {
+  if (!strategyCategory || !strategyMode || !pid || !actionCode) {
+    throw new Error("INVALID_AUDIT_PAYLOAD");
+  }
+
+  const [result] = await connection.query(
+    `INSERT INTO strategy_control_audit
+      (
+        actorUserId,
+        targetUserId,
+        strategyCategory,
+        strategyMode,
+        pid,
+        actionCode,
+        previousEnabled,
+        nextEnabled,
+        requestIp,
+        note,
+        metadataJson
+      )
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      actorUserId ? Number(actorUserId) : null,
+      targetUserId ? Number(targetUserId) : null,
+      String(strategyCategory || "").trim().toLowerCase(),
+      String(strategyMode || "").trim().toLowerCase(),
+      Number(pid || 0),
+      String(actionCode || "").trim().toUpperCase(),
+      strategyControlState.normalizeEnabledValue(previousEnabled),
+      strategyControlState.normalizeEnabledValue(nextEnabled),
+      trimAuditText(requestIp, 100),
+      trimAuditText(note, 255),
+      metadata ? JSON.stringify(metadata) : null,
+    ]
+  );
+
+  return Number(result?.insertId || 0) || null;
+};
+
+const applyPlayControlStateInTransaction = async (
+  connection,
+  { userId, pid, enabled = "N", status = "READY", audit = {} } = {}
+) => {
+  const controlFields = strategyControlState.buildLegacyControlFields(enabled);
+  await connection.query(
+    `UPDATE live_play_list
+        SET enabled = ?, status = ?, st = NULL, autoST = NULL
+      WHERE id = ? AND uid = ?
+      LIMIT 1`,
+    [
+      controlFields.enabled,
+      String(status || "READY").trim().toUpperCase() || "READY",
+      pid,
+      userId,
+    ]
+  );
+  await writeControlAuditInTransaction(connection, {
+    actorUserId: userId,
+    targetUserId: userId,
+    strategyCategory: "signal",
+    strategyMode: "live",
+    pid,
+    previousEnabled: audit.previousEnabled || "N",
+    nextEnabled: controlFields.enabled,
+    requestIp: audit.requestIp || null,
+    actionCode: audit.actionCode,
+    note: audit.note,
+    metadata: audit.metadata || null,
+  });
+};
+
+const applyGridControlStateInTransaction = async (
+  connection,
+  { userId, pid, enabled = "N", regimeEndReason = null, audit = {} } = {}
+) => {
+  const controlFields = strategyControlState.buildLegacyControlFields(enabled);
+  await connection.query(
+    `UPDATE live_grid_strategy_list
+        SET st = NULL,
+            autoST = NULL,
+            enabled = ?,
+            regimeEndReason = ?,
+            updatedAt = NOW()
+      WHERE id = ? AND uid = ?
+      LIMIT 1`,
+    [controlFields.enabled, regimeEndReason || null, pid, userId]
+  );
+  await writeControlAuditInTransaction(connection, {
+    actorUserId: userId,
+    targetUserId: userId,
+    strategyCategory: "grid",
+    strategyMode: "live",
+    pid,
+    previousEnabled: audit.previousEnabled || "N",
+    nextEnabled: controlFields.enabled,
+    requestIp: audit.requestIp || null,
+    actionCode: audit.actionCode,
+    note: audit.note,
+    metadata: audit.metadata || null,
+  });
+};
+
 const ensureExplicitStrategyDeleteIntent = (res, body = {}) => {
   if (hasExplicitStrategyDeleteIntent(body)) {
     return true;
@@ -3470,6 +3600,9 @@ const sendSaveFailure = (res, message) =>
 
 const firstProcedureRow = (value) => {
   if (Array.isArray(value)) {
+    if (Array.isArray(value[0])) {
+      return value[0][0] || null;
+    }
     return value[0] || null;
   }
 
@@ -3512,6 +3645,40 @@ const savePlayExitOptions = async (prefix, playId, body) => {
   );
 
   return splitConfigResult !== false;
+};
+
+const savePlayExitOptionsInTransaction = async (connection, prefix, playId, body) => {
+  if (!playId) {
+    return false;
+  }
+
+  const options = normalizeExitOptionPayload(body);
+  await connection.query(`CALL SP_${prefix}_PLAY_EXIT_OPTION_EDIT(?,?,?,?)`, [
+    playId,
+    options.stopLossReverseEnabled,
+    options.stopLossTimeEnabled,
+    options.stopLossTimeValue,
+  ]);
+
+  const tableName = prefix === "LIVE" ? "live_play_list" : "test_play_list";
+  const splitOptions = options.splitTakeProfitOptions || splitTakeProfit.normalizeSplitTakeProfitPayload(body);
+  await connection.query(
+    `UPDATE ${tableName}
+        SET splitTakeProfitEnabled = ?,
+            splitTakeProfitCount = ?,
+            splitTakeProfitGap = ?,
+            splitTakeProfitConfigJson = ?
+      WHERE id = ?`,
+    [
+      splitOptions.enabled ? "Y" : "N",
+      splitOptions.splitTakeProfitCount || 0,
+      Number(splitOptions.gapPercent || splitTakeProfit.DEFAULT_SPLIT_TAKE_PROFIT_GAP),
+      splitOptions.configJson,
+      playId,
+    ]
+  );
+
+  return true;
 };
 
 const SIGNAL_TABLE_MAP = {
@@ -4328,14 +4495,96 @@ router.post('/live/add', validateItemAdd, async function(req, res){
   normalizeSignalRuntimeTypePayload(req.body);
   normalizeCurrentTradeFlowPayload(req.body);
   normalizeExitOptionPayload(req.body);
-  let stoch_id = await resolveMarketStochId(
-    req.body.symbol,
-    req.body.type,
-    req.body.bunbong,
-    req.body.second2,
-    req.body.second3,
-    req.body.second4
-  );
+  const dryRun = isDryRunRequest(req);
+  let stoch_id = dryRun
+    ? null
+    : await resolveMarketStochId(
+        req.body.symbol,
+        req.body.type,
+        req.body.bunbong,
+        req.body.second2,
+        req.body.second3,
+        req.body.second4
+      );
+
+  if (dryRun) {
+    const connection = await db.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [rows] = await connection.query(`CALL SP_LIVE_PLAY_ADD(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+        userId,
+        stoch_id || null,
+        req.body.a_name,
+        req.body.symbol,
+        req.body.bunbong,
+        req.body.second2,
+        req.body.second3,
+        req.body.second4,
+
+        req.body.marginType,
+        req.body.AI_ST,
+        req.body.profit,
+        req.body.stopLoss,
+
+        req.body.leverage,
+        req.body.margin,
+        req.body.signalType,
+        req.body.alarmSignalST,
+        req.body.alarmResultST,
+        req.body.orderSize,
+        req.body.type,
+        req.body.repeatConfig,
+      ]);
+      const createdId = Number(firstProcedureRow(rows)?.id || 0);
+      if (!createdId) {
+        throw new Error("SIGNAL_DRY_RUN_CREATE_ID_MISSING");
+      }
+      await savePlayExitOptionsInTransaction(connection, "LIVE", createdId, req.body);
+      await applyPlayControlStateInTransaction(connection, {
+        userId,
+        pid: createdId,
+        enabled: "N",
+        status: "READY",
+        audit: {
+          requestIp: getRequestIp(req),
+          actionCode: "CREATE",
+          previousEnabled: "N",
+          note: "algorithm-created-disabled-dry-run",
+          metadata: {
+            dryRun: true,
+            finalPath: "/user/api/trading/live/add",
+          },
+        },
+      });
+      const [createdRows] = await connection.query(
+        `SELECT id, uid, enabled, status, a_name, type, symbol, bunbong
+         FROM live_play_list
+         WHERE id = ? AND uid = ?
+         LIMIT 1`,
+        [createdId, userId]
+      );
+      await connection.rollback();
+      return res.send({
+        ok: true,
+        dryRun: true,
+        rolledBack: true,
+        finalPath: "/user/api/trading/live/add",
+        wouldCreatePid: Boolean(createdRows?.[0]?.id),
+        defaultEnabled: createdRows?.[0]?.enabled || null,
+        status: createdRows?.[0]?.status || null,
+        strategyCode: createdRows?.[0]?.type || null,
+      });
+    } catch (error) {
+      try {
+        await connection.rollback();
+      } catch (_) {
+        // Best-effort rollback; surface the original failure.
+      }
+      return sendRouteError(res, 500, `실체결 전략 dry-run 생성 검증 실패: ${error?.message || error}`);
+    } finally {
+      connection.release();
+    }
+  }
 
   const reData = await dbcon.DBCall(`CALL SP_LIVE_PLAY_ADD(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[
     userId,
@@ -7394,9 +7643,313 @@ router.get("/grid/test/detail", async (req, res) => {
   return res.send(await decorateOwnedGridItem(item, userId));
 });
 
+router.post("/deployable-flow/dry-run", async (req, res) => {
+  const userId = req.decoded.userId;
+  const requestIp = getRequestIp(req);
+  const marker = `dry${String(userId).slice(-3)}${Date.now().toString(36).slice(-6)}`;
+  const signalPayload = {
+    a_name: `${marker}_signal`,
+    symbol: "PUMPUSDT",
+    bunbong: "5",
+    second2: "1",
+    second3: "1",
+    second4: "1",
+    marginType: "cross",
+    AI_ST: "N",
+    profit: 0.5,
+    stopLoss: 1,
+    leverage: 5,
+    margin: 5,
+    signalType: "BUY",
+    alarmSignalST: "N",
+    alarmResultST: "N",
+    orderSize: null,
+    type: "SQZGBRK",
+    repeatConfig: null,
+    ...(req.body?.signal || {}),
+  };
+  normalizeSignalRuntimeTypePayload(signalPayload);
+  normalizeCurrentTradeFlowPayload(signalPayload);
+  normalizeExitOptionPayload(signalPayload);
+
+  const gridPayload = normalizeGridPayload({
+    a_name: `${marker}_grid`,
+    strategySignal: "SQZ+GRID",
+    symbol: "PUMPUSDT",
+    bunbong: "1H",
+    marginType: "cross",
+    margin: 5,
+    leverage: 5,
+    profit: 0.5,
+    tradeValue: 25,
+    ...(req.body?.grid || {}),
+  });
+
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [signalRows] = await connection.query(`CALL SP_LIVE_PLAY_ADD(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+      userId,
+      null,
+      signalPayload.a_name,
+      signalPayload.symbol,
+      signalPayload.bunbong,
+      signalPayload.second2,
+      signalPayload.second3,
+      signalPayload.second4,
+      signalPayload.marginType,
+      signalPayload.AI_ST,
+      signalPayload.profit,
+      signalPayload.stopLoss,
+      signalPayload.leverage,
+      signalPayload.margin,
+      signalPayload.signalType,
+      signalPayload.alarmSignalST,
+      signalPayload.alarmResultST,
+      signalPayload.orderSize,
+      signalPayload.type,
+      signalPayload.repeatConfig,
+    ]);
+    const signalPid = Number(firstProcedureRow(signalRows)?.id || 0);
+    if (!signalPid) {
+      throw new Error("SIGNAL_DRY_RUN_FLOW_CREATE_ID_MISSING");
+    }
+    await savePlayExitOptionsInTransaction(connection, "LIVE", signalPid, signalPayload);
+    await applyPlayControlStateInTransaction(connection, {
+      userId,
+      pid: signalPid,
+      enabled: "N",
+      status: "READY",
+      audit: {
+        requestIp,
+        actionCode: "CREATE",
+        previousEnabled: "N",
+        note: "algorithm-created-disabled-deployable-flow-dry-run",
+        metadata: { dryRun: true, flow: "deployable-onboarding" },
+      },
+    });
+    await applyPlayControlStateInTransaction(connection, {
+      userId,
+      pid: signalPid,
+      enabled: "Y",
+      status: "READY",
+      audit: {
+        requestIp,
+        actionCode: "USER_ON",
+        previousEnabled: "N",
+        note: "algorithm-on-deployable-flow-dry-run",
+        metadata: { dryRun: true, flow: "deployable-onboarding" },
+      },
+    });
+    await applyPlayControlStateInTransaction(connection, {
+      userId,
+      pid: signalPid,
+      enabled: "N",
+      status: "READY",
+      audit: {
+        requestIp,
+        actionCode: "USER_OFF",
+        previousEnabled: "Y",
+        note: "algorithm-off-deployable-flow-dry-run",
+        metadata: { dryRun: true, flow: "deployable-onboarding" },
+      },
+    });
+    const [signalFinalRows] = await connection.query(
+      `SELECT id, uid, enabled, status, a_name, type, symbol, bunbong
+       FROM live_play_list
+       WHERE id = ? AND uid = ?
+       LIMIT 1`,
+      [signalPid, userId]
+    );
+
+    const [gridResult] = await connection.query(
+      `INSERT INTO live_grid_strategy_list
+        (uid, a_name, strategySignal, symbol, bunbong, marginType, margin, leverage, profit, tradeValue, st, autoST, enabled)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        userId,
+        gridPayload.a_name,
+        gridPayload.strategySignal,
+        gridPayload.symbol,
+        gridPayload.bunbong,
+        gridPayload.marginType,
+        gridPayload.margin,
+        gridPayload.leverage,
+        gridPayload.profit,
+        gridPayload.tradeValue,
+        null,
+        null,
+        "N",
+      ]
+    );
+    const gridPid = Number(gridResult?.insertId || 0);
+    if (!gridPid) {
+      throw new Error("GRID_DRY_RUN_FLOW_CREATE_ID_MISSING");
+    }
+    await writeControlAuditInTransaction(connection, {
+      actorUserId: userId,
+      targetUserId: userId,
+      strategyCategory: "grid",
+      strategyMode: "live",
+      pid: gridPid,
+      actionCode: "CREATE",
+      previousEnabled: "N",
+      nextEnabled: "N",
+      requestIp,
+      note: "grid-created-disabled-deployable-flow-dry-run",
+      metadata: { dryRun: true, flow: "deployable-onboarding" },
+    });
+    await applyGridControlStateInTransaction(connection, {
+      userId,
+      pid: gridPid,
+      enabled: "Y",
+      audit: {
+        requestIp,
+        actionCode: "USER_ON",
+        previousEnabled: "N",
+        note: "grid-on-deployable-flow-dry-run",
+        metadata: { dryRun: true, flow: "deployable-onboarding" },
+      },
+    });
+    await applyGridControlStateInTransaction(connection, {
+      userId,
+      pid: gridPid,
+      enabled: "N",
+      regimeEndReason: "MANUAL_OFF",
+      audit: {
+        requestIp,
+        actionCode: "USER_OFF",
+        previousEnabled: "Y",
+        note: "grid-off-deployable-flow-dry-run",
+        metadata: { dryRun: true, flow: "deployable-onboarding" },
+      },
+    });
+    const [gridFinalRows] = await connection.query(
+      `SELECT id, uid, enabled, regimeStatus, a_name, strategySignal, symbol, bunbong
+       FROM live_grid_strategy_list
+       WHERE id = ? AND uid = ?
+       LIMIT 1`,
+      [gridPid, userId]
+    );
+
+    await connection.rollback();
+
+    return res.send({
+      ok: true,
+      dryRun: true,
+      rolledBack: true,
+      finalPath: "/user/api/trading/deployable-flow/dry-run",
+      signal: {
+        createPathValidated: true,
+        onOffPathValidated: true,
+        wouldCreatePid: true,
+        defaultEnabled: "N",
+        finalEnabledBeforeRollback: signalFinalRows?.[0]?.enabled || null,
+        rowRetainedAfterOff: Boolean(signalFinalRows?.[0]?.id),
+        strategyCode: signalFinalRows?.[0]?.type || null,
+      },
+      grid: {
+        createPathValidated: true,
+        onOffPathValidated: true,
+        wouldCreatePid: true,
+        defaultEnabled: "N",
+        finalEnabledBeforeRollback: gridFinalRows?.[0]?.enabled || null,
+        rowRetainedAfterOff: Boolean(gridFinalRows?.[0]?.id),
+        strategySignal: gridFinalRows?.[0]?.strategySignal || null,
+      },
+      uidScoped: true,
+      binanceMutation: false,
+    });
+  } catch (error) {
+    try {
+      await connection.rollback();
+    } catch (_) {
+      // Best-effort rollback; surface the original failure.
+    }
+    return sendRouteError(res, 500, `배포 가능 사용자 플로우 dry-run 검증 실패: ${error?.message || error}`);
+  } finally {
+    connection.release();
+  }
+});
+
 router.post("/grid/live/add", validateGridItemAdd, async (req, res) => {
   const userId = req.decoded.userId;
   const payload = normalizeGridPayload(req.body);
+  if (isDryRunRequest(req)) {
+    const connection = await db.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [result] = await connection.query(
+        `INSERT INTO live_grid_strategy_list
+          (uid, a_name, strategySignal, symbol, bunbong, marginType, margin, leverage, profit, tradeValue, st, autoST, enabled)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          userId,
+          payload.a_name,
+          payload.strategySignal,
+          payload.symbol,
+          payload.bunbong,
+          payload.marginType,
+          payload.margin,
+          payload.leverage,
+          payload.profit,
+          payload.tradeValue,
+          null,
+          null,
+          "N",
+        ]
+      );
+      const createdId = Number(result?.insertId || 0);
+      if (!createdId) {
+        throw new Error("GRID_DRY_RUN_CREATE_ID_MISSING");
+      }
+      await writeControlAuditInTransaction(connection, {
+        actorUserId: userId,
+        targetUserId: userId,
+        strategyCategory: "grid",
+        strategyMode: "live",
+        pid: createdId,
+        actionCode: "CREATE",
+        previousEnabled: "N",
+        nextEnabled: "N",
+        requestIp: getRequestIp(req),
+        note: "grid-created-disabled-dry-run",
+        metadata: {
+          dryRun: true,
+          finalPath: "/user/api/trading/grid/live/add",
+        },
+      });
+      const [createdRows] = await connection.query(
+        `SELECT id, uid, enabled, regimeStatus, a_name, strategySignal, symbol, bunbong
+         FROM live_grid_strategy_list
+         WHERE id = ? AND uid = ?
+         LIMIT 1`,
+        [createdId, userId]
+      );
+      await connection.rollback();
+      return res.send({
+        ok: true,
+        dryRun: true,
+        rolledBack: true,
+        finalPath: "/user/api/trading/grid/live/add",
+        wouldCreatePid: Boolean(createdRows?.[0]?.id),
+        defaultEnabled: createdRows?.[0]?.enabled || null,
+        regimeStatus: createdRows?.[0]?.regimeStatus || null,
+        strategySignal: createdRows?.[0]?.strategySignal || null,
+      });
+    } catch (error) {
+      try {
+        await connection.rollback();
+      } catch (_) {
+        // Best-effort rollback; surface the original failure.
+      }
+      return sendRouteError(res, 500, `그리드 전략 dry-run 생성 검증 실패: ${error?.message || error}`);
+    } finally {
+      connection.release();
+    }
+  }
+
   const [result] = await db.query(
     `INSERT INTO live_grid_strategy_list
       (uid, a_name, strategySignal, symbol, bunbong, marginType, margin, leverage, profit, tradeValue, st, autoST, enabled)

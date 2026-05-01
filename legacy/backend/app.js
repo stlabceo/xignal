@@ -41,6 +41,7 @@ const USER_TRADING_ROUTE_ALLOWLIST = new Set([
   'GET /exchange/symbol-rules',
   'GET /trading/catalog-options',
   'GET /msg/user-facing',
+  'POST /deployable-flow/dry-run',
   'POST /live/add',
   'POST /live/edit',
   'POST /live/auto',
