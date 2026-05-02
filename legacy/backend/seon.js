@@ -143,6 +143,13 @@ const isBootSafetyGateDisabled = () => (
     String(process.env.DISABLE_BOOT_SAFETY_GATE || '').trim() === '1'
 );
 
+const getBootSafetyExcludedUids = () => new Set(
+    String(process.env.RUNTIME_EXCLUDED_UIDS || '')
+        .split(',')
+        .map((value) => Number(String(value || '').trim()))
+        .filter((uid) => Number.isFinite(uid) && uid > 0)
+);
+
 const loadBootSafetyGateUids = async () => {
     const [rows] = await db.query(
         `SELECT DISTINCT uid
@@ -158,9 +165,10 @@ const loadBootSafetyGateUids = async () => {
                 ) AS runtime_uid_scope
           WHERE uid IS NOT NULL`
     );
+    const excludedUids = getBootSafetyExcludedUids();
     return (rows || [])
         .map((row) => Number(row.uid || 0))
-        .filter((uid) => uid > 0);
+        .filter((uid) => uid > 0 && !excludedUids.has(uid));
 };
 
 const runBootSafetyGate = async (ownerLabel = null) => {
