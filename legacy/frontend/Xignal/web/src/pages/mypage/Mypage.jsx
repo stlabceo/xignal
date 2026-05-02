@@ -255,9 +255,11 @@ const Mypage = () => {
 	const userStream = readiness?.userStream || null;
 	const userStreamStatus = userStream?.status || (runtimeHealth?.connected ? 'STREAM_CONNECTED' : 'UNKNOWN');
 	const userStreamLabel = userStream?.label || runtimeHealth?.statusLabel || '검증 불가';
-	const userStreamAction =
-		userStream?.nextAction ||
-		(userStream?.requiredNow ? runtimeHealth?.lastErrorMessage || 'runtime 상태를 확인해 주세요.' : '');
+	const userStreamAction = userStream
+		? userStream.nextAction || ''
+		: runtimeHealth?.connected
+			? ''
+			: runtimeHealth?.lastErrorMessage || '';
 	const messageClass = (tone) =>
 		tone === 'success'
 			? 'bg-emerald-50 text-emerald-700'
