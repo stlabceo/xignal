@@ -53,10 +53,14 @@ Live Read-only scripts:
 Live Execution preflight / skeleton scripts:
 
 - `live-execution-preflight.js`
-- `live-execution-trigger-webhook.js`
 - `live-execution-observe-run.js`
 - `live-execution-assert-result.js`
 - `live-execution-cleanup-check.js`
+
+Release boundary note:
+
+- `live-execution-trigger-webhook.js` is excluded from the release source boundary.
+- Do not restore or run webhook-trigger helpers as part of release hygiene.
 
 ## Config
 
@@ -134,4 +138,4 @@ Every script prints a final summary with:
 
 - `qa-runtime-loader.js` is used only to expose internal signal truth-sync helpers for synthetic replay without touching production source files.
 - `qa-binance.js` uses signed GET requests only.
-- `live-execution-trigger-webhook.js` is intentionally guard-locked and will refuse to run unless explicit live-order flags are enabled later.
+- Webhook-trigger helpers are intentionally excluded from release hygiene and must not be restored to satisfy QA harness references.

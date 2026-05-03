@@ -70,9 +70,6 @@ const ACCEPTANCE_META = {
   "live execution preflight for GRID": {
     expectedResult: "preflight fails closed unless target row, exchange state, and guard conditions are safe",
   },
-  "live execution trigger guard": {
-    expectedResult: "webhook/live execution path is blocked unless explicit live flags and env guard are set",
-  },
 };
 
 const ensureReportsDir = () => {
@@ -171,30 +168,6 @@ const runNodeChecks = (targets = []) => {
     }
   }
   return results;
-};
-
-const runGuardScript = ({ configPath = null } = {}) => {
-  const scriptPath = path.join(QA_DIR, "live-execution-trigger-webhook.js");
-  const args = [scriptPath];
-  if (configPath) {
-    args.push("--config", configPath);
-  }
-  const result = spawnSync(process.execPath, args, {
-    cwd: path.resolve(QA_DIR, "../../../.."),
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      QA_ALLOW_LIVE_EXECUTION: process.env.QA_ALLOW_LIVE_EXECUTION || "",
-    },
-  });
-
-  const combined = [result.stdout || "", result.stderr || ""].filter(Boolean).join("\n");
-  return {
-    exitCode: Number(result.status ?? 1),
-    blocked: combined.includes("LIVE_EXECUTION_TRIGGER_BLOCKED_BY_GUARD"),
-    notImplemented: combined.includes("LIVE_EXECUTION_NOT_IMPLEMENTED_IN_THIS_PHASE"),
-    output: combined.trim(),
-  };
 };
 
 const writeReportFiles = ({ reportType, runId, report }) => {

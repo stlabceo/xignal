@@ -5,14 +5,9 @@ After=network.target
 [Service]
 WorkingDirectory=/srv/xignal
 EnvironmentFile=-/etc/xignal/backend.env
-ExecStart=/usr/bin/node apps/backend/dist/main.js
+ExecStart=/usr/bin/node legacy/backend/bin/www
 Environment=PORT=3000
 Environment=NODE_ENV=production
-Environment=DB_HOST=127.0.0.1
-Environment=DB_PORT=3306
-Environment=DB_USER=root
-Environment=DB_PASSWORD=root
-Environment=DB_NAME=xignal
 Restart=always
 RestartSec=5
 KillSignal=SIGINT

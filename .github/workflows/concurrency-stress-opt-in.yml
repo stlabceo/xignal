@@ -1,11 +1,8 @@
 name: Concurrency Stress Opt-In
 
-# Activation checklist before enabling in a real repository:
-# 1. Confirm GitHub Actions and Docker-capable runners are available.
-# 2. Decide whether DB_* values stay local defaults or move to Variables/Secrets.
-# 3. Confirm docker compose path, container names, and seed SQL paths match this repository.
-# 4. Trigger once with low runs/parallelism and verify artifacts plus GITHUB_STEP_SUMMARY.
-# 5. Keep this workflow opt-in only, not part of the default PR/test path.
+# This workflow is retained as an archived reference only.
+# The deleted apps/* workspace was an early rebuild scaffold and is not part of
+# the current release boundary. Do not restore apps/* to make this workflow run.
 
 on:
   workflow_dispatch:
@@ -32,143 +29,16 @@ on:
         default: "2"
 
 jobs:
-  concurrency-stress:
+  archived-reference:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     permissions:
       contents: read
-    concurrency:
-      group: concurrency-stress-opt-in
-      cancel-in-progress: false
-    env:
-      # Replace these defaults with repository Variables or Secrets when the CI environment differs.
-      DB_HOST: 127.0.0.1
-      DB_PORT: 3306
-      DB_USER: root
-      DB_PASSWORD: root
-      DB_NAME: xignal
-      PORT: ${{ inputs.port }}
-      NODE_ENV: test
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Start MySQL and Redis
-        run: docker compose -f infra/docker/docker-compose.yml up -d
-
-      - name: Show container status
-        run: docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-
-      - name: Wait for MySQL
-        run: |
-          for i in {1..30}; do
-            if docker exec xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot -e "SELECT 1" xignal >/dev/null 2>&1'; then
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "MySQL did not become ready in time"
-          exit 1
-
-      - name: Apply schema and seed
-        run: |
-          docker exec -i xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal' < infra/sql/001_init_placeholder.sql
-          docker exec -i xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal' < infra/sql/002_projection_support.sql
-          docker exec -i xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal' < infra/sql/010_local_smoke_seed.sql
-
-      - name: Verify seed row exists
-        run: docker exec xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal -B -N -e "SELECT COUNT(*) FROM execution_units WHERE id = 9001;"'
-
-      - name: Start backend
-        run: |
-          nohup npm run --workspace apps/backend dev > backend.log 2>&1 &
-          for i in {1..30}; do
-            if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null; then
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "Backend did not become healthy"
-          cat backend.log || true
-          exit 1
-
-      - name: Show backend health
-        run: curl -fsS "http://127.0.0.1:${PORT}/health"
-
-      - name: Reset observability snapshot
-        run: curl -fsS -X POST "http://127.0.0.1:${PORT}/api/v1/internal/observability/transaction-retries/reset"
-
-      - name: Run same-dedupe stress
-        run: npm run --workspace apps/backend stress:concurrency:same -- --url "http://127.0.0.1:${PORT}" --runs "${{ inputs.same_runs }}" --parallelism "${{ inputs.same_parallelism }}"
-
-      - name: Capture same-dedupe evidence
-        run: |
-          curl -fsS "http://127.0.0.1:${PORT}/api/v1/internal/observability/transaction-retries" | tee observability-same.json
-          docker exec xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal -B -N -e "SELECT id, dedupe_key, error_instance_seq, occurrence_count, IFNULL(DATE_FORMAT(resolved_at, '\''%Y-%m-%d %H:%i:%s.%f'\''), '\''NULL'\'') FROM notification_errors WHERE execution_unit_id = 9001 ORDER BY id ASC;"' | tee notification-errors-same.txt
-          docker exec xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal -B -N -e "SELECT execution_unit_id, context, last_event_type, health_status, IFNULL(last_error_code, '\''NULL'\'') FROM execution_unit_runtime_states WHERE execution_unit_id = 9001;"' | tee runtime-same.txt
-
-      - name: Reset DB and observability before resolve-race
-        run: |
-          docker exec xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal -e "DELETE FROM execution_unit_summaries WHERE execution_unit_id = 9001; DELETE FROM execution_unit_runtime_states WHERE execution_unit_id = 9001; DELETE FROM notification_errors WHERE execution_unit_id = 9001; DELETE FROM execution_events WHERE execution_unit_id = 9001; UPDATE execution_units SET context='\''live'\'', status='\''active'\'', activation_status='\''active'\'', is_deleted=0 WHERE id = 9001;"'
-          docker exec -i xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal' < infra/sql/010_local_smoke_seed.sql
-          curl -fsS -X POST "http://127.0.0.1:${PORT}/api/v1/internal/observability/transaction-retries/reset"
-
-      - name: Run resolve-race stress
-        run: npm run --workspace apps/backend stress:concurrency:race -- --url "http://127.0.0.1:${PORT}" --runs "${{ inputs.race_runs }}" --parallelism "${{ inputs.race_parallelism }}"
-
-      - name: Capture resolve-race evidence
-        run: |
-          curl -fsS "http://127.0.0.1:${PORT}/api/v1/internal/observability/transaction-retries" | tee observability-race.json
-          docker exec xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal -B -N -e "SELECT id, dedupe_key, error_instance_seq, occurrence_count, IFNULL(DATE_FORMAT(resolved_at, '\''%Y-%m-%d %H:%i:%s.%f'\''), '\''NULL'\'') FROM notification_errors WHERE execution_unit_id = 9001 ORDER BY id ASC;"' | tee notification-errors-race.txt
-          docker exec xignal-mysql sh -lc 'MYSQL_PWD=root mysql -uroot xignal -B -N -e "SELECT execution_unit_id, context, last_event_type, health_status, IFNULL(last_error_code, '\''NULL'\'') FROM execution_unit_runtime_states WHERE execution_unit_id = 9001;"' | tee runtime-race.txt
-
-      - name: Write run summary
-        if: always()
+      - name: Explain archived status
         run: |
           {
-            echo "## Concurrency Stress Opt-In"
+            echo "## Archived workflow"
             echo ""
-            echo "- port: ${PORT}"
-            echo "- same runs: ${{ inputs.same_runs }}"
-            echo "- same parallelism: ${{ inputs.same_parallelism }}"
-            echo "- race runs: ${{ inputs.race_runs }}"
-            echo "- race parallelism: ${{ inputs.race_parallelism }}"
-            echo ""
-            echo "Artifacts:"
-            echo "- backend.log"
-            echo "- observability-same.json"
-            echo "- observability-race.json"
-            echo "- notification-errors-same.txt"
-            echo "- notification-errors-race.txt"
-            echo "- runtime-same.txt"
-            echo "- runtime-race.txt"
-            echo ""
-            echo "Post-enable checks:"
-            echo "- backend.log contains JSON line output"
-            echo "- observability artifacts are uploaded"
-            echo "- notification-errors artifacts show no duplicate unresolved instance"
-            echo "- runtime artifacts match final projection state"
+            echo "The apps/* rebuild scaffold has been excluded from the release boundary."
+            echo "This workflow intentionally performs no build, DB, or runtime action."
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: concurrency-stress-artifacts
-          path: |
-            backend.log
-            observability-same.json
-            observability-race.json
-            notification-errors-same.txt
-            notification-errors-race.txt
-            runtime-same.txt
-            runtime-race.txt
