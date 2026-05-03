@@ -487,7 +487,7 @@ const dedupeLiveTradeLogs = (rows) => {
 
 const extractTradePayloadMetrics = (payloadJson) => {
   if (!payloadJson) {
-    return { realizedPnl: 0, commission: 0 };
+    return { realizedPnl: 0, commission: 0, tradeId: null, commissionAsset: null };
   }
 
   try {
@@ -496,9 +496,11 @@ const extractTradePayloadMetrics = (payloadJson) => {
     return {
       realizedPnl: toNumber(order.rp, 0),
       commission: toNumber(order.n, 0),
+      tradeId: order.t == null ? null : String(order.t),
+      commissionAsset: order.N || null,
     };
   } catch (error) {
-    return { realizedPnl: 0, commission: 0 };
+    return { realizedPnl: 0, commission: 0, tradeId: null, commissionAsset: null };
   }
 };
 
@@ -506,6 +508,7 @@ const dedupeRuntimeTradeEvents = (rows) => {
   const uniqueMap = new Map();
 
   rows.forEach((row) => {
+    const payloadMetrics = extractTradePayloadMetrics(row.payload_json);
     const price = toNumber(row.last_price || row.avg_price, 0);
     const qty = toNumber(row.executed_qty, 0);
     if (qty <= 0 || price <= 0) {
@@ -518,6 +521,7 @@ const dedupeRuntimeTradeEvents = (rows) => {
       row.strategy_category,
       row.client_order_id,
       row.order_id,
+      payloadMetrics.tradeId,
       row.execution_type,
       row.order_status,
       row.executed_qty,
@@ -527,7 +531,6 @@ const dedupeRuntimeTradeEvents = (rows) => {
     ].join("|");
 
     if (!uniqueMap.has(key)) {
-      const payloadMetrics = extractTradePayloadMetrics(row.payload_json);
       const orderType = String(row.order_type || row.orig_type || "").toUpperCase();
       uniqueMap.set(key, {
         uid: Number(row.uid),
@@ -538,8 +541,12 @@ const dedupeRuntimeTradeEvents = (rows) => {
         orderType,
         tradeAmount: qty * price,
         commission: payloadMetrics.commission,
+        commissionAsset: payloadMetrics.commissionAsset,
         realizedPnl: payloadMetrics.realizedPnl,
         netPnl: payloadMetrics.realizedPnl - payloadMetrics.commission,
+        sourceTradeId: payloadMetrics.tradeId,
+        sourceOrderId: row.order_id == null ? null : String(row.order_id),
+        sourceClientOrderId: row.client_order_id || null,
         tradeTime: row.trade_time,
       });
     }
@@ -1444,6 +1451,13 @@ const getRevenueSummary = async (filters = {}) => {
     estimatedRevenue: 0,
     referralShareRate: finalShareRate,
     perUser: [],
+    tradeCount: 0,
+    source: "binance-runtime-event-log-trade-units",
+    dataAvailability: {
+      commission: "AVAILABLE_WHEN_BINANCE_EVENT_HAS_COMMISSION",
+      sourceTradeId: "PAYLOAD_TRADE_ID_OR_RUNTIME_EVENT_FALLBACK",
+    },
+    lastUpdatedAt: null,
   };
 
   const perUserMap = new Map();
@@ -1452,6 +1466,10 @@ const getRevenueSummary = async (filters = {}) => {
     const isMarket = String(event.orderType || "").includes("MARKET");
     summary.totalTradeAmount += toNumber(event.tradeAmount, 0);
     summary.totalCommission += toNumber(event.commission, 0);
+    summary.tradeCount += 1;
+    if (!summary.lastUpdatedAt || new Date(event.tradeTime || 0) > new Date(summary.lastUpdatedAt || 0)) {
+      summary.lastUpdatedAt = event.tradeTime || summary.lastUpdatedAt;
+    }
     if (isMarket) {
       summary.marketTradeAmount += toNumber(event.tradeAmount, 0);
     } else {
