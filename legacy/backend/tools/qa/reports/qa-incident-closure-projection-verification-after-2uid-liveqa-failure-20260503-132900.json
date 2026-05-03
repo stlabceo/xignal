@@ -1,0 +1,193 @@
+{
+  "finalClassification": "INCIDENT_CLOSURE_PASS_BUT_UID154_BINANCE_UNVERIFIED",
+  "scope": "Incident closure plus projection verification after 2UID Live QA failure. No new Binance private reads were made in this closure except previously completed UID147 evidence reuse; UID154 remains local-only.",
+  "incidentSummary": [
+    {
+      "category": "BINANCE_418_RATE_LIMIT_ACCIDENT",
+      "userSymptom": "Live QA audit stopped; Binance signed reads returned HTTP 418 and further lifecycle proof could not be closed.",
+      "affected": "UID147/UID154 audit harness, not a single PID",
+      "directCause": "Private read probes continued after 429 instead of stopping on rate-limit/cooldown.",
+      "codeHarnessCause": "Prior audit path repeated signed position/order/trade/readiness calls instead of one UID+symbol+window bulk read with circuit breaker.",
+      "fixApplied": "a102eb3 read guard: per-endpoint counters, UID/window cache, 429 backoff, 418 circuit breaker, Retry-After respect, UID154 private hard-stop.",
+      "verification": "binance-read-guard-static-test PASS; previous low-rate UID147 call count public=1 private=10 UID154 private=0.",
+      "remainingLimit": "Do not run repeated live-readonly or PID-level private reads while IP/account is cooling down."
+    },
+    {
+      "category": "EXCHANGE_READ_FAILURE_INTERPRETED_AS_FLAT",
+      "userSymptom": "Report temporarily showed Binance-open/local-flat style confusion under failed reads.",
+      "affected": "Truth sync/projection paths",
+      "directCause": "A failed exchange read could be consumed by projection/sync as if empty exchange state was authoritative.",
+      "codeHarnessCause": "Read failure and confirmed flat were not hard-separated in the truth-sync gate.",
+      "fixApplied": "a703c6c blocks truth sync/local mutation on Binance read failure and keeps current risk visible instead of coercing qty to 0.",
+      "verification": "Canonical review PASS; failed read no longer terminalizes ledger/snapshot/reservation.",
+      "remainingLimit": "When Binance read fails, report remains limited; it must not be promoted to exchange-flat proof."
+    },
+    {
+      "category": "UID147_PID991503_GRID_TP_STALE_RESERVATION",
+      "userSymptom": "Local GRID_TP PARTIAL reservation appeared unmatched after manual cleanup.",
+      "affected": "UID147 PID991503 reservation GTP_L_147_991503_09952706",
+      "directCause": "Reservation projection was stale after Binance order 4254544316 had already FILLED.",
+      "codeHarnessCause": "Reservation terminalization did not have a safe owner-scoped helper for exchange evidence already reflected in ledger.",
+      "fixApplied": "4f03512 markReservationFilledFromExchangeEvidence: PARTIAL -> FILLED, filledQty 13668 -> 14318; no extra ledger/PnL.",
+      "verification": "Binance order FILLED, tradeIds 220347363/220347364 already existed in ledger, active reservations now 0.",
+      "remainingLimit": "None for current local state."
+    },
+    {
+      "category": "UID154_PID992319_LOCAL_ONLY_STALE_TP",
+      "userSymptom": "jhkim could not be Binance-source rechecked from current IP; stale local TP needed review.",
+      "affected": "UID154 PID992319 reservation GTP_L_154_992319_23213146",
+      "directCause": "Local stale TP remained after local owner-close evidence showed position closed.",
+      "codeHarnessCause": "No safe local-only terminalization path for owner-close evidence when Binance private read is forbidden.",
+      "fixApplied": "4f03512 terminalizeStaleReservationsAfterOwnerClose: CANCEL_PENDING -> CANCELED based on GMANUAL_L_154_992319_59210170 and ledger exit tradeId 3099498040.",
+      "verification": "UID154 local open snapshots 0, active reservations 0, PID enabled 0; UID154 private API calls 0.",
+      "remainingLimit": "UID154 is LOCAL_ONLY_BINANCE_UNVERIFIED, not Binance-source PASS."
+    },
+    {
+      "category": "TRACK_RECORD_AND_PID_TABLE_PROJECTION",
+      "userSymptom": "0.00% 반복, 진행중 누락, 확인필요 과다, 승패/최근거래/가격 수신중 혼란.",
+      "affected": "UID147 and UID154 user Track Record/PID tables/admin projection",
+      "directCause": "Resolved historical issue labels leaked into completed rows; null denominator could be rendered too close to fake 0; labels/copy made current status ambiguous.",
+      "codeHarnessCause": "Track Record list reused processRow summaryStatus/issue labels even when needsReview=false.",
+      "fixApplied": "routes/admin.js now clears issue labels unless current actionable review; completed summaryStatusLabel becomes 성과 기록. Frontend shows null PnL/returnPct as 계산 불가 and uses public price estimate labels.",
+      "verification": "In-memory API smoke with Redis stub: UID147 completed=25 active=0 review=0; UID154 completed=15 active=0 review=0; first completed rows issueLabel=null, summaryStatusLabel=성과 기록. frontend build PASS.",
+      "remainingLimit": "Browser plugin backend was unavailable; API smoke and production build were used instead of visual browser click-through."
+    },
+    {
+      "category": "GRID_STATS_400_CONTRACT",
+      "userSymptom": "Grid stats TradingView payloads were rejected with 400; latest/rankings were stale.",
+      "affected": "strategy_stats_raw ids 8,9,10,11,12,13,15",
+      "directCause": "Parser rejected TradingView payload variants: .4/.5 TP keys and null no-data period.",
+      "codeHarnessCause": "Stats parser contract was too strict and old rejected rows were not backfilled into stats-only tables.",
+      "fixApplied": "a102eb3 tolerant parser plus new stats-only backfill tool converted rejected raw ids 8,9,10,11,12,13,15.",
+      "verification": "Each converted row metrics=60 bestcases=5; /user/api/stats/grid/latest status 200 rows=10; rankings status 200 rows=6; latest calculatedAt 2026-05-03T04:04:33Z.",
+      "remainingLimit": "strategy_stats_raw id 7 remains correctly invalid because matrix is empty."
+    }
+  ],
+  "lifecycleConclusion": {
+    "webhookMatching": {
+      "uid147": "UID/PID scoped target logs reconstructed; no cross-UID mismatch found in prior W1 evidence.",
+      "uid154": "Local webhook/target logs only; UID/PID scoped locally.",
+      "issue": false,
+      "limit": "UID154 Binance-source matching effect cannot be revalidated from current IP."
+    },
+    "entryOrder": {
+      "uid147": "Binance-source W1 order evidence reconciled after low-rate audit.",
+      "uid154": "Local runtime/ledger evidence only.",
+      "issue": false,
+      "limit": "UID154 local-only."
+    },
+    "entryFillTradeIdLedger": {
+      "uid147": "No missing UID147 ledger trades after PID991503 evidence closure.",
+      "uid154": "Local ledger has owner-scoped entry/exit rows; no Binance-source verification.",
+      "issue": false,
+      "limit": "Some truth-sync rows are sourceTradeId-null and must remain evidence-limited."
+    },
+    "protectionCreation": {
+      "uid147": "Current active protections/reservations 0 after manual cleanup and PID991503 terminalization.",
+      "uid154": "Local active reservations 0 after PID992319 terminalization.",
+      "issue": false,
+      "limit": "UID154 historical protection matrix is local-only."
+    },
+    "splitTpPartialClose": {
+      "uid147": "TradeId-backed rows preserved where Binance evidence existed; no current orphan remains.",
+      "uid154": "Local-only ledger/projection; no current local orphan remains.",
+      "issue": false,
+      "limit": "UID154 Binance-source partial close proof unavailable."
+    },
+    "gridRegimeLifecycle": {
+      "uid147": "Grid lifecycle evidence closed, including PID991503 stale TP reservation.",
+      "uid154": "Local grid lifecycle closed, including PID992319 stale TP terminalization.",
+      "issue": false,
+      "limit": "UID154 local-only."
+    },
+    "manualCleanupClose": {
+      "uid147": "Post-cleanup Binance/local clean from prior low-rate evidence.",
+      "uid154": "Post-cleanup local clean; user reports Binance manual cleanup, no private proof by policy.",
+      "issue": false,
+      "limit": "UID154 Binance-source cleanup proof unavailable."
+    },
+    "finalLocalConvergence": {
+      "uid147": "open snapshot 0, active reservation 0, all PIDs OFF.",
+      "uid154": "open snapshot 0, active reservation 0, all PIDs OFF.",
+      "issue": false,
+      "limit": "None for local state."
+    }
+  },
+  "projectionVerification": {
+    "estimatedPnlPriceLoading": "Frontend helper uses public price map; labels fixed to 가격 수신중/계산 불가. Current all-off state means no active PnL rows expected.",
+    "priceSourcePublic": "trading.livePrice -> /user/api/trading/price, frontend estimatedPnl helper only; no UID private price feed introduced.",
+    "winLossRecentTrade": "PID table labels fixed; API Track Record returns completed counts and meaningful first rows.",
+    "trackRecordCompletedPeriodFilter": "Backend applies sDate/eDate; frontend date change resets page and refetches.",
+    "completedPnlPercent": "Backend returns null when denominator missing; frontend now displays 계산 불가 instead of fake 0.00. Real rows return non-zero examples.",
+    "ongoingTab": "Active tab returns 0/0 because all PIDs OFF and open snapshots 0; this is expected after manual cleanup.",
+    "confirmNeededTab": "Review tab returns 0/0; resolved historical issue labels are no longer exposed as current issue labels.",
+    "adminFalseAbnormal": "Track Record list projection clears issueLabel unless needsReview=true.",
+    "gridStatsDisplay": "latest/rankings API smoke status 200 with May 3 rows after backfill."
+  },
+  "commitReview": [
+    {
+      "commit": "a703c6c",
+      "file": "coin.js/grid-engine/admin projection areas",
+      "coreChange": "failed exchange read no longer treated as flat truth",
+      "canonicalRisk": "low after follow-up",
+      "verdict": "CANONICAL_SAFE"
+    },
+    {
+      "commit": "a102eb3",
+      "file": "binance-read-guard.js, qa-binance.js, grid-stats-ingest.js",
+      "coreChange": "read guard/circuit breaker and tolerant grid stats parser",
+      "canonicalRisk": "low",
+      "verdict": "CANONICAL_SAFE"
+    },
+    {
+      "commit": "4f03512",
+      "file": "pid-position-ledger.js, coin.js",
+      "coreChange": "owner-scoped post-cleanup local convergence helpers and active mojibake error override",
+      "canonicalRisk": "low because no fake fills/PnL and owner-scoped only",
+      "verdict": "CANONICAL_SAFE"
+    }
+  ],
+  "rateLimitGuardSummary": {
+    "429Detection": { "incident": "not stopped fast enough", "current": "429 sets backoff and blocks more private reads" },
+    "retryAfter": { "incident": "not consistently respected", "current": "Retry-After parsed and respected" },
+    "on418": { "incident": "audit became blocked after repeated reads", "current": "global private read circuit breaker" },
+    "endpointCounters": { "incident": "insufficient per-endpoint reporting", "current": "per-run and per-endpoint call count" },
+    "perUidCache": { "incident": "PID-level duplication risk", "current": "UID bulk cache" },
+    "allOrdersUserTradesCache": { "incident": "symbol/window repeated query risk", "current": "UID+symbol+window cache policy" },
+    "concurrencyLimit": { "incident": "too much parallel private read risk", "current": "conservative private read concurrency" },
+    "priceSeparation": { "incident": "private read pressure risk", "current": "estimated PnL uses public market price path" },
+    "reportCallCount": { "incident": "not always explicit", "current": "required in reports" }
+  },
+  "validation": {
+    "nodeCheck": "PASS for routes/admin.js, backfill-grid-stats-rejected-raw.js, pid-position-ledger.js, coin.js, binance-read-guard.js, qa-binance.js, grid-stats-ingest.js",
+    "frontendBuild": "PASS",
+    "readGuardStaticTest": "PASS",
+    "gridStatsBackfill": "PASS ids 8,9,10,11,12,13,15",
+    "statsApiSmoke": "PASS latest rows=10 rankings rows=6 using in-memory app with Redis stub",
+    "trackRecordApiSmoke": "PASS UID147 completed=25 active=0 review=0; UID154 completed=15 active=0 review=0",
+    "browserSmoke": "NOT_AVAILABLE: Codex in-app browser backend discovery failed and 3079/5173 were not running; no runtime restart was performed by policy"
+  },
+  "gitHygiene": {
+    "selectedCommitOnly": "pending at report creation",
+    "qaConfigStaged": "NO",
+    "secretsStaged": "NO",
+    "logsTmpScreenshotsStaged": "NO",
+    "reportsIncludedIntentionally": "YES final report only",
+    "push": "NO"
+  },
+  "exactUserActionRequired": "No immediate cleanup action from current local/UID147 evidence. UID154 full Binance-source proof requires an IP/key context where jhkim private API is allowed.",
+  "didNotDo": [
+    "No Binance order create/cancel/close/protection order",
+    "No matched webhook",
+    "No TradingView alert edit",
+    "No strategy ON/OFF or PID enabled change",
+    "No live-write-mode switch",
+    "No run-all-data-replay",
+    "No cleanup script",
+    "No raw SQL production patch",
+    "No DB schema/stored procedure change",
+    "No UID154 Binance private API call",
+    "No push",
+    "No raw API key/secret/password/ngrok token output"
+  ]
+}

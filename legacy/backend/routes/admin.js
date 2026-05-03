@@ -2589,9 +2589,11 @@ const buildTrackRecordListItem = (processRow = {}) => {
     completed: Boolean(processRow.completed),
     needsReview,
     overallResultLabel: processRow.overallResultLabel || (processRow.completed ? "완료" : "진행중"),
-    summaryStatusLabel:
-      processRow.summaryStatusLabel ||
-      (needsReview ? "확인 필요" : processRow.completed ? "성과 기록" : "진행중"),
+    summaryStatusLabel: needsReview
+      ? processRow.summaryStatusLabel || "확인 필요"
+      : processRow.completed
+        ? "성과 기록"
+        : "진행중",
     summaryText: needsReview
       ? processRow.summaryText || processRow.issueReason || "-"
       : processRow.completed
@@ -2618,12 +2620,12 @@ const buildTrackRecordListItem = (processRow = {}) => {
               ? "LOSS"
               : "BREAKEVEN",
     source: "live-ledger",
-    issueCategoryLabel: processRow.issueCategoryLabel || null,
-    issueSourceLabel: processRow.issueSourceLabel || null,
-    issueLabel: processRow.issueLabel || null,
+    issueCategoryLabel: needsReview ? processRow.issueCategoryLabel || null : null,
+    issueSourceLabel: needsReview ? processRow.issueSourceLabel || null : null,
+    issueLabel: needsReview ? processRow.issueLabel || null : null,
     webhookOccurredAt: processRow.webhookOccurredAt || processRow.createdAt || null,
     completedAt: processRow.completedAt || null,
-    abnormalAt: processRow.abnormalAt || null,
+    abnormalAt: needsReview ? processRow.abnormalAt || null : null,
     currentStepLabel: processRow.currentStepLabel || null,
   };
 };

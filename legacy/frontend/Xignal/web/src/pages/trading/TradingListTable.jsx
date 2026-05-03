@@ -8,7 +8,7 @@ import { buildEstimatedUnrealizedPnl, getMarketPriceForSymbol } from './estimate
 const strategyLabelMap = {
 	'ATF+VIXFIX': 'ATF+VIXFIX',
 	'atf+vixfix': 'ATF+VIXFIX',
-	SQZGBRK: 'SQZGBRK'
+	SQZGBRK: 'SQZ+GRID+BREAKOUT'
 };
 
 const sideLabelMap = {
@@ -24,7 +24,6 @@ const toNumber = (value) => {
 const getStrategyLabel = (item) => strategyLabelMap[item?.type] || item?.a_name || item?.type || '-';
 const getSignalTypeLabel = (item) => sideLabelMap[String(item?.signalType || '').toUpperCase()] || '-';
 const isEnabled = isTradingEnabled;
-const getUserStatusLabel = (item = {}) => item.userStatusLabel || item.displayStatus || (getOpenQty(item) > 0 ? '포지션 보유중' : isEnabled(item) ? '운용중 / 신호대기' : 'OFF / 대기중');
 
 const formatDisplayPrice = (value) => {
 	const numeric = toNumber(value);
@@ -76,6 +75,9 @@ const getOpenQty = (item = {}) => {
 	return toNumber(item.r_qty);
 };
 
+const getUserStatusLabel = (item = {}) =>
+	item.userStatusLabel || item.displayStatus || (getOpenQty(item) > 0 ? '포지션 보유중' : isEnabled(item) ? 'ON / 신호대기' : 'OFF / 대기중');
+
 const getEstimatedPnl = (item = {}, currentPrice) =>
 	buildEstimatedUnrealizedPnl({
 		side: item.signalType,
@@ -87,13 +89,13 @@ const getEstimatedPnl = (item = {}, currentPrice) =>
 
 const formatEstimatedPnl = (estimate) => {
 	if (!estimate || estimate.status === 'FLAT') return '-';
-	if (estimate.status === 'PRICE_UNAVAILABLE') return '가격 수신 중';
-	if (estimate.status === 'ENTRY_PRICE_UNAVAILABLE' || estimate.status === 'SIDE_UNAVAILABLE') return '집계 불가';
+	if (estimate.status === 'PRICE_UNAVAILABLE') return '가격 수신중';
+	if (estimate.status === 'ENTRY_PRICE_UNAVAILABLE' || estimate.status === 'SIDE_UNAVAILABLE') return '계산 불가';
 	return formatDisplayPnl(estimate.value);
 };
 
-const estimateTooltip = '실시간 가격 기준의 추정 손익입니다. 최종 손익은 Binance 체결 내역 기준으로 확정됩니다.';
-const entryTooltip = '설정금액은 전략 생성 시 입력한 값입니다. 실제 진입금액은 Binance에서 실제 체결된 수량과 가격 기준입니다.';
+const estimateTooltip = '실시간 가격 기준의 추정 손익입니다. 최종 손익은 Binance 체결 이력 기준으로 확정됩니다.';
+const entryTooltip = '설정금액은 전략 생성 시 입력값입니다. 실제 진입금액은 Binance 실제 체결 수량과 가격 기준입니다.';
 
 const getWinLossLabel = (item = {}) => {
 	const win = toNumber(item.r_win || item.winCount);

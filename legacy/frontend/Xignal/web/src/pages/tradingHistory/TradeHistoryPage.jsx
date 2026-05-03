@@ -21,14 +21,14 @@ const formatDateTime = (value) => {
 };
 
 const formatPnl = (value) => {
-	if (value === null || value === undefined) return '집계 불가';
+	if (value === null || value === undefined) return '계산 불가';
 	const numeric = toNumber(value);
 	const rounded = Number(numeric.toFixed(8));
 	return `${rounded >= 0 ? '+' : ''}${comma(rounded)} USDT`;
 };
 
 const formatPct = (value) => {
-	if (value === null || value === undefined) return '-';
+	if (value === null || value === undefined) return '계산 불가';
 	return `${toNumber(value).toFixed(2)}%`;
 };
 
@@ -117,7 +117,7 @@ const TradeHistoryPage = ({ mode = 'live' }) => {
 
 	useEffect(() => {
 		setPage(1);
-	}, [tab]);
+	}, [tab, sd, ed]);
 
 	useEffect(() => {
 		if (!sd || !ed) return;
@@ -190,11 +190,11 @@ const TradeHistoryPage = ({ mode = 'live' }) => {
 			<div className="mb-5 grid gap-3 md:grid-cols-2 xl:grid-cols-7">
 				<SummaryCard label="누적 실현손익" value={formatPnl(summary.totalRealizedPnl)} tone={summaryTone} />
 				<SummaryCard label="완료 거래 수" value={`${comma(summary.completedCount)}건`} />
-				<SummaryCard label="진행 중 거래 수" value={`${comma(summary.activeCount)}건`} />
+				<SummaryCard label="진행중 거래 수" value={`${comma(summary.activeCount)}건`} />
 				<SummaryCard label="승률" value={formatWinRate(summary.winRate)} />
 				<SummaryCard label="평균 수익" value={formatPnl(summary.averageWin)} tone="profit" />
 				<SummaryCard label="평균 손실" value={formatPnl(summary.averageLoss)} tone="danger" />
-				<SummaryCard label="확인 필요" value={`${comma(summary.reviewCount)}건`} helper="성과 기록과 분리" />
+				<SummaryCard label="확인 필요" value={`${comma(summary.reviewCount)}건`} helper="현재 조치가 필요한 항목만 표시" />
 			</div>
 
 			<div className="mb-5 flex flex-col gap-3 rounded-lg border border-[#2d3340] bg-[#1B1B1B] p-4 md:flex-row md:items-center md:justify-between">
@@ -227,7 +227,7 @@ const TradeHistoryPage = ({ mode = 'live' }) => {
 			<div className="space-y-3 md:hidden">
 				{items.length === 0 ? (
 					<div className="rounded-lg border border-[#2d3340] bg-[#1B1B1B] p-4 text-center text-[#999999]">
-						조회된 성과 기록이 없습니다.
+						조회된 거래 기록이 없습니다.
 					</div>
 				) : (
 					items.map((item) => (
@@ -276,7 +276,7 @@ const TradeHistoryPage = ({ mode = 'live' }) => {
 						{items.length === 0 ? (
 							<tr>
 								<td className="px-4 py-8 text-[#9aa3b2]" colSpan={10}>
-									조회된 성과 기록이 없습니다.
+									조회된 거래 기록이 없습니다.
 								</td>
 							</tr>
 						) : (

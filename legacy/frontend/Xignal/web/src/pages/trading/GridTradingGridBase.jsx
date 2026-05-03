@@ -36,11 +36,9 @@ const formatDisplayAmount = (value) => {
 };
 
 const isEnabled = isTradingEnabled;
-const getOverallStatusLabel = (item = {}) => item.userOverallStatusLabel || item.displayStatus || (isEnabled(item) ? '운용중 / 신호대기' : 'OFF / 대기중');
+const getOverallStatusLabel = (item = {}) => item.userOverallStatusLabel || item.displayStatus || (isEnabled(item) ? 'ON / 신호대기' : 'OFF / 대기중');
 const getLongStatusLabel = (item = {}) => item.longPositionStatusLabel || (toNumber(item.longQty) > 0 ? 'LONG 보유' : '진입 대기');
 const getShortStatusLabel = (item = {}) => item.shortPositionStatusLabel || (toNumber(item.shortQty) > 0 ? 'SHORT 보유' : '진입 대기');
-
-const getGridTargetTakeProfitLabel = (item = {}) => (toNumber(item.profit) > 0 ? `${item.profit}%` : '-');
 
 const getMetricValue = (item = {}, keys = [], fallback = 0) => {
 	for (const key of keys) {
@@ -62,13 +60,13 @@ const getRealizedPnl = (item = {}) =>
 
 const formatEstimatedPnl = (estimate) => {
 	if (!estimate || estimate.status === 'FLAT') return '-';
-	if (estimate.status === 'PRICE_UNAVAILABLE') return '가격 수신 중';
-	if (estimate.status === 'ENTRY_PRICE_UNAVAILABLE' || estimate.status === 'SIDE_UNAVAILABLE') return '집계 불가';
+	if (estimate.status === 'PRICE_UNAVAILABLE') return '가격 수신중';
+	if (estimate.status === 'ENTRY_PRICE_UNAVAILABLE' || estimate.status === 'SIDE_UNAVAILABLE') return '계산 불가';
 	return formatDisplayPnl(estimate.value);
 };
 
-const estimateTooltip = '실시간 가격 기준의 추정 손익입니다. 최종 손익은 Binance 체결 내역 기준으로 확정됩니다.';
-const entryTooltip = '설정금액은 전략 생성 시 입력한 값입니다. 실제 진입금액은 Binance에서 실제 체결된 수량과 가격 기준입니다.';
+const estimateTooltip = '실시간 가격 기준의 추정 손익입니다. 최종 손익은 Binance 체결 이력 기준으로 확정됩니다.';
+const entryTooltip = '설정금액은 전략 생성 시 입력값입니다. 실제 진입금액은 Binance 실제 체결 수량과 가격 기준입니다.';
 
 const StatusChip = ({ label }) => (
 	<span className="inline-flex rounded-full border border-[#334155] bg-[#111827] px-2.5 py-1 text-xs font-semibold text-[#D8E0ED]">
@@ -111,7 +109,7 @@ const GridTradingGridBase = ({ mode = 'live', listData = [], setTradingDetailId,
 					(res === false ? '그리드 전략 상태 변경에 실패했습니다.' : '');
 
 				showMessage({
-					message: errorMessage || (nextEnabled ? '그리드 전략이 ON 되었습니다.' : '그리드 전략이 OFF 되었습니다.'),
+					message: errorMessage || (nextEnabled ? '그리드 전략을 ON 했습니다.' : '그리드 전략을 OFF 했습니다.'),
 					confirmText: '확인',
 					onConfirm: () => {
 						if (!errorMessage) getListData?.();
@@ -133,7 +131,7 @@ const GridTradingGridBase = ({ mode = 'live', listData = [], setTradingDetailId,
 					(res === false ? '그리드 전략 삭제에 실패했습니다.' : '');
 
 				showMessage({
-					message: errorMessage || '그리드 전략이 삭제되었습니다.',
+					message: errorMessage || '그리드 전략을 삭제했습니다.',
 					confirmText: '확인',
 					onConfirm: () => {
 						if (!errorMessage) getListData?.();
@@ -165,7 +163,7 @@ const GridTradingGridBase = ({ mode = 'live', listData = [], setTradingDetailId,
 
 				<div className="mt-3 grid grid-cols-2 gap-2">
 					<div className="rounded-md bg-[#0F141B] px-3 py-2">
-						<p className="text-[11px] text-[#7f8898]">현재 레짐</p>
+						<p className="text-[11px] text-[#7f8898]">현재 상태</p>
 						<p className="mt-1 text-[14px]">{getOverallStatusLabel(item)}</p>
 					</div>
 					<div className="rounded-md bg-[#0F141B] px-3 py-2">
@@ -228,7 +226,7 @@ const GridTradingGridBase = ({ mode = 'live', listData = [], setTradingDetailId,
 							<th className="px-4 py-3">종목</th>
 							<th className="px-4 py-3" title={entryTooltip}>설정금액</th>
 							<th className="px-4 py-3" title={entryTooltip}>실제 진입금액</th>
-							<th className="px-4 py-3">현재 레짐</th>
+							<th className="px-4 py-3">현재 상태</th>
 							<th className="px-4 py-3">LONG 상태</th>
 							<th className="px-4 py-3">SHORT 상태</th>
 							<th className="px-4 py-3">현재가</th>
