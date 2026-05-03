@@ -1,0 +1,136 @@
+{
+  "finalClassification": "UI_COMPLETION_PASS_WITH_BROWSER_FALLBACK",
+  "closureVerdict": "사용자/관리자 UI 문구, 상태표시, 내부 QA 노출, mojibake, flat-row 표시, My Page/User Stream 문구, message/admin labels를 static/source/build evidence로 점검하고 필요한 source fix를 적용했다.",
+  "browserFallback": {
+    "attemptedUrl": "http://127.0.0.1:5173/",
+    "result": "UNAVAILABLE",
+    "reason": "frontend 5173 connection refused",
+    "fallback": "static/source/build evidence",
+    "whyNotStarted": "이번 작업 금지 조건상 Binance private API 유발 가능성이 있는 runtime/browser smoke를 새로 띄우지 않았다."
+  },
+  "userUiTable": [
+    {
+      "screen": "Trading page",
+      "area": "Signal PID table",
+      "expected": "flat row는 '-' 표시, 현재 추정 손익은 open row에서만 계산",
+      "actual": "source guard 확인",
+      "fixApplied": false,
+      "verdict": "PASS"
+    },
+    {
+      "screen": "Trading page",
+      "area": "Grid PID table",
+      "expected": "깨진 한글과 내부 문구 없음",
+      "actual": "Grid 전략 form mojibake 제거",
+      "fixApplied": true,
+      "verdict": "PASS"
+    },
+    {
+      "screen": "My Page",
+      "area": "readiness",
+      "expected": "User Stream을 사용자용 문구로 표시",
+      "actual": "실시간 주문 이벤트",
+      "fixApplied": true,
+      "verdict": "PASS"
+    },
+    {
+      "screen": "Messages",
+      "area": "severity/category",
+      "expected": "raw severity/category 노출 축소",
+      "actual": "긴급/확인 필요/안내 및 주문/계정/리스크/Binance label",
+      "fixApplied": true,
+      "verdict": "PASS"
+    }
+  ],
+  "adminUiTable": [
+    {
+      "screenArea": "Admin overview",
+      "expected": "current risk가 사용자 친화적으로 보임",
+      "actual": "현재 위험/열린 이슈/정상 사이클 label",
+      "fixApplied": true,
+      "verdict": "PASS"
+    },
+    {
+      "screenArea": "Order cycles",
+      "expected": "정상 cycle과 issue 분리",
+      "actual": "주문 cycle/protection/issue/raw order table header 한국어화",
+      "fixApplied": true,
+      "verdict": "PASS"
+    },
+    {
+      "screenArea": "UID154 limitation",
+      "expected": "local-only limitation이 fake OK 또는 과도한 alarm처럼 보이지 않음",
+      "actual": "로컬 기준 관제 및 Binance 원본 검증 생략 문구",
+      "fixApplied": true,
+      "verdict": "PASS"
+    }
+  ],
+  "badPatternSearch": {
+    "result": "PASS",
+    "filesChecked": [
+      "legacy/frontend/Xignal/web/src/pages/trading/GridOrderViewBase.jsx",
+      "legacy/frontend/Xignal/web/src/pages/trading/OrderView.jsx",
+      "legacy/frontend/Xignal/web/src/pages/trading/TestOrderView.jsx",
+      "legacy/frontend/Xignal/web/src/pages/trading/TradingListTable.jsx",
+      "legacy/frontend/Xignal/web/src/pages/trading/GridTradingGridBase.jsx",
+      "legacy/frontend/Xignal/web/src/pages/mypage/Mypage.jsx",
+      "legacy/frontend/Xignal/web/src/components/account/AccountBalancePanel.jsx",
+      "legacy/frontend/Xignal/web/src/pages/admin/AdminConsole.jsx",
+      "legacy/frontend/Xignal/web/src/components/modal/pageModal/MessageModal.jsx",
+      "legacy/frontend/Xignal/web/src/layout/AppSidebar.jsx",
+      "legacy/frontend/Xignal/web/src/pages/tradingHistory/TradeHistoryPage.jsx"
+    ],
+    "badPatternCount": 0
+  },
+  "sourceFixes": [
+    "legacy/frontend/Xignal/web/src/pages/trading/GridOrderViewBase.jsx",
+    "legacy/frontend/Xignal/web/src/pages/trading/OrderView.jsx",
+    "legacy/frontend/Xignal/web/src/pages/trading/TestOrderView.jsx",
+    "legacy/frontend/Xignal/web/src/components/account/AccountBalancePanel.jsx",
+    "legacy/frontend/Xignal/web/src/pages/admin/AdminConsole.jsx",
+    "legacy/frontend/Xignal/web/src/components/modal/pageModal/MessageModal.jsx",
+    "legacy/frontend/Xignal/web/src/pages/mypage/Mypage.jsx"
+  ],
+  "validation": [
+    {
+      "name": "frontend build",
+      "result": "PASS",
+      "note": "npm run build, Vite 194 modules transformed, chunk-size warning only"
+    },
+    {
+      "name": "bad-pattern search",
+      "result": "PASS",
+      "note": "BAD_PATTERN_COUNT=0"
+    },
+    {
+      "name": "browser/static visual smoke",
+      "result": "PASS_WITH_BROWSER_FALLBACK",
+      "note": "127.0.0.1:5173 unavailable; static/build evidence used"
+    },
+    {
+      "name": "git diff check",
+      "result": "PASS",
+      "note": "selected source files passed git diff --check"
+    }
+  ],
+  "gitStatus": {
+    "selectedCommitOnly": "planned",
+    "qaConfigStaged": false,
+    "secretsStaged": false,
+    "logsTmpScreenshotsStaged": false,
+    "push": false,
+    "unrelatedDirtyFiles": "pre-existing dirty worktree ignored"
+  },
+  "remainingUserDecision": "없음. 브라우저 직접 visual QA는 frontend 5173 기동 후 별도 확인 가능.",
+  "didNotDo": [
+    "Binance 주문/취소/청산/보호주문 생성 안 함",
+    "Binance private API 호출 안 함",
+    "matched webhook 전송 안 함",
+    "TradingView alert 수정 안 함",
+    "PineScript 수정 안 함",
+    "전략 ON/OFF 변경 안 함",
+    "PID enabled 변경 안 함",
+    "push 안 함",
+    "API key/secret/password/ngrok token 원문 로그/보고 안 함"
+  ]
+}

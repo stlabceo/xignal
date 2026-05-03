@@ -34,6 +34,22 @@ const getSeverityClass = (severity) => {
 	return 'bg-sky-500/15 text-sky-200 border-sky-500/30';
 };
 
+const getSeverityLabel = (severity) => {
+	const normalized = String(severity || '').toUpperCase();
+	if (normalized === 'CRITICAL') return '긴급';
+	if (normalized === 'WARN') return '확인 필요';
+	return '안내';
+};
+
+const getCategoryLabel = (category) => {
+	const normalized = String(category || '').toUpperCase();
+	if (normalized.includes('ORDER')) return '주문';
+	if (normalized.includes('ACCOUNT')) return '계정';
+	if (normalized.includes('RISK')) return '리스크';
+	if (normalized.includes('BINANCE')) return 'Binance';
+	return category || 'Binance';
+};
+
 const MessageModal = ({ isOpen, onClose, className }) => {
 	const clearNewMsg = useNotifyStore((s) => s.clearNewMsg);
 	const [data, setData] = useState([]);
@@ -80,9 +96,9 @@ const MessageModal = ({ isOpen, onClose, className }) => {
 									<div>
 										<div className="flex flex-wrap items-center gap-2">
 											<span className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold ${getSeverityClass(item.severity)}`}>
-												{item.severity || 'INFO'}
+												{getSeverityLabel(item.severity)}
 											</span>
-											<span className="text-xs text-[#8B96A8]">{item.category || 'BINANCE'}</span>
+											<span className="text-xs text-[#8B96A8]">{getCategoryLabel(item.category)}</span>
 											{item.repeatCount > 1 ? <span className="rounded-full bg-[#3A2514] px-2 py-1 text-[11px] text-[#FFD6A5]">x{item.repeatCount}</span> : null}
 										</div>
 										<p className="mt-3 text-[15px] font-semibold">{item.userMessage || item.msg || '-'}</p>
@@ -90,7 +106,7 @@ const MessageModal = ({ isOpen, onClose, className }) => {
 									</div>
 									<div className="text-right text-xs text-[#8B96A8]">
 										<p>{getDateFormat(new Date(item.createdAt || item.created_at), 'YY-MM-DD hh:mm')}</p>
-										{item.rawStatus ? <p className="mt-1">status {item.rawStatus}</p> : null}
+										{item.rawStatus ? <p className="mt-1">상태 {item.rawStatus}</p> : null}
 									</div>
 								</div>
 							</div>

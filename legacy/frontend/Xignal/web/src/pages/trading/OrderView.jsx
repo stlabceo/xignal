@@ -816,7 +816,7 @@ const OrderView = ({ id, getListData, presetData }) => {
 											? createSplitStageList(Number(formData.splitTakeProfitCount || 1), formData.splitTakeProfitStages)
 											: createSplitStageList(1)
 									})} />
-									<span className="text-sm text-white">遺꾪븷 ?듭젅</span>
+									<span className="text-sm text-white">분할 익절</span>
 								</div>
 								{formData.splitTakeProfitEnabled ? (
 									<div className="space-y-3 rounded-md border border-[#2D2D2D] bg-[#101010] p-3">
@@ -836,7 +836,7 @@ const OrderView = ({ id, getListData, presetData }) => {
 												</select>
 											</div>
 											<div>
-												<div className="mb-1 text-[12px] text-[#999]">怨좎젙 GAP</div>
+												<div className="mb-1 text-[12px] text-[#999]">고정 GAP</div>
 												<div className="relative">
 													<input type="text" value={formData.splitTakeProfitGap} readOnly className={inputClass} />
 													<span className="absolute right-2 top-1/2 -translate-y-1/2 text-[#999]">%</span>

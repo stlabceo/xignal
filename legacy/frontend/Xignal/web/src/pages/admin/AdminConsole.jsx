@@ -161,6 +161,28 @@ const InfoBadge = ({ label, tone = 'slate' }) => (
 	</span>
 );
 
+const formatSourceName = (name) => {
+	const normalized = String(name || '').trim().toLowerCase();
+	const labels = {
+		binance: 'Binance 원본',
+		binanceorders: 'Binance 주문',
+		rawbinanceorders: 'Binance 원본 주문',
+		local: '로컬 projection',
+		localprojection: '로컬 projection',
+		ledger: '로컬 ledger',
+		snapshot: '로컬 snapshot',
+		reservation: '로컬 reservation'
+	};
+	return labels[normalized] || name || '-';
+};
+
+const formatSourceStatusLabel = (row = {}) => {
+	const sourceName = formatSourceName(row.name);
+	if (row.skipped) return `${sourceName}: 로컬 기준`;
+	if (row.ok) return `${sourceName}: 정상`;
+	return `${sourceName}: 확인 필요`;
+};
+
 const getOrderIssueTone = (issueCategory) => {
 	const normalized = String(issueCategory || '')
 		.trim()
@@ -677,7 +699,7 @@ const AdminOrderMonitorPanel = ({ monitor, loading, filters, setFilters, onRefre
 		<div className={cardClass}>
 			<SectionHeader
 				title="Binance 주문 관제"
-				description="현재 위험, 주문 사이클, 보호주문 매트릭스, 이슈 instance, Binance 원본 주문을 분리해서 봅니다. msg_list와 QA 로그는 annotation이며 lifecycle 정본을 덮어쓰지 않습니다."
+				description="현재 위험, 주문 사이클, 보호주문 매트릭스, 이슈 instance, Binance 원본 주문을 분리해서 봅니다. 내부 이력 로그는 참고 정보이며 lifecycle 정본을 덮어쓰지 않습니다."
 				action={
 					<button
 						type="button"
@@ -707,30 +729,30 @@ const AdminOrderMonitorPanel = ({ monitor, loading, filters, setFilters, onRefre
 			</div>
 
 			{loading ? (
-				<div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">Binance read-only evidence를 불러오는 중입니다.</div>
+				<div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">Binance 원본 주문 근거를 불러오는 중입니다.</div>
 			) : null}
 
 			{monitor?.auditMode === 'LOCAL_ONLY_BINANCE_UNVERIFIED' ? (
 				<div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-700">
-					UID {monitor.uid}는 local-only 관제입니다. Binance private API를 호출하지 않았으므로 원본 주문 탭은 검증 제한 상태로 표시합니다.
+					UID {monitor.uid}는 로컬 기준으로 관제 중입니다. 현재 환경에서는 Binance 원본 주문 검증을 생략했고, 로컬 ledger/snapshot/reservation 기준으로 현재 위험을 표시합니다.
 				</div>
 			) : null}
 
 			<div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-				<SummaryCard title="현재 CRITICAL" value={summary.currentCriticalCount || 0} description="현재 open exposure/protection/local-Binance mismatch 기준입니다." />
-				<SummaryCard title="OPEN 이슈" value={summary.openIssueCount || 0} description="resolved/historical issue는 제외한 현재 issue instance 수입니다." />
+				<SummaryCard title="현재 위험" value={summary.currentCriticalCount || 0} description="현재 보유 포지션, 보호주문, 로컬-Binance 불일치 기준입니다." />
+				<SummaryCard title="열린 이슈" value={summary.openIssueCount || 0} description="해결된 과거 이슈는 제외한 현재 이슈 수입니다." />
 				<SummaryCard title="주문 사이클" value={summary.cycleCount || 0} description="PID별 진입-보호-청산 cycle projection 수입니다." />
 				<SummaryCard title="정상 사이클" value={summary.normalCycleCount || 0} description="OK/INFO로 종료되거나 대기 중인 정상 cycle 수입니다." />
 				<SummaryCard title="Binance 원본 주문" value={summary.rawOrderCount || 0} description="allOrders/userTrades에서 재구성한 evidence row 수입니다." />
 			</div>
 
 			<div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4">
-				<h3 className="text-base font-semibold text-slate-900">Source status</h3>
+				<h3 className="text-base font-semibold text-slate-900">근거 상태</h3>
 				<div className="mt-3 flex flex-wrap gap-2">
 					{sourceRows.map((row) => (
 						<InfoBadge
 							key={row.name}
-							label={`${row.name}: ${row.skipped ? 'LOCAL_ONLY' : row.ok ? 'OK' : 'ERROR'}`}
+							label={formatSourceStatusLabel(row)}
 							tone={row.skipped ? 'amber' : row.ok ? 'emerald' : 'rose'}
 						/>
 					))}
@@ -746,13 +768,13 @@ const AdminOrderMonitorPanel = ({ monitor, loading, filters, setFilters, onRefre
 							<thead>
 								<tr>
 									<th className={tableHeadClass}>UID / 종목</th>
-									<th className={tableHeadClass}>Side</th>
-									<th className={tableHeadClass}>Binance qty</th>
-									<th className={tableHeadClass}>Local openQty</th>
-									<th className={tableHeadClass}>Owner PID</th>
-									<th className={tableHeadClass}>Protection</th>
-									<th className={tableHeadClass}>Verdict</th>
-									<th className={tableHeadClass}>Next action</th>
+									<th className={tableHeadClass}>방향</th>
+									<th className={tableHeadClass}>Binance 수량</th>
+									<th className={tableHeadClass}>로컬 보유수량</th>
+									<th className={tableHeadClass}>소유 PID</th>
+									<th className={tableHeadClass}>보호주문</th>
+									<th className={tableHeadClass}>판정</th>
+									<th className={tableHeadClass}>다음 조치</th>
 								</tr>
 							</thead>
 							<tbody className="divide-y divide-slate-100 bg-white">
@@ -852,9 +874,9 @@ const AdminOrderMonitorPanel = ({ monitor, loading, filters, setFilters, onRefre
 						<table className="min-w-full divide-y divide-slate-200">
 							<thead>
 								<tr>
-									<th className={tableHeadClass}>Issue</th>
-									<th className={tableHeadClass}>Evidence</th>
-									<th className={tableHeadClass}>Next action</th>
+									<th className={tableHeadClass}>이슈</th>
+									<th className={tableHeadClass}>근거</th>
+									<th className={tableHeadClass}>다음 조치</th>
 								</tr>
 							</thead>
 							<tbody className="divide-y divide-slate-100 bg-white">
@@ -870,7 +892,7 @@ const AdminOrderMonitorPanel = ({ monitor, loading, filters, setFilters, onRefre
 							</tbody>
 						</table>
 					</div>
-					<div className="mt-3 text-xs text-slate-500">Resolved/historical issue: {resolvedIssues.length}건. 접힌 이력이며 current abnormal에는 포함하지 않습니다.</div>
+					<div className="mt-3 text-xs text-slate-500">해결된 과거 이슈: {resolvedIssues.length}건. 접힌 이력이며 현재 위험에는 포함하지 않습니다.</div>
 				</div>
 
 				<div>
@@ -879,13 +901,13 @@ const AdminOrderMonitorPanel = ({ monitor, loading, filters, setFilters, onRefre
 						<table className="min-w-full divide-y divide-slate-200">
 							<thead>
 								<tr>
-									<th className={tableHeadClass}>Time / Symbol</th>
-									<th className={tableHeadClass}>Order</th>
-									<th className={tableHeadClass}>Type / Side</th>
-									<th className={tableHeadClass}>Qty</th>
-									<th className={tableHeadClass}>Status</th>
-									<th className={tableHeadClass}>Trade IDs</th>
-									<th className={tableHeadClass}>Local match</th>
+									<th className={tableHeadClass}>시간 / 종목</th>
+									<th className={tableHeadClass}>주문번호</th>
+									<th className={tableHeadClass}>유형 / 방향</th>
+									<th className={tableHeadClass}>수량</th>
+									<th className={tableHeadClass}>상태</th>
+									<th className={tableHeadClass}>체결 ID</th>
+									<th className={tableHeadClass}>로컬 매칭</th>
 								</tr>
 							</thead>
 							<tbody className="divide-y divide-slate-100 bg-white">
@@ -911,11 +933,11 @@ const AdminOrderMonitorPanel = ({ monitor, loading, filters, setFilters, onRefre
 						<table className="min-w-full divide-y divide-slate-200">
 							<thead>
 								<tr>
-									<th className={tableHeadClass}>Time</th>
+									<th className={tableHeadClass}>시간</th>
 									<th className={tableHeadClass}>UID/PID</th>
-									<th className={tableHeadClass}>Action</th>
-									<th className={tableHeadClass}>Enabled</th>
-									<th className={tableHeadClass}>Note</th>
+									<th className={tableHeadClass}>동작</th>
+									<th className={tableHeadClass}>ON/OFF</th>
+									<th className={tableHeadClass}>메모</th>
 								</tr>
 							</thead>
 							<tbody className="divide-y divide-slate-100 bg-white">
@@ -946,7 +968,7 @@ const AdminStatsPreviewPanel = ({ statsPreview, onRefresh }) => {
 		<div className={cardClass}>
 			<SectionHeader
 				title="전략 통계 데이터"
-				description="TradingView grid stats ingestion과 landing ranking cache 상태를 확인합니다. 주문 dispatch와 분리된 stats-only 데이터입니다."
+				description="TradingView에서 수신한 Grid 통계와 랭킹 캐시 상태를 확인합니다. 주문 처리와 분리된 통계 전용 데이터입니다."
 				action={
 					<button type="button" onClick={onRefresh} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700">
 						새로고침
@@ -955,31 +977,31 @@ const AdminStatsPreviewPanel = ({ statsPreview, onRefresh }) => {
 			/>
 
 			<div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-				<SummaryCard title="1M 랭킹" value={rankings.length} description="landing_strategy_rank_cache 기준입니다." />
-				<SummaryCard title="최근 PUMP 1H" value={latest.length} description="strategy_stats_bestcase 기준입니다." />
-				<SummaryCard title="Source" value={rankings[0]?.source || latest[0]?.source || '-'} description="현재 수신된 stats source입니다." />
-				<SummaryCard title="Updated" value={formatAgo(rankings[0]?.updatedAt || latest[0]?.calculatedAt)} description="마지막 stats 갱신 경과입니다." />
+				<SummaryCard title="1M 랭킹" value={rankings.length} description="전략 랭킹 캐시 기준입니다." />
+				<SummaryCard title="최근 PUMP 1H" value={latest.length} description="최근 수신된 최적 조건 기준입니다." />
+				<SummaryCard title="수신 출처" value={rankings[0]?.source || latest[0]?.source || '-'} description="현재 수신된 통계 출처입니다." />
+				<SummaryCard title="마지막 갱신" value={formatAgo(rankings[0]?.updatedAt || latest[0]?.calculatedAt)} description="마지막 통계 갱신 경과입니다." />
 			</div>
 
 			{!hasData ? (
 				<div className="mt-6 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm text-slate-500">
-					아직 수신된 전략 통계 데이터가 없습니다. 1W처럼 Pine contract에 없는 기간은 표시하지 않고, 데이터가 들어오기 전까지 0으로 속이지 않습니다.
+					아직 수신된 전략 통계 데이터가 없습니다. 지원하지 않는 기간은 표시하지 않고, 데이터가 들어오기 전까지 0으로 속이지 않습니다.
 				</div>
 			) : null}
 
 			<div className="mt-6 grid gap-6 xl:grid-cols-2">
 				<div>
-					<h3 className="text-base font-semibold text-slate-900">Grid ranking preview</h3>
+					<h3 className="text-base font-semibold text-slate-900">Grid 랭킹 미리보기</h3>
 					<div className="mt-3 overflow-x-auto">
 						<table className="min-w-full divide-y divide-slate-200">
 							<thead>
 								<tr>
-									<th className={tableHeadClass}>Symbol</th>
-									<th className={tableHeadClass}>Period</th>
+									<th className={tableHeadClass}>종목</th>
+									<th className={tableHeadClass}>기간</th>
 									<th className={tableHeadClass}>TP</th>
 									<th className={tableHeadClass}>Net PnL</th>
-									<th className={tableHeadClass}>Win</th>
-									<th className={tableHeadClass}>Updated</th>
+									<th className={tableHeadClass}>승률</th>
+									<th className={tableHeadClass}>갱신</th>
 								</tr>
 							</thead>
 							<tbody className="divide-y divide-slate-100 bg-white">
@@ -999,17 +1021,17 @@ const AdminStatsPreviewPanel = ({ statsPreview, onRefresh }) => {
 				</div>
 
 				<div>
-					<h3 className="text-base font-semibold text-slate-900">Latest bestcase preview</h3>
+					<h3 className="text-base font-semibold text-slate-900">최근 최적 조건</h3>
 					<div className="mt-3 overflow-x-auto">
 						<table className="min-w-full divide-y divide-slate-200">
 							<thead>
 								<tr>
-									<th className={tableHeadClass}>Symbol</th>
-									<th className={tableHeadClass}>Period</th>
-									<th className={tableHeadClass}>Best TP</th>
+									<th className={tableHeadClass}>종목</th>
+									<th className={tableHeadClass}>기간</th>
+									<th className={tableHeadClass}>최적 TP</th>
 									<th className={tableHeadClass}>Net PnL</th>
-									<th className={tableHeadClass}>Win</th>
-									<th className={tableHeadClass}>Source</th>
+									<th className={tableHeadClass}>승률</th>
+									<th className={tableHeadClass}>출처</th>
 								</tr>
 							</thead>
 							<tbody className="divide-y divide-slate-100 bg-white">

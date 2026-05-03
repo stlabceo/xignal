@@ -10,7 +10,7 @@ import {
 } from './tradingCatalogOptions';
 
 const marginTypeEnum = {
-	cross: '援먯감',
+	cross: '교차',
 };
 const marginTypeOptions = Object.values(marginTypeEnum);
 const MIN_MARGIN_USDT = 5;
@@ -23,7 +23,7 @@ const createInitialForm = () => ({
 	strategySignal: 'SQZ+GRID',
 	symbol: 'BTCUSDT',
 	bunbong: '1MIN',
-	marginType: '援먯감',
+	marginType: '교차',
 	margin: '',
 	leverage: '',
 	profit: '',
@@ -134,7 +134,7 @@ const GridOrderViewBase = ({ id, getListData, presetData, mode = 'live' }) => {
 					...res,
 					symbol: res.symbol || 'BTCUSDT',
 					bunbong: res.bunbong || '1MIN',
-					marginType: getLabelByKey(marginTypeEnum, res.marginType, '援먯감'),
+					marginType: getLabelByKey(marginTypeEnum, res.marginType, '교차'),
 					margin: res.margin ?? '',
 					leverage: res.leverage ?? '',
 					profit: res.profit ?? '',
@@ -149,7 +149,7 @@ const GridOrderViewBase = ({ id, getListData, presetData, mode = 'live' }) => {
 			setFormData((prev) => ({
 				...prev,
 				...presetData,
-				marginType: presetData.marginType || '援먯감',
+				marginType: presetData.marginType || '교차',
 			}));
 			return;
 		}
@@ -209,11 +209,11 @@ const GridOrderViewBase = ({ id, getListData, presetData, mode = 'live' }) => {
 	const orderConstraintWarning = useMemo(() => {
 		const margin = Number(formData.margin || 0);
 		if (margin > 0 && margin < minimumMarginUsdt) {
-			return `留덉쭊? 理쒖냼 ${formatUsdtValue(minimumMarginUsdt)} USDT ?댁긽?댁뼱???⑸땲??`;
+			return `마진은 최소 ${formatUsdtValue(minimumMarginUsdt)} USDT 이상이어야 합니다.`;
 		}
 
 		if (minimumTradeValue > 0 && numericOrderAmount > 0 && numericOrderAmount + 0.0000001 < minimumTradeValue) {
-			return `${formData.symbol} 理쒖냼 嫄곕옒湲덉븸? ${formatUsdtValue(minimumTradeValue)} USDT ?댁긽?낅땲??`;
+			return `${formData.symbol} 최소 거래금액은 ${formatUsdtValue(minimumTradeValue)} USDT 이상입니다.`;
 		}
 
 		return null;
@@ -221,29 +221,29 @@ const GridOrderViewBase = ({ id, getListData, presetData, mode = 'live' }) => {
 
 	const validateForm = useCallback(() => {
 		if (!String(formData.a_name || '').trim()) {
-			showMessage({ message: '?꾨왂 ?대쫫???낅젰??二쇱꽭??', confirmText: '?뺤씤' });
+			showMessage({ message: '전략 이름을 입력해 주세요.', confirmText: '확인' });
 			return false;
 		}
 		if (!String(formData.strategySignal || '').trim()) {
-			showMessage({ message: 'Grid ?꾨왂 ?좏샇 ?대쫫???낅젰??二쇱꽭??', confirmText: '?뺤씤' });
+			showMessage({ message: 'Grid 전략 신호 이름을 입력해 주세요.', confirmText: '확인' });
 			return false;
 		}
 		if (!(Number(formData.margin) >= minimumMarginUsdt)) {
-			showMessage({ message: `Margin must be at least ${formatUsdtValue(minimumMarginUsdt)} USDT.`, confirmText: 'OK' });
+			showMessage({ message: `마진은 최소 ${formatUsdtValue(minimumMarginUsdt)} USDT 이상이어야 합니다.`, confirmText: '확인' });
 			return false;
 		}
 		if (!(Number(formData.leverage) >= 1 && Number(formData.leverage) <= 100)) {
-			showMessage({ message: '?덈쾭由ъ???1諛??댁긽 100諛??댄븯濡??낅젰??二쇱꽭??', confirmText: '?뺤씤' });
+			showMessage({ message: '레버리지는 1배 이상 100배 이하로 입력해 주세요.', confirmText: '확인' });
 			return false;
 		}
 		if (!(Number(formData.profit) > 0)) {
-			showMessage({ message: 'Grid ?듭젅(%)???낅젰??二쇱꽭??', confirmText: '?뺤씤' });
+			showMessage({ message: 'Grid 익절(%)을 입력해 주세요.', confirmText: '확인' });
 			return false;
 		}
 		if (minimumTradeValue > 0 && numericOrderAmount + 0.0000001 < minimumTradeValue) {
 			showMessage({
-				message: `${formData.symbol} minimum trade value is ${formatUsdtValue(minimumTradeValue)} USDT.`,
-				confirmText: 'OK',
+				message: `${formData.symbol} 최소 거래금액은 ${formatUsdtValue(minimumTradeValue)} USDT입니다.`,
+				confirmText: '확인',
 			});
 			return false;
 		}
@@ -270,11 +270,11 @@ const GridOrderViewBase = ({ id, getListData, presetData, mode = 'live' }) => {
 			const errorMessage =
 				res?.msg ||
 				(res?.success === false ? res?.message : '') ||
-				(res === false ? '?붿껌 泥섎━???ㅽ뙣?덉뒿?덈떎.' : '');
+				(res === false ? '요청 처리에 실패했습니다.' : '');
 
 			showMessage({
 				message: errorMessage || successMessage,
-				confirmText: '?뺤씤',
+				confirmText: '확인',
 				onConfirm: () => {
 					if (!errorMessage) {
 						getListData?.();
@@ -288,14 +288,14 @@ const GridOrderViewBase = ({ id, getListData, presetData, mode = 'live' }) => {
 	const handleSave = useCallback(() => {
 		if (!validateForm()) return;
 		createDetail(toPayload(), null, (res) => {
-			handleSaveResult(res, 'Grid ?꾨왂??異붽??섏뿀?듬땲??');
+			handleSaveResult(res, 'Grid 전략을 추가했습니다.');
 		});
 	}, [createDetail, handleSaveResult, toPayload, validateForm]);
 
 	const handleEdit = useCallback(() => {
 		if (!validateForm()) return;
 		editDetail({ ...toPayload(), id }, null, (res) => {
-			handleSaveResult(res, 'Grid ?꾨왂???섏젙?섏뿀?듬땲??');
+			handleSaveResult(res, 'Grid 전략을 수정했습니다.');
 		});
 	}, [editDetail, handleSaveResult, id, toPayload, validateForm]);
 
@@ -303,12 +303,12 @@ const GridOrderViewBase = ({ id, getListData, presetData, mode = 'live' }) => {
 		<div className="h-full w-full bg-[#1B1B1B] p-4 text-white md:p-5">
 			<div className="space-y-3 md:space-y-4">
 				<div className={cardClass}>
-					<h3 className="mb-4 text-[15px] font-semibold text-white">Grid ?꾨왂 ?ㅼ젙</h3>
+					<h3 className="mb-4 text-[15px] font-semibold text-white">Grid 전략 설정</h3>
 					<div className="grid grid-cols-1 gap-4 md:grid-cols-2">
 						<div>
 							<div className={rowLabelClass}>
 								<p className="h-1 w-1 rounded-full bg-[#999]" />
-								?꾨왂 ?대쫫
+								전략 이름
 							</div>
 							<input
 								type="text"
@@ -336,7 +336,7 @@ const GridOrderViewBase = ({ id, getListData, presetData, mode = 'live' }) => {
 						<div>
 							<div className={rowLabelClass}>
 								<p className="h-1 w-1 rounded-full bg-[#999]" />
-								醫낅ぉ
+								종목
 							</div>
 							<div className={dropdownWrapClass}>
 								<DefaultDropdown
@@ -352,7 +352,7 @@ const GridOrderViewBase = ({ id, getListData, presetData, mode = 'live' }) => {
 						<div>
 							<div className={rowLabelClass}>
 								<p className="h-1 w-1 rounded-full bg-[#999]" />
-								??꾪봽?덉엫
+								타임프레임
 							</div>
 							<div className={dropdownWrapClass}>
 								<DefaultDropdown
@@ -369,12 +369,12 @@ const GridOrderViewBase = ({ id, getListData, presetData, mode = 'live' }) => {
 				</div>
 
 				<div className={cardClass}>
-					<h3 className="mb-4 text-[15px] font-semibold text-white">Grid 二쇰Ц ?ㅼ젙</h3>
+					<h3 className="mb-4 text-[15px] font-semibold text-white">Grid 주문 설정</h3>
 					<div className="grid grid-cols-1 gap-4 md:grid-cols-2">
 						<div>
 							<div className={rowLabelClass}>
 								<p className="h-1 w-1 rounded-full bg-[#999]" />
-								利앷굅湲?紐⑤뱶
+								증거금 모드
 							</div>
 							<div className={dropdownWrapClass}>
 								<DefaultDropdown
@@ -420,7 +420,7 @@ const GridOrderViewBase = ({ id, getListData, presetData, mode = 'live' }) => {
 						<div>
 							<div className={rowLabelClass}>
 								<p className="h-1 w-1 rounded-full bg-[#999]" />
-								?듭젅 (%)
+								익절 (%)
 							</div>
 							<div className="relative">
 								<input
@@ -435,7 +435,7 @@ const GridOrderViewBase = ({ id, getListData, presetData, mode = 'live' }) => {
 						<div className="md:col-span-2">
 							<div className={rowLabelClass}>
 								<p className="h-1 w-1 rounded-full bg-[#999]" />
-								嫄곕옒湲덉븸 ?먮룞怨꾩궛
+								거래금액 자동계산
 							</div>
 							<div className="relative">
 								<input
@@ -470,7 +470,7 @@ const GridOrderViewBase = ({ id, getListData, presetData, mode = 'live' }) => {
 								</p>
 							) : (
 								<p className="mt-3 text-[12px] text-[#9E9E9E]">
-									Minimum trade rules are validated against cached Binance exchange info.
+									최소 거래 규칙은 캐시된 Binance exchange info 기준으로 확인합니다.
 								</p>
 							)}
 						</div>
@@ -478,16 +478,16 @@ const GridOrderViewBase = ({ id, getListData, presetData, mode = 'live' }) => {
 				</div>
 
 				<div className={cardClass}>
-					<h3 className="mb-3 text-[15px] font-semibold text-white">Grid webhook 硫붾え</h3>
+					<h3 className="mb-3 text-[15px] font-semibold text-white">Grid webhook 메모</h3>
 					<div className="space-y-2 text-[12px] text-[#BDBDBD]">
-						<p>- Grid???쒓렇???꾨왂怨?蹂꾨룄 移댄뀒怨좊━?대ŉ, ?먯젅/遺꾪븷?듭젅 ?ㅼ젙???곕줈 諛쏆? ?딆뒿?덈떎.</p>
-						<p>- webhook? ?꾨왂紐? 醫낅ぉ, 罹붾뱾, ?좏샇?쒓컙, 吏吏?? ???꽑, ?몃━嫄곕씪?몄쓣 蹂대깄?덈떎.</p>
-						<p>- ?섏떊 寃쎈줈: <span className="font-medium text-white">/user/api/grid/hook</span></p>
+						<p>- Grid는 알고리즘 전략과 별도 카테고리이며, 손절/분할익절 설정은 별도로 받지 않습니다.</p>
+						<p>- webhook은 전략명, 종목, 캔들, 신호시간, 지지선, 저항선, 트리거라인을 보냅니다.</p>
+						<p>- 수신 경로: <span className="font-medium text-white">/user/api/grid/hook</span></p>
 						<p>
-							- ?꾨뱶: <span className="font-medium text-white">signal, symbol, candle_min(or bunbong), time, supportPrice, resistancePrice, triggerPrice</span>
+							- 필드: <span className="font-medium text-white">signal, symbol, candle_min(or bunbong), time, supportPrice, resistancePrice, triggerPrice</span>
 						</p>
 						<p>
-							- ?덉떆: signal=<span className="font-medium text-white">{formData.strategySignal || 'STATIC_GRID'}</span>, symbol=
+							- 예시: signal=<span className="font-medium text-white">{formData.strategySignal || 'STATIC_GRID'}</span>, symbol=
 							<span className="font-medium text-white">{formData.symbol}.P</span>, candle_min=
 							<span className="font-medium text-white">{String(formData.bunbong || '').replace('MIN', '')}</span>
 						</p>
@@ -500,14 +500,14 @@ const GridOrderViewBase = ({ id, getListData, presetData, mode = 'live' }) => {
 							className="cursor-pointer rounded-md border border-[#494949] px-6 py-2 hover:bg-[#0f0f0f]"
 							onClick={handleSave}
 						>
-							Grid ?꾨왂 異붽?
+							Grid 전략 추가
 						</button>
 					) : (
 						<button
 							className="cursor-pointer rounded-md border border-[#494949] px-6 py-2 hover:bg-[#0f0f0f]"
 							onClick={handleEdit}
 						>
-							Grid ?꾨왂 ?섏젙
+							Grid 전략 수정
 						</button>
 					)}
 				</div>

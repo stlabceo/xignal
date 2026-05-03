@@ -426,7 +426,7 @@ const Mypage = () => {
 						action={readiness?.lastSyncedAt ? '' : '새로고침 또는 API 연결 확인이 필요합니다.'}
 					/>
 					<ReadinessItem
-						label="User Stream"
+						label="실시간 주문 이벤트"
 						value={userStreamLabel}
 						status={userStreamStatus}
 						action={userStreamAction}

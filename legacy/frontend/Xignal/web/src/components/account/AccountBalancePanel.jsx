@@ -75,23 +75,23 @@ const toneByConnection = (status) => {
 };
 
 const metricItems = (snapshot) => [
-	{ label: 'Account Equity', value: formatMetric(snapshot?.accountEquity) },
-	{ label: 'Available Balance', value: formatMetric(snapshot?.availableBalance) },
-	{ label: 'Unrealized PnL', value: formatMetric(snapshot?.totalUnrealizedProfit) },
-	{ label: 'Margin Ratio', value: formatPercent(snapshot?.accountMarginRatio) },
-	{ label: 'Margin Buffer', value: formatMetric(snapshot?.accountMarginBuffer) },
-	{ label: 'Maint Margin', value: formatMetric(snapshot?.accountMaintMargin) },
-	{ label: 'Wallet Balance', value: formatMetric(snapshot?.totalWalletBalance) },
-	{ label: 'Position Count', value: Number(snapshot?.positionCount || 0).toLocaleString('ko-KR') }
+	{ label: '총 자산', value: formatMetric(snapshot?.accountEquity) },
+	{ label: '투자 가능 잔고', value: formatMetric(snapshot?.availableBalance) },
+	{ label: '미실현 손익', value: formatMetric(snapshot?.totalUnrealizedProfit) },
+	{ label: '마진 비율', value: formatPercent(snapshot?.accountMarginRatio) },
+	{ label: '마진 여유', value: formatMetric(snapshot?.accountMarginBuffer) },
+	{ label: '유지 증거금', value: formatMetric(snapshot?.accountMaintMargin) },
+	{ label: '지갑 잔고', value: formatMetric(snapshot?.totalWalletBalance) },
+	{ label: '보유 포지션', value: Number(snapshot?.positionCount || 0).toLocaleString('ko-KR') }
 ];
 
 const summaryItems = (summary) => [
-	{ label: '24h Max Margin Ratio', value: formatPercent(summary?.overview?.maxAccountMarginRatio) },
-	{ label: '24h Avg Margin Ratio', value: formatPercent(summary?.overview?.avgAccountMarginRatio) },
-	{ label: '24h Min Equity', value: formatMetric(summary?.overview?.minAccountEquity) },
-	{ label: '24h Max Maint Margin', value: formatMetric(summary?.overview?.maxAccountMaintMargin) },
-	{ label: '24h Min Margin Buffer', value: formatMetric(summary?.overview?.minAccountMarginBuffer) },
-	{ label: '24h Max Position Count', value: Number(summary?.overview?.maxPositionCount || 0).toLocaleString('ko-KR') }
+	{ label: '24시간 최대 마진 비율', value: formatPercent(summary?.overview?.maxAccountMarginRatio) },
+	{ label: '24시간 평균 마진 비율', value: formatPercent(summary?.overview?.avgAccountMarginRatio) },
+	{ label: '24시간 최저 총 자산', value: formatMetric(summary?.overview?.minAccountEquity) },
+	{ label: '24시간 최대 유지 증거금', value: formatMetric(summary?.overview?.maxAccountMaintMargin) },
+	{ label: '24시간 최소 마진 여유', value: formatMetric(summary?.overview?.minAccountMarginBuffer) },
+	{ label: '24시간 최대 포지션 수', value: Number(summary?.overview?.maxPositionCount || 0).toLocaleString('ko-KR') }
 ];
 
 const AccountBalancePanel = ({
@@ -156,7 +156,7 @@ const AccountBalancePanel = ({
 		<div className="rounded-lg border border-[#494949] bg-[#1B1B1B] p-4 text-white md:p-5">
 			<div className="flex flex-col gap-3 border-b border-[#2A2A2A] pb-4 lg:flex-row lg:items-start lg:justify-between">
 				<div>
-					<p className="text-[15px] font-semibold tracking-[0.16em] text-[#7a7a7a]">ACCOUNT SNAPSHOT</p>
+					<p className="text-[15px] font-semibold tracking-[0.16em] text-[#7a7a7a]">계정 스냅샷</p>
 					<h4 className="mt-2 text-[20px] font-semibold text-white">{title}</h4>
 					<p className="mt-1 text-sm text-[#A0A0A0]">{subtitle}</p>
 				</div>
@@ -198,15 +198,15 @@ const AccountBalancePanel = ({
 
 					<div className="mt-4 grid gap-3 lg:grid-cols-4">
 						<div className="rounded-md border border-[#303030] bg-[#0F0F0F] px-4 py-3">
-							<p className="text-[11px] font-medium uppercase tracking-wide text-[#8B8B8B]">Asset Mode</p>
+							<p className="text-[11px] font-medium uppercase tracking-wide text-[#8B8B8B]">자산 모드</p>
 							<p className="mt-2 text-sm font-semibold text-white">{accountRiskCurrent?.accountModeLabel || accountRiskCurrent?.accountMode || '-'}</p>
 						</div>
 						<div className="rounded-md border border-[#303030] bg-[#0F0F0F] px-4 py-3">
-							<p className="text-[11px] font-medium uppercase tracking-wide text-[#8B8B8B]">Position Mode</p>
+							<p className="text-[11px] font-medium uppercase tracking-wide text-[#8B8B8B]">포지션 모드</p>
 							<p className="mt-2 text-sm font-semibold text-white">{accountRiskCurrent?.positionModeLabel || accountRiskCurrent?.positionMode || '-'}</p>
 						</div>
 						<div className="rounded-md border border-[#303030] bg-[#0F0F0F] px-4 py-3">
-							<p className="text-[11px] font-medium uppercase tracking-wide text-[#8B8B8B]">Last Ready</p>
+							<p className="text-[11px] font-medium uppercase tracking-wide text-[#8B8B8B]">마지막 준비 확인</p>
 							<p className="mt-2 text-sm font-semibold text-white">
 								{formatDateTime(runtimeHealth?.lastReadyAt || accountRiskCurrent?.capturedAt)}
 							</p>
