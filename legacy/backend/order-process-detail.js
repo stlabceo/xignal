@@ -14,6 +14,28 @@ const normalizeSignalType = (value) =>
 const sumRealizedPnl = (rows = []) =>
   (rows || []).reduce((sum, row) => sum + toNumber(row?.realizedPnl, 0), 0);
 
+const sumEntryNotional = (rows = [], positionSide = null) => {
+  const normalizedSide = positionSide ? String(positionSide).trim().toUpperCase() : null;
+  return (rows || [])
+    .filter((row) => {
+      const eventType = String(row?.eventType || "").trim().toUpperCase();
+      if (!eventType.includes("ENTRY")) {
+        return false;
+      }
+      if (!normalizedSide) {
+        return true;
+      }
+      return String(row?.positionSide || "").trim().toUpperCase() === normalizedSide;
+    })
+    .reduce((sum, row) => {
+      const fillValue = Math.abs(toNumber(row?.fillValue, 0));
+      if (fillValue > 0) {
+        return sum + fillValue;
+      }
+      return sum + Math.abs(toNumber(row?.fillQty, 0) * toNumber(row?.fillPrice, 0));
+    }, 0);
+};
+
 const countLedgerEvents = (rows = [], eventType) => {
   const normalizedEventType = String(eventType || "").trim().toUpperCase();
   return (rows || []).filter(
@@ -33,6 +55,19 @@ const sumOpenCostBySide = (rows = [], positionSide) => {
   return (rows || [])
     .filter((row) => String(row?.positionSide || "").trim().toUpperCase() === normalizedSide)
     .reduce((sum, row) => sum + toNumber(row?.openCost, 0), 0);
+};
+
+const sumOpenCost = (rows = [], positionSide = null) =>
+  positionSide
+    ? sumOpenCostBySide(rows, positionSide)
+    : (rows || []).reduce((sum, row) => sum + toNumber(row?.openCost, 0), 0);
+
+const resolveActualEntryNotional = ({ cycleLedgerRows = [], snapshotRows = [], positionSide = null } = {}) => {
+  const ledgerEntryNotional = sumEntryNotional(cycleLedgerRows, positionSide);
+  if (ledgerEntryNotional > 0) {
+    return ledgerEntryNotional;
+  }
+  return sumOpenCost(snapshotRows, positionSide);
 };
 
 const toCompactOrderId = (value) => {
@@ -200,6 +235,11 @@ const buildAlgorithmOrderProcessDetail = ({
   const entryPrice = toNumber(decorated?.entryPrice, 0);
   const openQty = toNumber(decorated?.openQty, 0);
   const positionSide = direction === "SELL" ? "SHORT" : "LONG";
+  const actualEntryNotional = resolveActualEntryNotional({
+    cycleLedgerRows,
+    snapshotRows,
+    positionSide,
+  });
   const lineageLines = [
     buildSnapshotBasisLabel(snapshotRows, positionSide),
     ...buildEntryLineage(cycleLedgerRows, positionSide),
@@ -216,7 +256,9 @@ const buildAlgorithmOrderProcessDetail = ({
       toNumber(decorated?.targetTakeProfitPrice, 0) > 0
         ? toNumber(decorated?.targetTakeProfitPrice, 0)
         : null,
-    tradeAmount: toNumber(decorated?.tradeAmount, 0),
+    tradeAmount: actualEntryNotional > 0 ? actualEntryNotional : null,
+    actualEntryNotional: actualEntryNotional > 0 ? actualEntryNotional : null,
+    configuredTradeAmount: toNumber(decorated?.tradeAmount, 0) || null,
     stopConditionLabel: decorated?.stopConditionLabel || "-",
     unrealizedPnl: calculateUnrealizedPnl({
       signalType: direction,
@@ -261,6 +303,10 @@ const buildGridOrderProcessDetail = ({
     longLineageLines.length > 0 ? `LONG | ${longLineageLines.join(" | ")}` : null,
     shortLineageLines.length > 0 ? `SHORT | ${shortLineageLines.join(" | ")}` : null,
   ].filter(Boolean);
+  const actualEntryNotional = resolveActualEntryNotional({
+    cycleLedgerRows,
+    snapshotRows,
+  });
 
   return {
     symbol: decorated?.symbol || targetRow?.symbol || null,
@@ -268,7 +314,9 @@ const buildGridOrderProcessDetail = ({
     overallStatusLabel: decorated?.userOverallStatusLabel || "대기중",
     buyStatusLabel: decorated?.longPositionStatusLabel || "Ready",
     sellStatusLabel: decorated?.shortPositionStatusLabel || "Ready",
-    tradeAmount: toNumber(decorated?.tradeAmount, 0),
+    tradeAmount: actualEntryNotional > 0 ? actualEntryNotional : null,
+    actualEntryNotional: actualEntryNotional > 0 ? actualEntryNotional : null,
+    configuredTradeAmount: toNumber(decorated?.tradeAmount, 0) || null,
     triggerPrice: toNumber(payload?.triggerPrice ?? decorated?.triggerPrice, 0) || null,
     supportPrice: toNumber(payload?.supportPrice ?? decorated?.supportPrice, 0) || null,
     resistancePrice: toNumber(payload?.resistancePrice ?? decorated?.resistancePrice, 0) || null,

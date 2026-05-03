@@ -144,6 +144,82 @@ const isExitLedgerRow = (row = {}) => {
 const getEventTime = (row = {}) =>
   row.tradeTime || row.createdAt || row.updatedAt || row.eventTime || null;
 
+const compareLedgerTime = (a = {}, b = {}) => {
+  const aTime = new Date(getEventTime(a) || 0).getTime();
+  const bTime = new Date(getEventTime(b) || 0).getTime();
+  if (aTime !== bTime) {
+    return aTime - bTime;
+  }
+  return toNumber(a.id) - toNumber(b.id);
+};
+
+const hasOpenQtyAfterEvidence = (row = {}) =>
+  row.openQtyAfter !== null && row.openQtyAfter !== undefined && row.openQtyAfter !== "";
+
+const classifyCyclePnl = (summary, pnl) => {
+  if (pnl > 0) {
+    summary.winCount += 1;
+  } else if (pnl < 0) {
+    summary.lossCount += 1;
+  } else {
+    summary.breakevenCount += 1;
+  }
+  summary.completedCycleCount += 1;
+};
+
+const buildFallbackExitUnitKey = (pid, ledger = {}) =>
+  [
+    pid,
+    ledger.positionSide || "",
+    ledger.sourceClientOrderId || ledger.clientOrderId || "",
+    ledger.sourceOrderId || ledger.orderId || "",
+    ledger.sourceTradeId ? "" : ledger.dedupeKey || ledger.id || "",
+  ].join("|");
+
+const summarizeClosedCycles = ({ pid, ledgers = [] } = {}) => {
+  const summary = {
+    winCount: 0,
+    lossCount: 0,
+    breakevenCount: 0,
+    completedCycleCount: 0,
+    source: "OPEN_QTY_AFTER_CLOSED_CYCLE",
+  };
+  const sideState = new Map();
+  const fallbackExitUnits = new Map();
+  let hasCycleCloseEvidence = false;
+
+  [...(ledgers || [])].sort(compareLedgerTime).forEach((ledger) => {
+    if (!isExitLedgerRow(ledger)) {
+      return;
+    }
+
+    const side = normalizePositionSide(ledger.positionSide) || "UNKNOWN";
+    const state = sideState.get(side) || { pnl: 0, hasExit: false };
+    state.pnl += toNumber(ledger.realizedPnl);
+    state.hasExit = true;
+    sideState.set(side, state);
+
+    if (hasOpenQtyAfterEvidence(ledger)) {
+      hasCycleCloseEvidence = true;
+      if (Math.abs(toNumber(ledger.openQtyAfter)) <= 1e-12) {
+        classifyCyclePnl(summary, state.pnl);
+        sideState.set(side, { pnl: 0, hasExit: false });
+      }
+      return;
+    }
+
+    const fallbackKey = buildFallbackExitUnitKey(pid, ledger);
+    fallbackExitUnits.set(fallbackKey, (fallbackExitUnits.get(fallbackKey) || 0) + toNumber(ledger.realizedPnl));
+  });
+
+  if (!hasCycleCloseEvidence) {
+    summary.source = "EXIT_UNIT_FALLBACK_NO_OPEN_QTY_AFTER";
+    fallbackExitUnits.forEach((pnl) => classifyCyclePnl(summary, pnl));
+  }
+
+  return summary;
+};
+
 const isAtOrAfter = (value, sqlDate) => {
   if (!value) {
     return false;
@@ -178,7 +254,6 @@ const summarizePid = ({ row = {}, category, snapshots = [], ledgers = [] }) => {
   let commission = 0;
   let hasCommissionEvidence = false;
   let lastTradeAt = null;
-  const exitCycles = new Map();
 
   cleanLedgers.forEach((ledger) => {
     const pnl = toNumber(ledger.realizedPnl);
@@ -200,30 +275,9 @@ const summarizePid = ({ row = {}, category, snapshots = [], ledgers = [] }) => {
     if (eventTime && (!lastTradeAt || new Date(eventTime).getTime() > new Date(lastTradeAt).getTime())) {
       lastTradeAt = eventTime;
     }
-    if (isExitLedgerRow(ledger)) {
-      const cycleKey = [
-        pid,
-        ledger.sourceClientOrderId || ledger.clientOrderId || "",
-        ledger.sourceOrderId || ledger.orderId || "",
-        ledger.sourceTradeId ? "" : ledger.dedupeKey || ledger.id || "",
-      ].join("|");
-      const prev = exitCycles.get(cycleKey) || 0;
-      exitCycles.set(cycleKey, prev + pnl);
-    }
   });
 
-  let winCount = 0;
-  let lossCount = 0;
-  let breakevenCount = 0;
-  exitCycles.forEach((pnl) => {
-    if (pnl > 0) {
-      winCount += 1;
-    } else if (pnl < 0) {
-      lossCount += 1;
-    } else {
-      breakevenCount += 1;
-    }
-  });
+  const cycleSummary = summarizeClosedCycles({ pid, ledgers: cleanLedgers });
 
   const enabled = canonicalRuntimeState.getItemEnabled(row);
   const requiresUserAction = Boolean(row.requiresUserAction || row.attentionRequired);
@@ -266,9 +320,11 @@ const summarizePid = ({ row = {}, category, snapshots = [], ledgers = [] }) => {
     realizedPnlToday: toNullableFixed(realizedPnlToday),
     realizedPnl7d: toNullableFixed(realizedPnl7d),
     realizedPnl30d: toNullableFixed(realizedPnl30d),
-    winCount,
-    lossCount,
-    breakevenCount,
+    winCount: cycleSummary.winCount,
+    lossCount: cycleSummary.lossCount,
+    breakevenCount: cycleSummary.breakevenCount,
+    completedCycleCount: cycleSummary.completedCycleCount,
+    winLossSource: cycleSummary.source,
     lastTradeAt,
     displayStatus,
     userStatusLabel: displayStatus,
@@ -283,6 +339,7 @@ const summarizePid = ({ row = {}, category, snapshots = [], ledgers = [] }) => {
       realizedPnlNetSource: hasCommissionEvidence ? "LIVE_LEDGER_MINUS_FEE" : "UNAVAILABLE",
       commissionSource: hasCommissionEvidence ? "LIVE_LEDGER_FEE" : "UNAVAILABLE",
       actualEntryNotionalSource,
+      winLossSource: cycleSummary.source,
       incidentHandling: cleanLedgers.length !== ledgers.length ? "QA_REPLAY_ACCIDENT_EXCLUDED" : "NONE",
     },
   };
@@ -307,9 +364,10 @@ const loadSummaryContext = async ({ uid, category, items = [] } = {}) => {
       [uid, normalizedCategory, ...pids]
     ),
     db.query(
-      `SELECT id, pid, strategyCategory, eventType, sourceClientOrderId, sourceOrderId, sourceTradeId, fillQty, fillPrice, fillValue, fee, dedupeKey, realizedPnl, tradeTime, createdAt
+      `SELECT id, pid, strategyCategory, positionSide, eventType, sourceClientOrderId, sourceOrderId, sourceTradeId, fillQty, fillPrice, fillValue, fee, dedupeKey, realizedPnl, openQtyAfter, tradeTime, createdAt
          FROM live_pid_position_ledger
-        WHERE uid = ? AND LOWER(strategyCategory) = ? AND pid IN (${placeholders})`,
+        WHERE uid = ? AND LOWER(strategyCategory) = ? AND pid IN (${placeholders})
+        ORDER BY tradeTime ASC, createdAt ASC, id ASC`,
       [uid, normalizedCategory, ...pids]
     ),
   ]);
@@ -348,4 +406,5 @@ module.exports = {
   decorateStrategyRows,
   decorateStrategyItem,
   summarizePid,
+  summarizeClosedCycles,
 };
