@@ -14,6 +14,7 @@ const { getExchangeSymbolRuleSummary } = require("./admin-management");
 const { insertBinanceRuntimeEventLog } = require("./binance-runtime-event-log");
 const strategyControlState = require("./strategy-control-state");
 const binanceWriteGuard = require("./binance-write-guard");
+const binanceReadGuard = require("./binance-read-guard");
 const credentialSecrets = require("./credential-secrets");
 let gridEngine = null;
 let policyEngine = null;
@@ -2172,6 +2173,12 @@ const privateFuturesSignedRequest = async (uid, path, params = {}, method = 'GET
         throw error;
     }
 
+    binanceReadGuard.assertPrivateRequestAllowed({
+        uid,
+        endpoint: path,
+        method: normalizedMethod,
+    });
+
     const credentials = await resolveMemberApiCredentials(uid);
     if(!credentials?.appKey || !credentials?.appSecret){
         const error = new Error('futures api credentials not initialized');
@@ -2198,12 +2205,24 @@ const privateFuturesSignedRequest = async (uid, path, params = {}, method = 'GET
             },
         });
 
+        binanceReadGuard.recordPrivateRequestSuccess({
+            uid,
+            endpoint: path,
+            method: normalizedMethod,
+        });
+
         return response.data;
     };
 
     try{
         return await requestOnce();
     }catch(error){
+        binanceReadGuard.recordPrivateRequestFailure({
+            uid,
+            endpoint: path,
+            method: normalizedMethod,
+            error,
+        });
         const info = extractBinanceError(error);
         if(Number(info.code) === -1021){
             await syncFuturesServerTime(true);
@@ -6728,15 +6747,17 @@ exports.getBinanceAccountRiskCurrent = async (uid, options = {}) => {
     let accountInfo = null;
     let hedgeMode = false;
     try{
-        [accountInfo, hedgeMode] = await Promise.all([
-            privateFuturesSignedRequest(uid, '/fapi/v3/account', {}, 'GET'),
-            getBinancePositionMode(uid).catch(() => false),
-        ]);
+        accountInfo = await privateFuturesSignedRequest(uid, '/fapi/v3/account', {}, 'GET');
+        hedgeMode = await getBinancePositionMode(uid).catch(() => false);
     }catch(primaryError){
-        [accountInfo, hedgeMode] = await Promise.all([
-            privateFuturesSignedRequest(uid, '/fapi/v2/account', {}, 'GET'),
-            getBinancePositionMode(uid).catch(() => false),
-        ]);
+        if(String(primaryError?.code || '') === 'BINANCE_PRIVATE_READ_CIRCUIT_OPEN'
+            || String(primaryError?.code || '') === 'BINANCE_UID_PRIVATE_READ_BACKOFF'
+            || Number(primaryError?.response?.status || 0) === 418
+            || Number(primaryError?.response?.status || 0) === 429){
+            throw primaryError;
+        }
+        accountInfo = await privateFuturesSignedRequest(uid, '/fapi/v2/account', {}, 'GET');
+        hedgeMode = await getBinancePositionMode(uid).catch(() => false);
     }
 
     const snapshot = {
@@ -10768,7 +10789,72 @@ const getApiValidationMessageKo = (info = {}, action = null) => {
     return 'Binance API 연결 검증에 실패했습니다. API 권한, IP 제한, Secret Key를 확인해 주세요.';
 };
 
+const getCleanApiValidationMessageKo = (info = {}, action = null) => {
+    const code = String(info.code || '').trim();
+    const rawMessage = String(info.msg || info.message || '').trim();
+    const combined = `${code} ${rawMessage} ${action || ''}`.toUpperCase();
+    if(code === 'API_KEY_MISSING' || code === 'EMPTY_KEYS' || code === '-90021'){
+        return 'API 키를 먼저 등록해 주세요.';
+    }
+    if(code === 'REQUEST_TIMEOUT' || combined.includes('TIMEOUT') || combined.includes('ECONNABORTED')){
+        return '요청 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.';
+    }
+    if(code === 'BINANCE_PRIVATE_READ_CIRCUIT_OPEN' || code === 'BINANCE_UID_PRIVATE_READ_BACKOFF'){
+        return 'Binance API 요청 제한 상태입니다. 제한 시간이 끝난 뒤 다시 검증해 주세요.';
+    }
+    if(code === '-1021'){
+        return 'Binance 서버 시간과 로컬 시간이 맞지 않습니다. 잠시 후 다시 시도해 주세요.';
+    }
+    if(code === '-2015' || combined.includes('INVALID API-KEY') || combined.includes('IP')){
+        return 'Binance API 연결 검증에 실패했습니다. API 권한, IP 제한, Secret Key를 확인해 주세요.';
+    }
+    if(combined.includes('PERMISSION') || combined.includes('FUTURES')){
+        return '선물 계정 정보를 읽을 수 없습니다. Futures 권한을 확인해 주세요.';
+    }
+    return 'Binance API 연결 검증에 실패했습니다. API 권한, IP 제한, Secret Key를 확인해 주세요.';
+};
+
+const getApiValidationMessageKoSafe = (info = {}, action = null) => {
+    const code = String(info.code || '').trim();
+    const rawMessage = String(info.msg || info.message || '').trim();
+    const combined = `${code} ${rawMessage} ${action || ''}`.toUpperCase();
+    if(code === 'OK'){
+        return '\u0042\u0069\u006e\u0061\u006e\u0063\u0065 \u0041\u0050\u0049 \uc5f0\uacb0 \uac80\uc99d\uc5d0 \uc131\uacf5\ud588\uc2b5\ub2c8\ub2e4.';
+    }
+    if(code === 'API_KEY_MISSING' || code === 'EMPTY_KEYS' || code === '-90021'){
+        return '\u0041\u0050\u0049 \ud0a4\ub97c \uba3c\uc800 \ub4f1\ub85d\ud574 \uc8fc\uc138\uc694.';
+    }
+    if(code === 'REQUEST_TIMEOUT' || combined.includes('TIMEOUT') || combined.includes('ECONNABORTED')){
+        return '\uc694\uccad \uc2dc\uac04\uc774 \ucd08\uacfc\ub418\uc5c8\uc2b5\ub2c8\ub2e4. \uc7a0\uc2dc \ud6c4 \ub2e4\uc2dc \uc2dc\ub3c4\ud574 \uc8fc\uc138\uc694.';
+    }
+    if(code === 'BINANCE_PRIVATE_READ_CIRCUIT_OPEN' || code === 'BINANCE_UID_PRIVATE_READ_BACKOFF'){
+        return '\u0042\u0069\u006e\u0061\u006e\u0063\u0065 \u0041\u0050\u0049 \uc694\uccad \uc81c\ud55c \uc0c1\ud0dc\uc785\ub2c8\ub2e4. \uc81c\ud55c \uc2dc\uac04\uc774 \uc9c0\ub09c \ub4a4 \ub2e4\uc2dc \uac80\uc99d\ud574 \uc8fc\uc138\uc694.';
+    }
+    if(code === '-1021'){
+        return '\u0042\u0069\u006e\u0061\u006e\u0063\u0065 \uc11c\ubc84 \uc2dc\uac04\uacfc \ub85c\uceec \uc2dc\uac04\uc774 \ub9de\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4. \uc7a0\uc2dc \ud6c4 \ub2e4\uc2dc \uc2dc\ub3c4\ud574 \uc8fc\uc138\uc694.';
+    }
+    if(code === '-2015' || combined.includes('INVALID API-KEY') || combined.includes('IP')){
+        return '\u0042\u0069\u006e\u0061\u006e\u0063\u0065 \u0041\u0050\u0049 \uc5f0\uacb0 \uac80\uc99d\uc5d0 \uc2e4\ud328\ud588\uc2b5\ub2c8\ub2e4. \u0041\u0050\u0049 \uad8c\ud55c, \u0049\u0050 \uc81c\ud55c, \u0053\u0065\u0063\u0072\u0065\u0074 \u004b\u0065\u0079\ub97c \ud655\uc778\ud574 \uc8fc\uc138\uc694.';
+    }
+    if(combined.includes('PERMISSION') || combined.includes('FUTURES')){
+        return '\uc120\ubb3c \uacc4\uc815 \uc815\ubcf4\ub97c \uc77d\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4. \u0046\u0075\u0074\u0075\u0072\u0065\u0073 \uad8c\ud55c\uc744 \ud655\uc778\ud574 \uc8fc\uc138\uc694.';
+    }
+    return '\u0042\u0069\u006e\u0061\u006e\u0063\u0065 \u0041\u0050\u0049 \uc5f0\uacb0 \uac80\uc99d\uc5d0 \uc2e4\ud328\ud588\uc2b5\ub2c8\ub2e4. \u0041\u0050\u0049 \uad8c\ud55c, \u0049\u0050 \uc81c\ud55c, \u0053\u0065\u0063\u0072\u0065\u0074 \u004b\u0065\u0079\ub97c \ud655\uc778\ud574 \uc8fc\uc138\uc694.';
+};
+
 const validateProvidedBinanceKeysReadOnly = async (appKey, appSecret) => {
+    if(!appKey || !appSecret){
+        const messageKo = getApiValidationMessageKoSafe({ code: 'API_KEY_MISSING' });
+        return {
+            ok: false,
+            code: 'API_KEY_MISSING',
+            status: 'API_KEY_MISSING',
+            action: 'register_credentials',
+            messageKo,
+            message: messageKo,
+            secretReturned: false,
+        };
+    }
     if(!appKey || !appSecret){
         return {
             ok: false,
@@ -10782,6 +10868,11 @@ const validateProvidedBinanceKeysReadOnly = async (appKey, appSecret) => {
     }
 
     try{
+        binanceReadGuard.assertPrivateRequestAllowed({
+            uid: 'validation',
+            endpoint: '/fapi/v3/account',
+            method: 'GET',
+        });
         const revealedSecret = credentialSecrets.revealSecret(appSecret);
         await syncFuturesServerTime(false).catch(() => {});
         const signedQuery = buildSignedQuery(revealedSecret, {
@@ -10797,6 +10888,22 @@ const validateProvidedBinanceKeysReadOnly = async (appKey, appSecret) => {
             },
         });
 
+        binanceReadGuard.recordPrivateRequestSuccess({
+            uid: 'validation',
+            endpoint: '/fapi/v3/account',
+            method: 'GET',
+        });
+        const successMessageKo = getApiValidationMessageKoSafe({ code: 'OK', message: 'connected' });
+        return {
+            ok: true,
+            code: 'OK',
+            status: 'CONNECTED',
+            messageKo: successMessageKo,
+            message: successMessageKo,
+            futuresAccountRead: Boolean(response?.data),
+            secretReturned: false,
+        };
+        const messageKo = 'Binance API 연결 검증에 성공했습니다.';
         return {
             ok: true,
             code: 'OK',
@@ -10807,11 +10914,21 @@ const validateProvidedBinanceKeysReadOnly = async (appKey, appSecret) => {
             secretReturned: false,
         };
     }catch(error){
+        binanceReadGuard.recordPrivateRequestFailure({
+            uid: 'validation',
+            endpoint: '/fapi/v3/account',
+            method: 'GET',
+            error,
+        });
         const info = extractBinanceError(error);
-        const action = classifyBinanceError(info.code);
+        const guardCode = error?.code === 'BINANCE_PRIVATE_READ_CIRCUIT_OPEN'
+            || error?.code === 'BINANCE_UID_PRIVATE_READ_BACKOFF'
+            ? error.code
+            : null;
+        const action = classifyBinanceError(guardCode || info.code);
         const isTimeout = error?.code === 'ECONNABORTED' || /timeout/i.test(String(error?.message || ''));
-        const code = isTimeout ? 'REQUEST_TIMEOUT' : info.code;
-        const messageKo = getApiValidationMessageKo({ ...info, code }, action);
+        const code = guardCode || (isTimeout ? 'REQUEST_TIMEOUT' : info.code);
+        const messageKo = getApiValidationMessageKoSafe({ ...info, code }, action);
         return {
             ok: false,
             code,
@@ -10868,6 +10985,8 @@ exports.validateMemberApiKeys = async (appKey, appSecret) => {
         };
     }
 }
+
+exports.getBinanceReadGuardSnapshot = () => binanceReadGuard.getStateSnapshot();
 
 exports.refreshMemberApi = async (uid, appKey, appSecret) => {
     if(!uid || !appKey || !appSecret){

@@ -1,0 +1,301 @@
+{
+  "finalClassification": "TWO_UID_LIVEQA_REAUDIT_BLOCKED_BY_BINANCE_418",
+  "whyPreviousAuditWasIncomplete": [
+    "run-all-live-readonly previously failed while Binance signed read was returning HTTP 418",
+    "W1 lifecycle could not be closed against Binance allOrders/userTrades/openOrders/openAlgoOrders",
+    "UID147 had previously reported Binance-open/local-flat exposure and PID991503 local GRID_TP PARTIAL reservation mismatch",
+    "Grid stats TradingView payloads were still being rejected"
+  ],
+  "userManualCleanupRecap": {
+    "userReported": "All Binance positions manually closed and all PIDs OFF for both accounts",
+    "dbPidOffVerification": "PASS",
+    "binanceApiCleanVerification": "BLOCKED_BY_418_PUBLIC_PROBE"
+  },
+  "webLoginVsApiRecoveryVerdict": {
+    "webLogin": "USER_REPORTED_AVAILABLE",
+    "publicApiProbe": "HTTP_418",
+    "signedApiProbe": "NOT_RUN_AFTER_PUBLIC_418",
+    "privateReadsPaused": true
+  },
+  "rateLimitTimeline": {
+    "first429TimeKst": "NOT_FOUND_IN_LOCAL_LOGS",
+    "first418TimeKst": "2026-05-03 local log line 511254, exact KST not emitted in line",
+    "latest418TimeKst": "2026-05-03 11:05:21 KST public /fapi/v1/time probe returned HTTP_418",
+    "retryAfterHeaderPresent": "NO_LOCAL_EVIDENCE",
+    "retryAfterSeconds": null,
+    "retryAfterUntilKst": null,
+    "triggerEndpointEvidence": "/fapi/v3/account via getBinanceAccountRiskCurrent",
+    "triggerCallsite": "legacy/backend/coin.js privateFuturesSignedRequest -> getBinanceAccountRiskCurrent -> routes/admin.js:6105/6180",
+    "duplicatePattern": "two concurrent admin risk/readiness calls reached the same private account read path"
+  },
+  "endpointCallCount": [
+    {
+      "endpoint": "/fapi/v1/time",
+      "publicPrivate": "public",
+      "uid": null,
+      "callCountThisReopen": 1,
+      "result": "HTTP_418"
+    },
+    {
+      "endpoint": "/fapi/v3/account",
+      "publicPrivate": "private",
+      "uid": "147/154",
+      "callCountThisReopen": 0,
+      "result": "NOT_RUN_AFTER_PUBLIC_418"
+    },
+    {
+      "endpoint": "positionRisk/openOrders/openAlgoOrders/allOrders/userTrades",
+      "publicPrivate": "private",
+      "uid": "147/154",
+      "callCountThisReopen": 0,
+      "result": "HARD_BLOCKED_UNTIL_418_CLEARS"
+    }
+  ],
+  "rateGuardCircuitBreaker": {
+    "implemented": true,
+    "files": [
+      "legacy/backend/binance-read-guard.js",
+      "legacy/backend/coin.js",
+      "legacy/backend/tools/qa/qa-binance.js",
+      "legacy/backend/tools/qa/binance-read-guard-static-test.js"
+    ],
+    "features": {
+      "perRunCallCounter": true,
+      "perEndpointCallCounter": true,
+      "uidCacheInQaBinance": true,
+      "symbolWindowCacheInQaBinance": true,
+      "positionRiskCache": true,
+      "openOrdersCache": true,
+      "openAlgoOrdersCache": true,
+      "conservativeSequentialAccountRisk": true,
+      "429Backoff": true,
+      "418CircuitBreaker": true,
+      "retryAfterRespect": true,
+      "privateReadHardBlockWhile418Active": true
+    },
+    "mock429Backoff": "PASS",
+    "mock418CircuitBreaker": "PASS"
+  },
+  "accountUidMapping": [
+    {
+      "account": "tmdtka1",
+      "uid": 147,
+      "apiCredentialsPresent": true
+    },
+    {
+      "account": "jhkim",
+      "uid": 154,
+      "apiCredentialsPresent": true
+    },
+    {
+      "account": "Codex-created artifact",
+      "uid": 149,
+      "usedAsSecondUid": false,
+      "apiCredentialsPresent": false
+    }
+  ],
+  "allPidOffVerification": {
+    "uid147": {
+      "enabledSignalCount": 0,
+      "enabledGridCount": 0,
+      "latestOffAuditUtcRange": "2026-05-03T01:25:44Z..2026-05-03T01:26:03Z"
+    },
+    "uid154": {
+      "enabledSignalCount": 0,
+      "enabledGridCount": 0,
+      "latestOffAuditUtcRange": "2026-05-03T01:24:07Z..2026-05-03T01:24:37Z"
+    }
+  },
+  "analysisWindows": [
+    {
+      "window": "W0 broad",
+      "startKst": "2026-05-02 00:00:00",
+      "endKst": "2026-05-03 11:05:21",
+      "purpose": "full weekend 2UID Live QA inventory"
+    },
+    {
+      "window": "W1 liveqa",
+      "startKst": "2026-05-02 10:30:00",
+      "endKst": "2026-05-03 10:24:00",
+      "purpose": "live-write session lifecycle"
+    },
+    {
+      "window": "W2 cleanup",
+      "startKst": "2026-05-03 10:24:00",
+      "endKst": "2026-05-03 11:05:21",
+      "purpose": "manual cleanup/OFF convergence"
+    }
+  ],
+  "w1OnStrategyInventory": {
+    "uid147": {
+      "signal": [991744, 991745, 991746, 991747, 991748, 991749, 991750, 991751, 991752, 991753],
+      "grid": [991499, 991500, 991501, 991502, 991503, 991504]
+    },
+    "uid154": {
+      "signal": [992565, 992566, 992567, 992568, 992569, 992570, 992571, 992572],
+      "grid": [992316, 992317, 992318, 992319]
+    }
+  },
+  "webhookSummary": {
+    "dbReconstructed": true,
+    "matchedTradingTargetsObserved": true,
+    "unmatchedSmokeNotProcessedAsStrategy": true,
+    "statsPayloadMisroutedToTrading": "NOT_OBSERVED_IN_DB_SUMMARY",
+    "notableIgnored": ["RUNTIME_NOT_READY", "GRID_ACTIVE_IGNORED", "NO_MATCHING_STRATEGY", "INVALID_PAYLOAD"]
+  },
+  "orderFillSummaryFromLocalLedger": {
+    "dbReconstructed": true,
+    "binanceCrossCheck": "BLOCKED_BY_418",
+    "closedWithEntryGreaterThanExitCount": [
+      "uid147 grid 991499 XRPUSDT SHORT",
+      "uid147 grid 991501 XRPUSDT LONG",
+      "uid147 signal 991744 PUMPUSDT LONG",
+      "uid147 signal 991745 PUMPUSDT SHORT",
+      "uid147 signal 991747 XRPUSDT LONG",
+      "uid147 signal 991748 XRPUSDT LONG",
+      "uid147 signal 991753 PUMPUSDT SHORT",
+      "uid154 signal 992566 XRPUSDT SHORT",
+      "uid154 signal 992568 PUMPUSDT LONG"
+    ],
+    "canonicalMeaning": "Local DB indicates some cycles were closed by EXCHANGE_FLAT_LOCAL_STALE_FLATTEN or flat reconcile paths, but Binance allOrders/userTrades evidence cannot be rechecked while API is 418."
+  },
+  "protectionMatrix": {
+    "currentBinanceProtectionRead": "BLOCKED_BY_418",
+    "localActiveReservation": {
+      "uid": 147,
+      "pid": 991503,
+      "category": "grid",
+      "symbol": "PUMPUSDT",
+      "side": "LONG",
+      "kind": "GRID_TP",
+      "status": "PARTIAL",
+      "reservedQty": "14318",
+      "filledQty": "13668",
+      "clientOrderId": "GTP_L_147_991503_09952706",
+      "actualOrderId": "4254544316",
+      "verdict": "LOCAL_STALE_OR_MISSING_BINANCE_MATCH_NEEDS_API_RECHECK"
+    }
+  },
+  "splitTpLifecycle": {
+    "localLedgerEvidencePresent": true,
+    "binanceTradeUnitCrossCheck": "BLOCKED_BY_418",
+    "verdict": "NOT_CLOSED_CANONICALLY_UNTIL_BINANCE_EVIDENCE_AVAILABLE"
+  },
+  "gridLifecycle": {
+    "dbCurrentRows": "all target grid PIDs enabled=N with IDLE legs after manual OFF",
+    "pid991503": "ENDED/MANUAL_OFF locally but retains one PARTIAL GRID_TP reservation",
+    "oneSideOrderUserObservation": "user manually reported open grid order was canceled and current protection was normal before full manual cleanup",
+    "canonicalVerdict": "NEEDS_API_RECHECK_AFTER_418 before local terminalization"
+  },
+  "manualCleanupLocalConvergence": {
+    "executedByCodex": false,
+    "reason": "Binance API is still HTTP_418, so owner-clear/manual cleanup evidence cannot be read from Binance allOrders/userTrades/openAlgoOrders.",
+    "allowedNextActionAfter418Clears": "low-rate bulk clean gate; if PID991503 order is terminal/canceled or exchange flat with no active protection, perform controlled local reservation terminalization with audit"
+  },
+  "trackRecordPidTableAdminProjection": {
+    "estimatedPnl": "a703c6c added normalized public price lookup/midpoint fallback; not browser-smoked in this reopen due 418 containment focus",
+    "trackRecordCompleted": "DB shows closed cycles with entryFillCount>exitFillCount; these must not be rendered as clean completed fake 0.00% without Binance exit evidence",
+    "trackRecordOngoing": "current DB openQty is 0 for UID147/154; current ongoing empty can be normal after manual cleanup",
+    "confirmNeeded": "current unresolved local reservation PID991503 should remain review/current issue until Binance evidence confirms terminalization"
+  },
+  "gridStats400": {
+    "recentRejectedCount48h": 7,
+    "rootCause": "TradingView payload uses TP keys like .4/.5/.9 and may send null metrics for no-data periods; parser only accepted 0.4 style and rejected null-period bestcase.",
+    "fix": "parser now accepts leading-dot TP keys and treats present null metrics as no-data zero while preserving missing-field validation errors",
+    "actualRejectedPayloadRetest": "PASS 7/7 accepted, each expands to 60 metric rows and 5 bestcase rows",
+    "routeDispatchSeparation": "stats parser code path does not import order dispatch"
+  },
+  "a703c6cCanonicalReview": [
+    {
+      "file": "legacy/backend/coin.js",
+      "verdict": "CANONICAL_SAFE_WITH_ADDITIONAL_GUARD_APPLIED",
+      "reason": "read failure no longer coerces exchange qty to zero; this reopen adds circuit breaker and sequential account risk read"
+    },
+    {
+      "file": "legacy/backend/grid-engine.js",
+      "verdict": "CANONICAL_SAFE",
+      "reason": "grid exchange-flat convergence/truth sync is blocked when exchange read failed"
+    },
+    {
+      "file": "legacy/backend/routes/admin.js",
+      "verdict": "NEEDS_RUNTIME_RECHECK_AFTER_418",
+      "reason": "resolved historical issues are excluded, but current PID991503 reservation should remain actionable until Binance evidence is available"
+    },
+    {
+      "file": "legacy/frontend/Xignal/web/src/pages/trading/estimatedPnl.js",
+      "verdict": "CANONICAL_SAFE",
+      "reason": "estimated PnL uses normalized market symbols and price map fallback, not private signed reads"
+    }
+  ],
+  "validation": {
+    "nodeCheck": "PASS",
+    "mock429Backoff": "PASS",
+    "mock418CircuitBreaker": "PASS",
+    "publicPriceFeedCheck": "BLOCKED_BY_PUBLIC_BINANCE_418_FOR_BINANCE_PUBLIC_ENDPOINT; source separation patched in frontend prior commit",
+    "apiRecoveryProbe": "PUBLIC_PROBE_HTTP_418_SIGNED_PROBES_NOT_RUN",
+    "w1LifecycleReconstruction": "DB_LOCAL_RECONSTRUCTED_BINANCE_CROSSCHECK_BLOCKED_BY_418",
+    "lowRateCleanGate": "NOT_RUN_DUE_PUBLIC_418",
+    "localConvergence": "NOT_EXECUTED_NO_BINANCE_EVIDENCE",
+    "gridStatsParser": "PASS",
+    "statsRouteSmoke": "PARSER_SMOKE_PASS; POST_NOT_SENT_TO_AVOID_MUTATION",
+    "trackRecordSmoke": "NOT_RUN_TO_AVOID_ADMIN_PRIVATE_READ_PATH_WHILE_418_ACTIVE",
+    "userAdminProjectionSmoke": "NOT_RUN_TO_AVOID_ADMIN_PRIVATE_READ_PATH_WHILE_418_ACTIVE",
+    "runAllLiveReadonly": "NOT_RUN_WHILE_418_ACTIVE"
+  },
+  "problemCategoryMapping": [
+    {
+      "category": "BINANCE_418_READ_LIMIT",
+      "affected": "all Binance API reads from current IP",
+      "severity": "P0",
+      "userActionRequired": true,
+      "fixRequired": "guard applied; wait/probe only after ban expires"
+    },
+    {
+      "category": "QA_PRIVATE_API_RATE_GUARD_GAP",
+      "affected": "runtime account risk and QA read-only harness",
+      "severity": "P0",
+      "userActionRequired": false,
+      "fixRequired": "fixed in source"
+    },
+    {
+      "category": "LOCAL_OPEN_BINANCE_FLAT",
+      "affected": "post-manual cleanup cannot be verified due 418",
+      "severity": "P0",
+      "userActionRequired": true,
+      "fixRequired": "low-rate API recheck after 418 clears"
+    },
+    {
+      "category": "PROTECTION_RESIZE_OR_ORPHAN_CLEANUP_FAILURE",
+      "affected": "uid147 pid991503 GRID_TP PARTIAL reservation",
+      "severity": "P0/P1",
+      "userActionRequired": true,
+      "fixRequired": "controlled local terminalization only after Binance evidence"
+    },
+    {
+      "category": "GRID_STATS_400_CONTRACT",
+      "affected": "TradingView stats payloads",
+      "severity": "P1",
+      "userActionRequired": false,
+      "fixRequired": "fixed in source"
+    },
+    {
+      "category": "TRACK_RECORD_PNL_PERCENT_BROKEN",
+      "affected": "cycles with entryFillCount > exitFillCount",
+      "severity": "P1",
+      "userActionRequired": false,
+      "fixRequired": "do not mark evidence-poor flat-local-stale cycles as clean completed until Binance exit evidence exists"
+    }
+  ],
+  "gitStatus": {
+    "selectedCommitCreated": "PENDING",
+    "qaConfigLocalStaged": false,
+    "push": false,
+    "secretsStaged": false
+  },
+  "exactUserActionRequired": [
+    "Do not trigger further Binance API-heavy reads until 418 clears.",
+    "After the IP ban clears, run one guarded low-rate clean gate to verify UID147/UID154 flat/openOrders/openAlgoOrders and PID991503 order terminal state.",
+    "If Binance confirms no active PID991503 order/protection and flat position, approve/perform controlled local reservation terminalization."
+  ],
+  "nextStep": "Keep all PIDs OFF and private reads paused; after public /fapi/v1/time no longer returns 418, run the guarded minimal signed probes and clean gate."
+}

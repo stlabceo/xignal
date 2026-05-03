@@ -66,11 +66,16 @@ const normalizeTpKey = (value) => {
 const tpKeyCandidates = (tp) => {
   const normalized = normalizeTpKey(tp);
   const numeric = toNumber(normalized);
+  const decimalWithoutLeadingZero =
+    numeric != null && Math.abs(numeric) > 0 && Math.abs(numeric) < 1
+      ? `.${String(numeric.toFixed(4)).replace(/^0\./, "").replace(/0+$/, "")}`
+      : null;
   return [
     String(tp),
     normalized,
     numeric == null ? null : numeric.toFixed(1),
     numeric == null ? null : String(numeric),
+    decimalWithoutLeadingZero,
   ].filter((value, index, values) => value && values.indexOf(value) === index);
 };
 
@@ -81,6 +86,28 @@ const readMetricValue = (cell = {}, keys = []) => {
     }
   }
   return null;
+};
+
+const readMetricValueWithPresence = (cell = {}, keys = []) => {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(cell, key)) {
+      return {
+        present: true,
+        value: cell[key],
+      };
+    }
+  }
+  return {
+    present: false,
+    value: null,
+  };
+};
+
+const toStatsMetricNumber = (value) => {
+  if (value == null) {
+    return 0;
+  }
+  return toNumber(value);
 };
 
 const getPeriodMatrix = (payload = {}, periodKey) => {
@@ -116,29 +143,49 @@ const getTpCell = (periodMatrix = {}, tp) => {
   return null;
 };
 
+const isUsableBestcaseCell = (cell) => {
+  if (!cell || typeof cell !== "object") {
+    return false;
+  }
+  const tp = toNumber(cell.tp ?? cell.tpPct ?? cell.takeProfit);
+  if (tp == null) {
+    return false;
+  }
+  const winRaw = readMetricValueWithPresence(cell, ["winrate", "winRate"]);
+  const netRaw = readMetricValueWithPresence(cell, ["net_profit", "netProfit", "netPnl"]);
+  return winRaw.present && netRaw.present
+    && toStatsMetricNumber(winRaw.value) != null
+    && toStatsMetricNumber(netRaw.value) != null;
+};
+
 const getBestcaseCell = (payload = {}, periodKey) => {
   const direct = payload.bestcase?.[periodKey] || payload.bestCase?.[periodKey];
-  if (direct && typeof direct === "object") {
+  if (isUsableBestcaseCell(direct)) {
     return direct;
   }
   const period = payload.periods?.[periodKey];
-  if (period?.bestcase && typeof period.bestcase === "object") {
+  if (isUsableBestcaseCell(period?.bestcase)) {
     return period.bestcase;
   }
-  if (period?.bestCase && typeof period.bestCase === "object") {
+  if (isUsableBestcaseCell(period?.bestCase)) {
     return period.bestCase;
   }
   const matrix = getPeriodMatrix(payload, periodKey);
   if (matrix && typeof matrix === "object") {
     return Object.entries(matrix).reduce((best, [tpKey, cell]) => {
-      const netProfit = toNumber(readMetricValue(cell, ["net_profit", "netProfit", "netPnl"]));
+      const netRaw = readMetricValueWithPresence(cell, ["net_profit", "netProfit", "netPnl"]);
+      if (!netRaw.present) {
+        return best;
+      }
+      const netProfit = toStatsMetricNumber(netRaw.value);
       if (netProfit == null) {
         return best;
       }
       if (!best || netProfit > best.net_profit) {
+        const winRaw = readMetricValueWithPresence(cell, ["winrate", "winRate"]);
         return {
           tp: toNumber(cell.tpPct ?? cell.tp ?? cell.takeProfit ?? normalizeTpKey(tpKey)),
-          winrate: toNumber(readMetricValue(cell, ["winrate", "winRate"])),
+          winrate: winRaw.present ? toStatsMetricNumber(winRaw.value) : null,
           net_profit: netProfit,
         };
       }
@@ -196,10 +243,12 @@ const validateGridStatsPayload = (payload = {}) => {
         errors.push(`MATRIX_CELL_MISSING:${periodKey}:${tp}`);
         continue;
       }
-      if (toNumber(readMetricValue(cell, ["winrate", "winRate"])) == null) {
+      const winRaw = readMetricValueWithPresence(cell, ["winrate", "winRate"]);
+      const netRaw = readMetricValueWithPresence(cell, ["net_profit", "netProfit", "netPnl"]);
+      if (!winRaw.present || toStatsMetricNumber(winRaw.value) == null) {
         errors.push(`MATRIX_WINRATE_INVALID:${periodKey}:${tp}`);
       }
-      if (toNumber(readMetricValue(cell, ["net_profit", "netProfit", "netPnl"])) == null) {
+      if (!netRaw.present || toStatsMetricNumber(netRaw.value) == null) {
         errors.push(`MATRIX_NET_PROFIT_INVALID:${periodKey}:${tp}`);
       }
     }
@@ -211,10 +260,12 @@ const validateGridStatsPayload = (payload = {}) => {
       if (toNumber(best.tp ?? best.tpPct ?? best.takeProfit) == null) {
         errors.push(`BESTCASE_TP_INVALID:${periodKey}`);
       }
-      if (toNumber(readMetricValue(best, ["winrate", "winRate"])) == null) {
+      const bestWinRaw = readMetricValueWithPresence(best, ["winrate", "winRate"]);
+      const bestNetRaw = readMetricValueWithPresence(best, ["net_profit", "netProfit", "netPnl"]);
+      if (!bestWinRaw.present || toStatsMetricNumber(bestWinRaw.value) == null) {
         errors.push(`BESTCASE_WINRATE_INVALID:${periodKey}`);
       }
-      if (toNumber(readMetricValue(best, ["net_profit", "netProfit", "netPnl"])) == null) {
+      if (!bestNetRaw.present || toStatsMetricNumber(bestNetRaw.value) == null) {
         errors.push(`BESTCASE_NET_PROFIT_INVALID:${periodKey}`);
       }
     }
@@ -260,8 +311,8 @@ const expandGridStatsMetrics = (payload = {}) => {
         timeframe: base.timeframe,
         periodKey,
         tp: Number(tp),
-        winRate: toNumber(readMetricValue(cell, ["winrate", "winRate"])),
-        netProfit: toNumber(readMetricValue(cell, ["net_profit", "netProfit", "netPnl"])),
+        winRate: toStatsMetricNumber(readMetricValueWithPresence(cell, ["winrate", "winRate"]).value),
+        netProfit: toStatsMetricNumber(readMetricValueWithPresence(cell, ["net_profit", "netProfit", "netPnl"]).value),
         source: base.source,
       });
     }
@@ -285,8 +336,8 @@ const extractGridStatsBestcases = (payload = {}) => {
       timeframe: base.timeframe,
       periodKey,
       bestTp: toNumber(best.tp ?? best.tpPct ?? best.takeProfit),
-      bestWinRate: toNumber(readMetricValue(best, ["winrate", "winRate"])),
-      bestNetProfit: toNumber(readMetricValue(best, ["net_profit", "netProfit", "netPnl"])),
+      bestWinRate: toStatsMetricNumber(readMetricValueWithPresence(best, ["winrate", "winRate"]).value),
+      bestNetProfit: toStatsMetricNumber(readMetricValueWithPresence(best, ["net_profit", "netProfit", "netPnl"]).value),
       source: base.source,
     };
   });

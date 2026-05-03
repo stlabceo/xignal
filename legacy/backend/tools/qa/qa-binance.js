@@ -2,10 +2,26 @@ const axios = require("axios");
 const crypto = require("crypto");
 const { getMember, normalizeSymbol } = require("./qa-db");
 const binanceWriteGuard = require("../../binance-write-guard");
+const binanceReadGuard = require("../../binance-read-guard");
 
 const FUTURES_BASE_URL = "https://fapi.binance.com";
 let futuresServerOffsetMs = 0;
 let futuresServerOffsetSyncedAt = 0;
+const readCache = new Map();
+
+const cacheKey = (...parts) => parts.map((part) => String(part ?? "")).join("|");
+
+const getCached = (key) => {
+  if (readCache.has(key)) {
+    return readCache.get(key);
+  }
+  return null;
+};
+
+const setCached = (key, value) => {
+  readCache.set(key, value);
+  return value;
+};
 
 const syncServerTime = async (force = false) => {
   const now = Date.now();
@@ -72,6 +88,12 @@ const signedRequest = async (uid, path, params = {}, method = "GET") => {
     });
   }
 
+  binanceReadGuard.assertPrivateRequestAllowed({
+    uid,
+    endpoint: path,
+    method: normalizedMethod,
+  });
+
   const credentials = await getCredentials(uid);
   await syncServerTime(false);
 
@@ -90,12 +112,23 @@ const signedRequest = async (uid, path, params = {}, method = "GET") => {
         "X-MBX-APIKEY": credentials.appKey,
       },
     });
+    binanceReadGuard.recordPrivateRequestSuccess({
+      uid,
+      endpoint: path,
+      method: normalizedMethod,
+    });
     return response.data;
   };
 
   try {
     return await requestOnce();
   } catch (error) {
+    binanceReadGuard.recordPrivateRequestFailure({
+      uid,
+      endpoint: path,
+      method: normalizedMethod,
+      error,
+    });
     if (Number(error?.response?.data?.code || 0) === -1021) {
       await syncServerTime(true);
       return await requestOnce();
@@ -107,7 +140,8 @@ const signedRequest = async (uid, path, params = {}, method = "GET") => {
 const signedGet = async (uid, path, params = {}) => signedRequest(uid, path, params, "GET");
 
 const getPositionRisk = async (uid, symbol = null) => {
-  const positions = await signedGet(uid, "/fapi/v2/positionRisk", {});
+  const key = cacheKey("positionRisk", uid);
+  const positions = getCached(key) || setCached(key, await signedGet(uid, "/fapi/v2/positionRisk", {}));
   if (!symbol) {
     return Array.isArray(positions) ? positions : [];
   }
@@ -115,26 +149,53 @@ const getPositionRisk = async (uid, symbol = null) => {
   return (Array.isArray(positions) ? positions : []).filter((item) => item.symbol === normalizedSymbol);
 };
 
-const getOpenOrders = async (uid, symbol = null) =>
-  await signedGet(uid, "/fapi/v1/openOrders", symbol ? { symbol: normalizeSymbol(symbol) } : {});
+const getOpenOrders = async (uid, symbol = null) => {
+  const normalizedSymbol = symbol ? normalizeSymbol(symbol) : "";
+  const allKey = cacheKey("openOrders", uid, "ALL");
+  if (!normalizedSymbol || readCache.has(allKey)) {
+    const rows = readCache.has(allKey)
+      ? getCached(allKey)
+      : setCached(allKey, await signedGet(uid, "/fapi/v1/openOrders", {}));
+    return normalizedSymbol
+      ? (Array.isArray(rows) ? rows : []).filter((item) => item.symbol === normalizedSymbol)
+      : rows;
+  }
+  const key = cacheKey("openOrders", uid, normalizedSymbol);
+  return getCached(key) || setCached(key, await signedGet(uid, "/fapi/v1/openOrders", { symbol: normalizedSymbol }));
+};
 
-const getOpenAlgoOrders = async (uid, symbol = null) =>
-  await signedGet(uid, "/fapi/v1/openAlgoOrders", symbol ? { symbol: normalizeSymbol(symbol) } : {});
+const getOpenAlgoOrders = async (uid, symbol = null) => {
+  const normalizedSymbol = symbol ? normalizeSymbol(symbol) : "";
+  const allKey = cacheKey("openAlgoOrders", uid, "ALL");
+  if (!normalizedSymbol || readCache.has(allKey)) {
+    const rows = readCache.has(allKey)
+      ? getCached(allKey)
+      : setCached(allKey, await signedGet(uid, "/fapi/v1/openAlgoOrders", {}));
+    return normalizedSymbol
+      ? (Array.isArray(rows) ? rows : []).filter((item) => item.symbol === normalizedSymbol)
+      : rows;
+  }
+  const key = cacheKey("openAlgoOrders", uid, normalizedSymbol);
+  return getCached(key) || setCached(key, await signedGet(uid, "/fapi/v1/openAlgoOrders", { symbol: normalizedSymbol }));
+};
 
 const getAllOrders = async (uid, symbol, limit = 50) =>
-  await signedGet(uid, "/fapi/v1/allOrders", {
-    symbol: normalizeSymbol(symbol),
-    limit,
-  });
+  getCached(cacheKey("allOrders", uid, normalizeSymbol(symbol), limit))
+  || setCached(cacheKey("allOrders", uid, normalizeSymbol(symbol), limit), await signedGet(uid, "/fapi/v1/allOrders", {
+      symbol: normalizeSymbol(symbol),
+      limit,
+    }));
 
 const getUserTrades = async (uid, symbol, limit = 50) =>
-  await signedGet(uid, "/fapi/v1/userTrades", {
-    symbol: normalizeSymbol(symbol),
-    limit,
-  });
+  getCached(cacheKey("userTrades", uid, normalizeSymbol(symbol), limit))
+  || setCached(cacheKey("userTrades", uid, normalizeSymbol(symbol), limit), await signedGet(uid, "/fapi/v1/userTrades", {
+      symbol: normalizeSymbol(symbol),
+      limit,
+    }));
 
 const getPositionMode = async (uid) =>
-  await signedGet(uid, "/fapi/v1/positionSide/dual", {});
+  getCached(cacheKey("positionMode", uid))
+  || setCached(cacheKey("positionMode", uid), await signedGet(uid, "/fapi/v1/positionSide/dual", {}));
 
 const getReadOnlyConnectivity = async (uid, symbol = null) => {
   const credentials = await getCredentials(uid);
@@ -215,4 +276,5 @@ module.exports = {
   getUserTrades,
   getPositionMode,
   getReadOnlyConnectivity,
+  getReadGuardSnapshot: () => binanceReadGuard.getStateSnapshot(),
 };
