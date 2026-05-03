@@ -1,30 +1,40 @@
 import React, { useCallback, useState } from 'react';
+import { Link, useNavigate } from 'react-router';
 import { useAuthStore } from '../../store/authState';
-import { useNavigate, Link } from 'react-router';
 import { auth } from '../../services/auth';
 import logo from '../../assets/logo/xignal/logo-white.png';
 import idIcon from '../../assets/icon/id.png';
 import pwIcon from '../../assets/icon/pw.png';
 
-const SignIn = () => {
+const AdminSignIn = () => {
 	const navigate = useNavigate();
-	const { setIsLoggedIn, setIsAdminSession } = useAuthStore();
+	const { setIsLoggedIn, setIsAdminSession, setUserInfo } = useAuthStore();
 	const [userId, setUserId] = useState('');
 	const [password, setPassword] = useState('');
-	const [loginErr, setLoginErr] = useState(false);
+	const [errorMessage, setErrorMessage] = useState('');
 
 	const signIn = useCallback(() => {
-		auth.login({ userId, password }, (res) => {
-			if (res) {
+		setErrorMessage('');
+		auth.adminLogin({ userId, password }, (res) => {
+			if (res?.ok) {
 				setIsLoggedIn(true);
-				setIsAdminSession(false);
-				navigate('/');
+				setIsAdminSession(true);
+				setUserInfo({
+					loginId: res.profile?.mem_id || userId,
+					username: res.profile?.mem_name || '',
+					grade: res.profile?.grade ?? null,
+					livePrice: res.profile?.live_price,
+					paperPrice: res.profile?.price
+				});
+				navigate('/ops-console');
 				return;
 			}
 
-			setLoginErr(true);
+			setIsLoggedIn(false);
+			setIsAdminSession(false);
+			setErrorMessage(res?.message || '관리자 로그인에 실패했습니다.');
 		});
-	}, [navigate, password, setIsAdminSession, setIsLoggedIn, userId]);
+	}, [navigate, password, setIsAdminSession, setIsLoggedIn, setUserInfo, userId]);
 
 	return (
 		<div className="user-select-none flex min-h-screen w-full items-center justify-center bg-[#0F0F0F] bg-center bg-cover bg-no-repeat px-4 py-8">
@@ -32,7 +42,7 @@ const SignIn = () => {
 				<img src={logo} alt="Xignal" className="w-[120px] md:w-[144px]" />
 
 				<div className="flex w-full flex-col rounded-md bg-[#1b1b1b] shadow-2xl shadow-black">
-					<h3 className="border-b border-[#494949] py-3 text-center text-[20px] font-medium text-[#fff] md:text-[22px]">사용자 로그인</h3>
+					<h3 className="border-b border-[#494949] py-3 text-center text-[20px] font-medium text-[#fff] md:text-[22px]">관리자 로그인</h3>
 					<div className="space-y-3.5 px-5 py-6 md:px-7">
 						<div className="relative w-full rounded-sm bg-[#0F0F0F]">
 							<div className="absolute left-3 top-1/2 -translate-y-1/2">
@@ -44,9 +54,9 @@ const SignIn = () => {
 								value={userId}
 								onChange={(event) => {
 									setUserId(event.target.value);
-									setLoginErr(false);
+									setErrorMessage('');
 								}}
-								placeholder="아이디를 입력해 주세요"
+								placeholder="관리자 ID를 입력해 주세요"
 							/>
 						</div>
 
@@ -60,42 +70,27 @@ const SignIn = () => {
 								value={password}
 								onChange={(event) => {
 									setPassword(event.target.value);
-									setLoginErr(false);
+									setErrorMessage('');
 								}}
 								onKeyDown={(event) => {
 									if (event.key === 'Enter') {
 										signIn();
 									}
 								}}
-								placeholder="비밀번호를 입력해 주세요"
+								placeholder="관리자 비밀번호를 입력해 주세요"
 							/>
 						</div>
 
-						{loginErr && <p className="my-0 text-center text-[#FF4E4E]">아이디 또는 비밀번호를 다시 확인해 주세요.</p>}
+						{errorMessage ? <p className="my-0 text-center text-[#FF4E4E]">{errorMessage}</p> : null}
 
-						<div className="flex flex-col">
-							<button type="button" onClick={signIn} className="mt-3 cursor-pointer rounded-sm bg-[#ccc] py-3 text-[16px] font-bold text-[#000] md:text-[18px]">
-								로그인
+						<div className="flex flex-col gap-3">
+							<button type="button" onClick={signIn} className="cursor-pointer rounded-sm bg-[#ccc] py-3 text-[16px] font-bold text-[#000] md:text-[18px]">
+								관리자 로그인
 							</button>
-							<Link to="/signup" className="mt-3 cursor-pointer rounded-sm border border-[#ccc] bg-[#0f0f0f] py-3 text-center text-[16px] font-semibold text-[#ccc] md:text-[18px]">
-								회원가입
+							<Link to="/signin" className="cursor-pointer rounded-sm border border-[#ccc] bg-[#0f0f0f] py-3 text-center text-[16px] font-semibold text-[#ccc] md:text-[18px]">
+								사용자 로그인으로 돌아가기
 							</Link>
 						</div>
-
-						<ul className="space-y-3 py-3 text-[16px] text-[#828282] md:text-[18px]">
-							<li className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-								<span>로그인 정보를 잊으셨나요?</span>
-								<Link to="/forgot-password" className="font-semibold text-[#fff] underline">
-									아이디 / 비밀번호 찾기
-								</Link>
-							</li>
-							<li className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-								<span>운영자 전용 경로</span>
-								<Link to="/ops-signin" className="font-semibold text-[#fff] underline">
-									관리자 로그인
-								</Link>
-							</li>
-						</ul>
 					</div>
 				</div>
 			</div>
@@ -103,4 +98,4 @@ const SignIn = () => {
 	);
 };
 
-export default SignIn;
+export default AdminSignIn;
