@@ -49,7 +49,7 @@ export const MessageModalProvider = ({ children }) => {
 									type="button"
 									className="w-full rounded border border-[#00ad85] py-2 text-[#00ad85] cursor-pointer sm:w-[150px]"
 								>
-									{modalProps.cancelText || 'Cancel'}
+									{modalProps.cancelText || '취소'}
 								</button>
 							)}
 
@@ -60,7 +60,7 @@ export const MessageModalProvider = ({ children }) => {
 									modalProps.danger ? 'bg-red-600' : 'bg-[#0033b2]'
 								} w-full rounded py-2 text-white cursor-pointer sm:w-[150px]`}
 							>
-								{modalProps.confirmText || 'OK'}
+								{modalProps.confirmText || '확인'}
 							</button>
 						</div>
 					</div>

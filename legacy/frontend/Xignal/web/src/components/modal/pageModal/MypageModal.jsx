@@ -1,12 +1,16 @@
 import React from 'react';
 import { DefaultModal } from '../DefaultModal';
 import { useAuthStore } from '../../../store/authState';
+import { auth } from '../../../services/auth';
 
 const MypageModal = ({ isOpen, onClose, className }) => {
-	const { userInfo, setIsLoggedIn } = useAuthStore();
+	const { userInfo, setIsLoggedIn, setIsAdminSession, isAdminSession } = useAuthStore();
 
 	const signout = () => {
+		auth.logout();
 		setIsLoggedIn(false);
+		setIsAdminSession(false);
+		window.location.href = isAdminSession ? '/ops-signin' : '/signin';
 	};
 
 	return (

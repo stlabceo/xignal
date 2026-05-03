@@ -1,28 +1,27 @@
 export const getDateFormat = (date, format) => {
 	if (!date) return '';
 
-	// 혹시 문자열 들어오는 경우 방어적으로 처리해도 좋음
-	if (!(date instanceof Date)) {
-		date = new Date(date);
+	let targetDate = date;
+	if (!(targetDate instanceof Date)) {
+		targetDate = new Date(targetDate);
 	}
 
-	const YYYY = date.getFullYear().toString();
+	if (Number.isNaN(targetDate.getTime())) {
+		return '';
+	}
+
+	const YYYY = targetDate.getFullYear().toString();
 	const YY = YYYY.slice(2, 4);
-
-	const month = (date.getMonth() + 1).toString();
-	const MM = month.length === 1 ? '0' + month : month;
-
-	const D = date.getDate().toString();
-	const DD = D.length === 1 ? '0' + D : D;
-
+	const month = (targetDate.getMonth() + 1).toString();
+	const MM = month.length === 1 ? `0${month}` : month;
+	const dayOfMonth = targetDate.getDate().toString();
+	const DD = dayOfMonth.length === 1 ? `0${dayOfMonth}` : dayOfMonth;
 	const WEEKDAY = ['일', '월', '화', '수', '목', '금', '토'];
-	const day = WEEKDAY[date.getDay()];
-
-	const hour = date.getHours().toString();
-	const hh = hour.length === 1 ? '0' + hour : hour;
-
-	const minutes = date.getMinutes().toString();
-	const mm = minutes.length === 1 ? '0' + minutes : minutes;
+	const day = WEEKDAY[targetDate.getDay()];
+	const hour = targetDate.getHours().toString();
+	const hh = hour.length === 1 ? `0${hour}` : hour;
+	const minute = targetDate.getMinutes().toString();
+	const mm = minute.length === 1 ? `0${minute}` : minute;
 
 	switch (format) {
 		case 'YYYY-MM-DD':
@@ -46,7 +45,7 @@ export const getDateFormat = (date, format) => {
 		case 'YYYY-MM-DD hh:mm':
 			return `${YYYY}-${MM}-${DD} ${hh}:${mm}`;
 		case 'YYYY.MM.DD hh:mm':
-			return `${YYYY}.${MM}.${DD}-${hh}:${mm}`;
+			return `${YYYY}.${MM}.${DD} ${hh}:${mm}`;
 		case 'YYYY년 MM월 DD일':
 			return `${YYYY}년 ${MM}월 ${DD}일`;
 		default:
