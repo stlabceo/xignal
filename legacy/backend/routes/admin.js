@@ -1393,7 +1393,7 @@ const resolveOrderProcessExitMsgIssue = ({ category, msgRows = [] } = {}) => {
     );
 
     if (stalePositionIssue) {
-      return `그리드 안전정리 이슈 / ${normalizeProcessMsgText(stalePositionIssue.msg) || stalePositionIssue.code}`;
+      return `그리드 안전정리 이력 / ${normalizeProcessMsgText(stalePositionIssue.msg) || stalePositionIssue.code}`;
     }
   }
 
@@ -1610,7 +1610,7 @@ const buildOrderProcessIssueMeta = ({
       issueCode: "GRID_RUNTIME_SAFETY_CLEANUP",
       issueCategory: "GRID_RUNTIME",
       issueSource: "GRID_ENGINE",
-      issueLabel: "그리드 안전정리 이슈",
+      issueLabel: "그리드 안전정리 이력",
     });
   }
 
@@ -2398,7 +2398,7 @@ const buildOrderProcessRow = async (targetRow, options = {}) => {
           : null,
     realizedPnl,
     issueReason: currentRisk ? protectionStatus : issueMeta.issueLabel || normalizedStages.problemDetail || null,
-    nextAction: currentRisk ? "현재 포지션/보호주문 정합성 확인" : normalizedStages.abnormal ? "해결된 이력으로 보관" : "없음",
+    nextAction: currentRisk ? "현재 포지션/보호주문 정합성 확인" : normalizedStages.abnormal ? "과거 이력으로 보관" : "없음",
     eventTime: latestOrderEvent.eventTime || latestOrderEvent.createdAt || targetRow.createdAt,
     exitReservationCount: projectionReservationRows.length,
     ledgerFillCount: projectionLedgerRows.length,
@@ -2410,7 +2410,7 @@ const buildOrderProcessRow = async (targetRow, options = {}) => {
       currentRisk
         ? `비정상 / ${issueMeta.issueLabel || normalizedStages.problemDetail || "원인 미상"}`
         : normalizedStages.abnormal
-          ? `해결됨 / ${issueMeta.issueLabel || normalizedStages.problemDetail || "이력"}`
+          ? `이력 보관 / ${issueMeta.issueLabel || normalizedStages.problemDetail || "과거 이벤트"}`
         : suppressLifecycleAttribution && normalizedStages.currentStepLabel
           ? `정상 / ${normalizedStages.currentStepLabel}`
           : viewProjection.summaryText,
@@ -7251,6 +7251,7 @@ router.get("/runtime/binance/order-monitor/overview", async (req, res) => {
     const payload = await adminOrderMonitor.buildAdminOrderMonitor(targetUid, {
       rawLimit,
       symbols,
+      localOnly: req.query.localOnly,
     });
     return res.send(payload);
   } catch (error) {

@@ -143,6 +143,38 @@ const severityForLifecycle = (lifecycleStatus) => {
   return "OK";
 };
 
+const buildSkippedBinanceResult = (name, reason = "LOCAL_ONLY_BINANCE_UNVERIFIED") => ({
+  ok: true,
+  name,
+  data: [],
+  error: null,
+  skipped: true,
+  reason,
+});
+
+const buildLocalOnlyBinanceEvidence = (symbols = []) => ({
+  positionRisk: buildSkippedBinanceResult("positionRisk"),
+  openOrders: buildSkippedBinanceResult("openOrders"),
+  openAlgoOrders: buildSkippedBinanceResult("openAlgoOrders"),
+  perSymbol: (symbols || []).map((symbol) => ({
+    symbol,
+    allOrders: buildSkippedBinanceResult(`allOrders:${symbol}`),
+    userTrades: buildSkippedBinanceResult(`userTrades:${symbol}`),
+  })),
+  sourceStatus: [
+    "positionRisk",
+    "openOrders",
+    "openAlgoOrders",
+    ...(symbols || []).flatMap((symbol) => [`allOrders:${symbol}`, `userTrades:${symbol}`]),
+  ].map((name) => ({
+    name,
+    ok: true,
+    skipped: true,
+    reason: "LOCAL_ONLY_BINANCE_UNVERIFIED",
+    error: null,
+  })),
+});
+
 const buildIssueKey = ({
   uid,
   pid,
@@ -264,6 +296,15 @@ const classifyOrderCycle = ({
   const activeReservations = reservations.filter((row) =>
     ["ACTIVE", "PARTIAL"].includes(String(row.status || "").trim().toUpperCase())
   );
+  const activeTpReservations = activeReservations.filter((row) =>
+    String(row.reservationKind || "").trim().toUpperCase().includes("TP")
+  );
+  const activeStopReservations = activeReservations.filter((row) =>
+    String(row.reservationKind || "").trim().toUpperCase().includes("STOP")
+  );
+  const activeProtectionOrders = rawOrders.filter(isActiveBinanceProtection);
+  const activeTPOrders = activeProtectionOrders.filter((row) => protectionKind(row) === "TP");
+  const activeSTOPOrders = activeProtectionOrders.filter((row) => protectionKind(row) === "STOP");
   const latestOrder = rawOrders[0] || {};
   const latestEntryOrder = rawOrders.find((row) => String(row.inferredIntent || "").includes("ENTRY")) || {};
   const latestExitOrder =
@@ -335,6 +376,14 @@ const classifyOrderCycle = ({
     protectionStatus,
     expectedProtectionCount: currentOpenQty > 0 ? 2 : 0,
     activeProtectionCount: activeReservations.length,
+    localOpenQty: String(currentOpenQty),
+    expectedTP: currentOpenQty > 0 ? 1 : 0,
+    expectedSTOP: currentOpenQty > 0 ? 1 : 0,
+    actualTP: activeTPOrders.length,
+    actualSTOP: activeSTOPOrders.length,
+    localReservationTP: activeTpReservations.length,
+    localReservationSTOP: activeStopReservations.length,
+    protectionMatrixSource: "PID_ORDER_CYCLE",
     exitOrderId: latestExitOrder.orderId || null,
     exitClientOrderId: latestExitOrder.clientOrderId || null,
     exitStatus: latestExitOrder.status || null,
@@ -658,6 +707,65 @@ const buildCurrentRiskBoard = ({ uid, symbols, localRows, binanceEvidence }) => 
   );
 };
 
+const buildLocalOnlyCurrentRiskBoard = ({ uid, symbols, localRows }) => {
+  const activeReservations = localRows.reservations.filter((row) =>
+    ["ACTIVE", "PARTIAL"].includes(String(row.status || "").trim().toUpperCase())
+  );
+
+  return symbols.flatMap((symbol) =>
+    POSITION_SIDES.map((side) => {
+      const snapshots = localRows.snapshots.filter(
+        (row) => normalizeSymbol(row.symbol) === symbol && normalizeSide(row.positionSide) === side
+      );
+      const localOpenQty = snapshots.reduce((sum, row) => sum + abs(row.openQty), 0);
+      const ownerPids = snapshots.filter((row) => abs(row.openQty) > 0).map((row) => row.pid);
+      const reservations = activeReservations.filter(
+        (row) => normalizeSymbol(row.symbol) === symbol && normalizeSide(row.positionSide) === side
+      );
+      const localReservationTP = reservations.filter((row) =>
+        String(row.reservationKind || "").trim().toUpperCase().includes("TP")
+      ).length;
+      const localReservationSTOP = reservations.filter((row) =>
+        String(row.reservationKind || "").trim().toUpperCase().includes("STOP")
+      ).length;
+      const hasOpen = localOpenQty > 0;
+      const hasLocalProtection = reservations.length > 0;
+      const lifecycleStatus = hasOpen
+        ? hasLocalProtection
+          ? "LOCAL_OPEN_PROTECTED_BINANCE_UNVERIFIED"
+          : "LOCAL_OPEN_NO_PROTECTION_BINANCE_UNVERIFIED"
+        : "LOCAL_ONLY_FLAT_BINANCE_UNVERIFIED";
+      const severity = hasOpen && !hasLocalProtection ? "WARN" : "INFO";
+      return {
+        uid,
+        symbol,
+        side,
+        binanceQty: null,
+        localOpenQty: String(localOpenQty),
+        ownerPids: unique(ownerPids || []),
+        activeProtectionCount: 0,
+        expectedProtectionCount: hasOpen ? 2 : 0,
+        localReservationCount: reservations.length,
+        actualTP: 0,
+        actualSTOP: 0,
+        localReservationTP,
+        localReservationSTOP,
+        activeProtectionQty: null,
+        lifecycleStatus,
+        verdict: lifecycleStatus,
+        severity,
+        currentRisk: severity === "WARN",
+        issueReason: hasOpen && !hasLocalProtection
+          ? "Local open projection has no active local TP/STOP reservation; Binance verification is unavailable."
+          : null,
+        nextAction: hasOpen && !hasLocalProtection
+          ? "Verify Binance manually before live-write."
+          : "Local-only view; Binance private verification unavailable.",
+      };
+    })
+  );
+};
+
 const buildRawRows = ({ localRows, binanceEvidence }) => {
   const ledgerRows = localRows.ledgerRows || [];
   const reservationRows = localRows.reservations || [];
@@ -740,23 +848,55 @@ const buildOrderCycles = ({ uid, localRows, rawBinanceOrders }) => {
   return rows.sort((a, b) => new Date(b.lastEventTime || 0).getTime() - new Date(a.lastEventTime || 0).getTime()).slice(0, 120);
 };
 
-const buildProtectionMatrix = ({ uid, currentRiskBoard }) =>
-  currentRiskBoard.map((row) => ({
+const buildProtectionMatrix = ({ uid, currentRiskBoard, orderCycles = [] }) => {
+  const currentRows = currentRiskBoard
+    .filter((row) =>
+      row.currentRisk ||
+      abs(row.localOpenQty) > 0 ||
+      abs(row.binanceQty) > 0 ||
+      Number(row.activeProtectionCount || 0) > 0 ||
+      Number(row.localReservationCount || 0) > 0
+    )
+    .map((row) => ({
+      uid,
+      pid: row.ownerPids.join(",") || null,
+      category: "current",
+      symbol: row.symbol,
+      side: row.side,
+      localOpenQty: row.localOpenQty,
+      binanceQtyContribution: row.binanceQty,
+      expectedTP: Number(row.expectedProtectionCount || 0) > 0 ? 1 : 0,
+      expectedSTOP: Number(row.expectedProtectionCount || 0) > 0 ? 1 : 0,
+      actualTP: row.actualTP || 0,
+      actualSTOP: row.actualSTOP || 0,
+      localReservationTP: row.localReservationTP || 0,
+      localReservationSTOP: row.localReservationSTOP || 0,
+      verdict: row.verdict,
+      severity: row.severity,
+      source: "CURRENT_RISK_BOARD",
+    }));
+
+  const cycleRows = orderCycles.map((row) => ({
     uid,
-    pid: row.ownerPids.join(",") || null,
+    pid: row.pid,
+    category: row.category,
     symbol: row.symbol,
     side: row.side,
-    localOpenQty: row.localOpenQty,
-    binanceQtyContribution: row.binanceQty,
-    expectedTP: Number(row.expectedProtectionCount || 0) > 0 ? 1 : 0,
-    expectedSTOP: Number(row.expectedProtectionCount || 0) > 0 ? 1 : 0,
-    actualTP: row.actualTP || 0,
-    actualSTOP: row.actualSTOP || 0,
-    localReservationTP: row.localReservationTP || 0,
-    localReservationSTOP: row.localReservationSTOP || 0,
-    verdict: row.verdict,
+    localOpenQty: row.localOpenQty || "0",
+    binanceQtyContribution: null,
+    expectedTP: Number(row.expectedTP || 0),
+    expectedSTOP: Number(row.expectedSTOP || 0),
+    actualTP: Number(row.actualTP || 0),
+    actualSTOP: Number(row.actualSTOP || 0),
+    localReservationTP: Number(row.localReservationTP || 0),
+    localReservationSTOP: Number(row.localReservationSTOP || 0),
+    verdict: row.protectionStatus || row.lifecycleStatus,
     severity: row.severity,
+    source: row.protectionMatrixSource || "PID_ORDER_CYCLE",
   }));
+
+  return [...currentRows, ...cycleRows].slice(0, 160);
+};
 
 const buildIssueCenter = ({ uid, currentRiskBoard, controlRows, rawBinanceOrders, msgRows, runtimeRows }) => {
   const open = currentRiskBoard
@@ -886,18 +1026,22 @@ const buildAdminOrderMonitor = async (uid, options = {}) => {
         .map((item) => item.trim())
         .filter(Boolean);
   const symbols = resolveSymbols(localRows, requestedSymbols);
-  let binanceEvidence = await loadBinanceEvidence(targetUid, symbols);
-  const expandedSymbols = resolveSymbolsWithBinancePositions(
-    symbols,
-    binanceEvidence.positionRisk.data || []
-  );
-  if (expandedSymbols.length !== symbols.length) {
+  const localOnly = options.localOnly === true || String(options.localOnly || "").trim().toUpperCase() === "Y";
+  let binanceEvidence = localOnly
+    ? buildLocalOnlyBinanceEvidence(symbols)
+    : await loadBinanceEvidence(targetUid, symbols);
+  const expandedSymbols = localOnly
+    ? symbols
+    : resolveSymbolsWithBinancePositions(symbols, binanceEvidence.positionRisk.data || []);
+  if (!localOnly && expandedSymbols.length !== symbols.length) {
     binanceEvidence = await loadBinanceEvidence(targetUid, expandedSymbols);
   }
   const rawBinanceOrders = buildRawRows({ localRows, binanceEvidence });
-  const currentRiskBoard = buildCurrentRiskBoard({ uid: targetUid, symbols: expandedSymbols, localRows, binanceEvidence });
+  const currentRiskBoard = localOnly
+    ? buildLocalOnlyCurrentRiskBoard({ uid: targetUid, symbols: expandedSymbols, localRows })
+    : buildCurrentRiskBoard({ uid: targetUid, symbols: expandedSymbols, localRows, binanceEvidence });
   const orderCycles = buildOrderCycles({ uid: targetUid, localRows, rawBinanceOrders });
-  const protectionMatrix = buildProtectionMatrix({ uid: targetUid, currentRiskBoard });
+  const protectionMatrix = buildProtectionMatrix({ uid: targetUid, currentRiskBoard, orderCycles });
   const issueCenter = buildIssueCenter({
     uid: targetUid,
     currentRiskBoard,
@@ -912,6 +1056,10 @@ const buildAdminOrderMonitor = async (uid, options = {}) => {
   return {
     generatedAt: new Date().toISOString(),
     uid: targetUid,
+    auditMode: localOnly ? "LOCAL_ONLY_BINANCE_UNVERIFIED" : "BINANCE_SOURCE",
+    localOnlyLimitation: localOnly
+      ? "Binance private API was intentionally not called for this UID. Current risk is based on local ledger/snapshot/reservation only."
+      : null,
     symbols: expandedSymbols,
     sourcePolicy: {
       primaryOrderEvidence: [

@@ -172,6 +172,15 @@ const getOrderIssueTone = (issueCategory) => {
 	return 'slate';
 };
 
+const isCurrentActionableOrderProcess = (item = {}) => {
+	const severity = String(item.severity || '').toUpperCase();
+	const lifecycleStatus = String(item.lifecycleStatus || item.lifecycleResult || '').toUpperCase();
+	if (item.isExpectedIgnore || lifecycleStatus === 'EXPECTED' || lifecycleStatus === 'RESOLVED') {
+		return false;
+	}
+	return Boolean(item.currentRisk) || lifecycleStatus === 'CURRENT_RISK' || severity === 'CRITICAL' || severity === 'WARN';
+};
+
 const isEnabledState = (value) => {
 	const normalized = String(value ?? '')
 		.trim()
@@ -701,6 +710,12 @@ const AdminOrderMonitorPanel = ({ monitor, loading, filters, setFilters, onRefre
 				<div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">Binance read-only evidence를 불러오는 중입니다.</div>
 			) : null}
 
+			{monitor?.auditMode === 'LOCAL_ONLY_BINANCE_UNVERIFIED' ? (
+				<div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-700">
+					UID {monitor.uid}는 local-only 관제입니다. Binance private API를 호출하지 않았으므로 원본 주문 탭은 검증 제한 상태로 표시합니다.
+				</div>
+			) : null}
+
 			<div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
 				<SummaryCard title="현재 CRITICAL" value={summary.currentCriticalCount || 0} description="현재 open exposure/protection/local-Binance mismatch 기준입니다." />
 				<SummaryCard title="OPEN 이슈" value={summary.openIssueCount || 0} description="resolved/historical issue는 제외한 현재 issue instance 수입니다." />
@@ -713,7 +728,11 @@ const AdminOrderMonitorPanel = ({ monitor, loading, filters, setFilters, onRefre
 				<h3 className="text-base font-semibold text-slate-900">Source status</h3>
 				<div className="mt-3 flex flex-wrap gap-2">
 					{sourceRows.map((row) => (
-						<InfoBadge key={row.name} label={`${row.name}: ${row.ok ? 'OK' : 'ERROR'}`} tone={row.ok ? 'emerald' : 'rose'} />
+						<InfoBadge
+							key={row.name}
+							label={`${row.name}: ${row.skipped ? 'LOCAL_ONLY' : row.ok ? 'OK' : 'ERROR'}`}
+							tone={row.skipped ? 'amber' : row.ok ? 'emerald' : 'rose'}
+						/>
 					))}
 				</div>
 			</div>
@@ -805,12 +824,19 @@ const AdminOrderMonitorPanel = ({ monitor, loading, filters, setFilters, onRefre
 							</thead>
 							<tbody className="divide-y divide-slate-100 bg-white">
 								{protectionRows.map((row) => (
-									<tr key={`protect-${row.symbol}-${row.side}`}>
-										<td className={tableCellClass}>{row.pid || '-'}<div className="text-xs text-slate-500">{row.symbol}</div></td>
+									<tr key={`protect-${row.source || 'row'}-${row.category || '-'}-${row.pid || '-'}-${row.symbol}-${row.side}`}>
+										<td className={tableCellClass}>
+											{row.pid || '-'}
+											<div className="text-xs text-slate-500">{row.symbol}</div>
+											<div className="text-xs text-slate-400">{row.category || '-'} / {row.source || '-'}</div>
+										</td>
 										<td className={tableCellClass}>{row.side}</td>
 										<td className={tableCellClass}>{renderNumberOrDash(row.localOpenQty, 8)} / {renderNumberOrDash(row.binanceQtyContribution, 8)}</td>
 										<td className={tableCellClass}>TP {row.expectedTP || 0} / STOP {row.expectedSTOP || 0}</td>
-										<td className={tableCellClass}>TP {row.actualTP || 0} / STOP {row.actualSTOP || 0}</td>
+										<td className={tableCellClass}>
+											TP {row.actualTP || 0} / STOP {row.actualSTOP || 0}
+											<div className="text-xs text-slate-500">local TP {row.localReservationTP || 0} / STOP {row.localReservationSTOP || 0}</div>
+										</td>
 										<td className={tableCellClass}><StatusBadge label={`${row.severity} / ${row.verdict}`} /></td>
 									</tr>
 								))}
@@ -1093,11 +1119,13 @@ const AdminConsole = () => {
 
 	const loadOrderMonitor = async (nextFilters = orderFilters) => {
 		setOrderMonitorLoading(true);
+		const monitorUid = String(nextFilters.uid || selectedOpsUid || 147);
 		const response = await authRequest(auth.adminOrderMonitorOverview.bind(auth), {
-			uid: nextFilters.uid || selectedOpsUid || 147,
+			uid: monitorUid,
 			pid: nextFilters.pid || undefined,
 			category: nextFilters.category || undefined,
 			symbols: nextFilters.symbol || undefined,
+			localOnly: monitorUid === '154' ? 'Y' : undefined,
 			rawLimit: 120
 		});
 		setOrderMonitorLoading(false);
@@ -1169,6 +1197,7 @@ const AdminConsole = () => {
 			authRequest(auth.adminOrderMonitorOverview.bind(auth), {
 				uid: orderFilters.uid || 147,
 				symbols: orderFilters.symbol || undefined,
+				localOnly: String(orderFilters.uid || 147) === '154' ? 'Y' : undefined,
 				rawLimit: 120
 			}),
 			authRequest(auth.adminStrategyControlAuditRecent.bind(auth), {
@@ -1292,23 +1321,23 @@ const AdminConsole = () => {
 			loadManagedUsers(),
 			loadRevenueSummary()
 		])
-			.catch(() => setMessage('愿由ъ옄 ?곗씠?곕? 遺덈윭?ㅼ? 紐삵뻽?듬땲??'))
+			.catch(() => setMessage('관리자 데이터를 불러오지 못했습니다.'))
 			.finally(() => setLoading(false));
 	}, [canAccessAdmin]);
 
 	useEffect(() => {
 		if (!canAccessAdmin || !selectedOpsUid) return;
-		loadSelectedOpsUser(selectedOpsUid).catch(() => setMessage('?댁쁺 ?ъ슜???곸꽭瑜?遺덈윭?ㅼ? 紐삵뻽?듬땲??'));
+		loadSelectedOpsUser(selectedOpsUid).catch(() => setMessage('운영 사용자 상세를 불러오지 못했습니다.'));
 	}, [canAccessAdmin, selectedOpsUid]);
 
 	useEffect(() => {
 		if (!canAccessAdmin || !selectedStrategyId) return;
-		loadSelectedStrategy(selectedStrategyId).catch(() => setMessage('?꾨왂 ?곸꽭瑜?遺덈윭?ㅼ? 紐삵뻽?듬땲??'));
+		loadSelectedStrategy(selectedStrategyId).catch(() => setMessage('전략 상세를 불러오지 못했습니다.'));
 	}, [canAccessAdmin, selectedStrategyId]);
 
 	useEffect(() => {
 		if (!canAccessAdmin || !selectedManagedUid) return;
-		loadSelectedManagedUser(selectedManagedUid).catch(() => setMessage('?ъ슜???곸꽭瑜?遺덈윭?ㅼ? 紐삵뻽?듬땲??'));
+		loadSelectedManagedUser(selectedManagedUid).catch(() => setMessage('사용자 상세를 불러오지 못했습니다.'));
 	}, [canAccessAdmin, selectedManagedUid]);
 
 	const exchangeRows = useMemo(() => {
@@ -1334,14 +1363,7 @@ const AdminConsole = () => {
 	const abnormalOrderProcesses = useMemo(
 		() =>
 			orderProcesses.filter(
-				(item) => {
-					const severity = String(item.severity || '').toUpperCase();
-					const lifecycleStatus = String(item.lifecycleStatus || item.lifecycleResult || '').toUpperCase();
-					if (item.isExpectedIgnore || lifecycleStatus === 'EXPECTED' || lifecycleStatus === 'RESOLVED') {
-						return false;
-					}
-					return Boolean(item.currentRisk) || lifecycleStatus === 'CURRENT_RISK' || severity === 'CRITICAL' || severity === 'WARN';
-				}
+				(item) => isCurrentActionableOrderProcess(item)
 			),
 		[orderProcesses]
 	);
@@ -1392,31 +1414,31 @@ const AdminConsole = () => {
 		});
 		setStrategySaving(false);
 		if (!response || response.errors) {
-			setMessage(response?.errors?.[0]?.msg || '?꾨왂 ??μ뿉 ?ㅽ뙣?덉뒿?덈떎.');
+			setMessage(response?.errors?.[0]?.msg || '전략 저장에 실패했습니다.');
 			return;
 		}
 		await loadStrategyOverview();
 		if (response.id) {
 			setSelectedStrategyId(Number(response.id));
 		}
-		setMessage('?꾨왂 ??μ씠 ?꾨즺?섏뿀?듬땲??');
+		setMessage('전략 저장이 완료되었습니다.');
 	};
 
 	const handleStrategyDelete = async () => {
 		if (!strategyForm.id) return;
-		if (!window.confirm('?좏깮???꾨왂 移댄깉濡쒓렇瑜???젣?좉퉴?? ?ъ슜 以묒씤 ?꾨왂???덉쑝硫???젣?섏? ?딆뒿?덈떎.')) {
+		if (!window.confirm('선택한 전략 카탈로그를 삭제할까요? 사용 중인 전략이 있으면 삭제되지 않습니다.')) {
 			return;
 		}
 		const response = await authRequest(auth.adminStrategyDelete.bind(auth), { id: strategyForm.id });
 		if (!response || response.errors) {
-			setMessage(response?.errors?.[0]?.msg || '?꾨왂 ??젣???ㅽ뙣?덉뒿?덈떎.');
+			setMessage(response?.errors?.[0]?.msg || '전략 삭제에 실패했습니다.');
 			return;
 		}
 		setSelectedStrategyId(null);
 		setSelectedStrategyItem(null);
 		setStrategyForm(strategyEmptyForm);
 		await loadStrategyOverview();
-		setMessage('?꾨왂 ??젣媛 ?꾨즺?섏뿀?듬땲??');
+		setMessage('전략 삭제가 완료되었습니다.');
 	};
 
 	const handleUserAccessSave = async (mode) => {
@@ -1428,27 +1450,27 @@ const AdminConsole = () => {
 		});
 		setUserSaving(false);
 		if (!response || response.errors) {
-			setMessage(response?.errors?.[0]?.msg || '?ъ슜??沅뚰븳 蹂寃쎌뿉 ?ㅽ뙣?덉뒿?덈떎.');
+			setMessage(response?.errors?.[0]?.msg || '사용자 권한 변경에 실패했습니다.');
 			return;
 		}
 		await Promise.all([loadManagedUsers(), loadSelectedManagedUser(selectedManagedUser.uid)]);
-		setMessage('?ъ슜??嫄곕옒 沅뚰븳????ν뻽?듬땲??');
+		setMessage('사용자 거래 권한을 저장했습니다.');
 	};
 
 	const handleUserDelete = async () => {
 		if (!selectedManagedUser?.uid) return;
-		if (!window.confirm('?좏깮???ъ슜?먮? ??젣?좉퉴?? ?꾨왂/嫄곕옒 ?대젰???⑥븘 ?덉쑝硫???젣?섏? ?딆뒿?덈떎.')) {
+		if (!window.confirm('선택한 사용자를 삭제할까요? 전략/거래 이력이 남아 있으면 삭제되지 않습니다.')) {
 			return;
 		}
 		const response = await authRequest(auth.adminUserDelete.bind(auth), { uid: selectedManagedUser.uid });
 		if (!response || response.errors) {
-			setMessage(response?.errors?.[0]?.msg || '?ъ슜????젣???ㅽ뙣?덉뒿?덈떎.');
+			setMessage(response?.errors?.[0]?.msg || '사용자 삭제에 실패했습니다.');
 			return;
 		}
 		setSelectedManagedUid(null);
 		setSelectedManagedUser(null);
 		await loadManagedUsers();
-		setMessage('?ъ슜????젣媛 ?꾨즺?섏뿀?듬땲??');
+		setMessage('사용자 삭제가 완료되었습니다.');
 	};
 
 	if (!canAccessAdmin) {
@@ -1666,7 +1688,9 @@ const AdminConsole = () => {
 														</td>
 													</tr>
 												) : (
-													algorithmOrderProcesses.map((item) => (
+													algorithmOrderProcesses.map((item) => {
+														const actionableIssue = isCurrentActionableOrderProcess(item);
+														return (
 														<tr key={item.id} className={selectedOrderProcessId === item.id ? 'bg-slate-50' : ''}>
 															<td className={tableCellClass}>
 																<div className="font-semibold text-slate-900">UID {item.uid} / PID {item.pid || '-'}</div>
@@ -1683,15 +1707,15 @@ const AdminConsole = () => {
 															</td>
 															<td className={tableCellClass}>
 																<div className="font-semibold text-slate-900">{item.summaryText || '-'}</div>
-																{item.issueLabel ? (
+																{actionableIssue && item.issueLabel ? (
 																	<div className="mt-2 flex flex-wrap gap-1.5">
-																		<InfoBadge label={item.issueCategoryLabel || '문제'} tone={getOrderIssueTone(item.issueCategory)} />
+																		<InfoBadge label={item.issueCategoryLabel || 'current issue'} tone={getOrderIssueTone(item.issueCategory)} />
 																		<InfoBadge label={item.issueSourceLabel || '-'} tone="slate" />
 																	</div>
 																) : null}
-																{item.latestRuntimeIssue?.detail ? (
+																{actionableIssue && item.latestRuntimeIssue?.detail ? (
 																	<div className="mt-1 text-xs text-rose-600">
-																		최신 내부 이슈: {item.latestRuntimeIssue.detail}
+																		현재 조치 필요 trace: {item.latestRuntimeIssue.detail}
 																	</div>
 																) : null}
 															</td>
@@ -1729,7 +1753,8 @@ const AdminConsole = () => {
 																</button>
 															</td>
 														</tr>
-													))
+														);
+													})
 												)}
 											</tbody>
 										</table>
@@ -1767,7 +1792,9 @@ const AdminConsole = () => {
 														</td>
 													</tr>
 												) : (
-													gridOrderProcesses.map((item) => (
+													gridOrderProcesses.map((item) => {
+														const actionableIssue = isCurrentActionableOrderProcess(item);
+														return (
 														<tr key={item.id} className={selectedOrderProcessId === item.id ? 'bg-slate-50' : ''}>
 															<td className={tableCellClass}>
 																<div className="font-semibold text-slate-900">UID {item.uid} / PID {item.pid || '-'}</div>
@@ -1784,15 +1811,15 @@ const AdminConsole = () => {
 											</td>
 															<td className={tableCellClass}>
 																<div className="font-semibold text-slate-900">{item.summaryText || '-'}</div>
-																{item.issueLabel ? (
+																{actionableIssue && item.issueLabel ? (
 																	<div className="mt-2 flex flex-wrap gap-1.5">
-																		<InfoBadge label={item.issueCategoryLabel || '문제'} tone={getOrderIssueTone(item.issueCategory)} />
+																		<InfoBadge label={item.issueCategoryLabel || 'current issue'} tone={getOrderIssueTone(item.issueCategory)} />
 																		<InfoBadge label={item.issueSourceLabel || '-'} tone="slate" />
 																	</div>
 																) : null}
-																{item.latestRuntimeIssue?.detail ? (
+																{actionableIssue && item.latestRuntimeIssue?.detail ? (
 																	<div className="mt-1 text-xs text-rose-600">
-																		최신 내부 이슈: {item.latestRuntimeIssue.detail}
+																		현재 조치 필요 trace: {item.latestRuntimeIssue.detail}
 																	</div>
 																) : null}
 															</td>
@@ -1830,7 +1857,8 @@ const AdminConsole = () => {
 																</button>
 															</td>
 														</tr>
-													))
+														);
+													})
 												)}
 											</tbody>
 										</table>
