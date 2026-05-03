@@ -1,0 +1,173 @@
+{
+  "finalClassification": "UID147_FULL_BINANCE_REAUDIT_AND_UID154_LOCAL_AUDIT_PASS_AFTER_MANUAL_CLEANUP",
+  "whyPreviousAuditFailed": [
+    "Previous reaudit stopped with Binance HTTP 418 and could not close W1 Binance evidence.",
+    "Previous report still had UID147 Binance-open/local-flat and PID991503 reservation mismatch open.",
+    "UID154 cannot be safely probed from the current IP, so it must remain local-only."
+  ],
+  "userManualCleanupRecap": {
+    "positionsClosedByUser": true,
+    "protectionOrdersCanceledByUser": true,
+    "limitOrdersCanceledByUser": true,
+    "allPidsOffByUser": true
+  },
+  "newIpApiAccessScope": {
+    "uid147": "BINANCE_FULL_LOW_RATE",
+    "uid154": "LOCAL_ONLY_PRIVATE_API_NOT_CALLED",
+    "uid149": "QUARANTINED_CODEX_CREATED_ARTIFACT"
+  },
+  "accountUidMapping": [
+    { "account": "tmdtka1", "uid": 147, "mode": "BINANCE_FULL" },
+    { "account": "jhkim", "uid": 154, "mode": "LOCAL_ONLY" },
+    { "account": "uid2qa0501040742", "uid": 149, "mode": "QUARANTINED_ARTIFACT" }
+  ],
+  "analysisWindows": [
+    { "window": "W0 broad", "startKst": "2026-05-02 00:00:00", "endKst": "2026-05-03 now", "purpose": "full weekend ON strategy coverage" },
+    { "window": "W1 liveqa", "startKst": "2026-05-02 two-UID live QA ready time", "endKst": "2026-05-03 user manual cleanup/OFF window", "purpose": "live-write order lifecycle audit" },
+    { "window": "W2 cleanup", "startKst": "2026-05-03 user manual cleanup/OFF window", "endKst": "2026-05-03 now", "purpose": "post-cleanup convergence" }
+  ],
+  "endpointCallCount": {
+    "public": { "/fapi/v1/time": 1 },
+    "uid147Private": {
+      "/fapi/v3/account": 1,
+      "/fapi/v2/positionRisk": 1,
+      "/fapi/v1/openOrders": 1,
+      "/fapi/v1/openAlgoOrders": 1,
+      "/fapi/v1/allOrders": 3,
+      "/fapi/v1/userTrades": 3
+    },
+    "uid154Private": 0,
+    "notes": [
+      "UID147 initial low-rate bulk audit used account/position/open/openAlgo plus symbol-window allOrders/userTrades.",
+      "One additional UID147 PID991503 order/userTrades lookup was used to close the reservation evidence gap.",
+      "No UID154 Binance private endpoint was called."
+    ]
+  },
+  "rateGuardCircuitBreaker": {
+    "mock429Backoff": "PASS",
+    "mock418CircuitBreaker": "PASS",
+    "privateReadGuard": "PASS",
+    "retryAfterRespect": "implemented in a102eb3",
+    "uid154PrivateHardStop": "respected"
+  },
+  "allPidOffVerification": {
+    "uid147": { "enabledSignalCount": 0, "enabledGridCount": 0, "latestOffAuditKst": "2026-05-03 10:25:44~10:26:03" },
+    "uid154": { "enabledSignalCount": 0, "enabledGridCount": 0, "latestOffAuditKst": "2026-05-03 10:24:07~10:24:37" }
+  },
+  "uid147BinanceProbe": {
+    "publicProbe": "PASS",
+    "signedProbe": "PASS",
+    "positionRisk": "PUMPUSDT/XRPUSDT LONG/SHORT qty 0",
+    "openOrders": 0,
+    "openAlgoOrders": 0
+  },
+  "uid147W1BinanceLifecycle": {
+    "signals": "991744-991753 reconstructed from webhook target log, allOrders, userTrades, local ledger/snapshot/reservation.",
+    "grids": "991499-991504 reconstructed from webhook target log, allOrders, userTrades, local ledger/snapshot/reservation.",
+    "missingLedgerTrades": 0,
+    "currentOpenSnapshots": 0,
+    "currentActiveReservationsBeforeConvergence": "PID991503 GRID_TP PARTIAL only",
+    "currentActiveReservationsAfterConvergence": 0,
+    "pid991503Resolution": {
+      "reservation": "GTP_L_147_991503_09952706",
+      "actualOrderId": "4254544316",
+      "binanceStatus": "FILLED",
+      "tradeIds": ["220347363", "220347364"],
+      "ledgerAlreadyRecorded": true,
+      "action": "reservation status PARTIAL -> FILLED, filledQty 13668 -> 14318, no ledger/PnL mutation"
+    }
+  },
+  "uid154LocalOnlyLifecycle": {
+    "scope": "webhook_event_log, webhook_event_target_log, local ledger, snapshots, reservations, runtime event log, msg_list, strategy_control_audit",
+    "binanceVerification": "UNAVAILABLE_BY_POLICY",
+    "currentOpenSnapshots": 0,
+    "currentActiveReservationsBeforeConvergence": "PID992319 GTP_L_154_992319_23213146 CANCEL_PENDING only",
+    "currentActiveReservationsAfterConvergence": 0,
+    "pid992319Resolution": {
+      "reservation": "GTP_L_154_992319_23213146",
+      "ownerCloseEvidence": "GMANUAL_L_154_992319_59210170 local runtime submit + ledger exit sourceTradeId 3099498040 openQtyAfter 0",
+      "action": "stale TP reservation terminalized CANCELED after owner-close evidence, no UID154 Binance private call"
+    },
+    "verdict": "LOCAL_LIFECYCLE_OK_BINANCE_UNVERIFIED"
+  },
+  "webhookSummary": {
+    "evidenceFile": "tmp-two-uid-webhook-target-summary-20260503.json",
+    "uid147": "GRID_ARMED/ENTERED_PENDING/RUNTIME_NOT_READY entries were UID-scoped; no cross-UID match detected in target summary.",
+    "uid154": "GRID_ARMED/ENTERED_PENDING/RUNTIME_NOT_READY entries were UID-scoped; local-only due Binance API unavailable."
+  },
+  "orderFillSummary": {
+    "uid147": "W1 UID147 orders and tradeIds reconciled with local ledger; PID991503 extra lookup closed out-of-window reservation order evidence.",
+    "uid154": "Local ledger has entry/exit evidence for W1-active rows; Binance source cannot be revalidated from current IP."
+  },
+  "protectionMatrix": {
+    "uid147Current": "Binance openOrders/openAlgoOrders 0, local active reservations 0 after convergence.",
+    "uid154Current": "local active reservations 0 after owner-close terminalization; Binance active state not queried by policy.",
+    "w1Limitation": "UID154 protection matrix is local-only and cannot be called Binance-source PASS."
+  },
+  "splitTpLifecycle": {
+    "uid147": "Signal TP/SPLITTP tradeIds present where Binance orders existed; no current orphan reservation after convergence.",
+    "uid154": "Local ledger/projection only; no current local orphan after convergence."
+  },
+  "gridLifecycle": {
+    "uid147": "Grid one-leg/sibling cancel/GMANUAL/GRID_TP/GRID_STOP flows reconstructed by PID from Binance/local evidence; PID991503 stale projection fixed.",
+    "uid154": "Local grid lifecycle reconstructed; PID992319 stale TP projection fixed local-only."
+  },
+  "trackRecordPidAdminProjection": {
+    "currentOngoing": "expected empty because all PIDs OFF and open snapshots 0",
+    "currentConfirmNeeded": "no active local reservation/snapshot issue remains after convergence",
+    "pnlCaveat": "historical sourceTradeId-null truth-sync rows should be rendered as evidence-limited/calculation-unavailable, not fake Binance-source PnL",
+    "priceFeed": "estimated PnL uses public frontend market-price helper; no UID private price feed dependency introduced"
+  },
+  "gridStats400": {
+    "actualRejectedPayloadsRetested": "strategy_stats_raw ids 8,9,10,11,12,13,15 now validate OK with metrics=60 bestcases=5",
+    "intentionallyInvalidPayload": "id 7 remains invalid because matrix is empty",
+    "latestRows": 10,
+    "rankingRows": 4,
+    "routeSeparation": "stats route persists strategy_stats_* only and is separate from trading dispatch"
+  },
+  "canonicalReview": [
+    { "commit": "a703c6c", "verdict": "CANONICAL_SAFE_WITH_THIS_FOLLOWUP", "note": "failed Binance read is not treated as exchange flat; current follow-up adds owner-scoped reservation convergence helpers." },
+    { "commit": "a102eb3", "verdict": "CANONICAL_SAFE", "note": "read guard/circuit breaker and stats parser tolerance verified by static/mock tests." }
+  ],
+  "fixesAppliedThisRun": [
+    "Added owner-scoped markReservationFilledFromExchangeEvidence helper.",
+    "Added owner-close scoped terminalizeStaleReservationsAfterOwnerClose helper.",
+    "Applied UID147 PID991503 reservation FILLED convergence without ledger/PnL mutation.",
+    "Applied UID154 PID992319 stale TP terminalization from local owner-close evidence without Binance private call.",
+    "Added clean Binance error guide overrides to avoid active mojibake return paths."
+  ],
+  "validation": {
+    "nodeCheck": "PASS for pid-position-ledger.js, binance-read-guard.js, coin.js, qa-binance.js, grid-stats-ingest.js",
+    "frontendBuild": "NOT_RUN_NO_FRONTEND_TOUCHED_THIS_RUN",
+    "mock429Backoff": "PASS",
+    "mock418CircuitBreaker": "PASS",
+    "uid147ApiCallCountAudit": "PASS",
+    "uid147W1Lifecycle": "PASS_AFTER_PID991503_CONVERGENCE",
+    "uid154LocalOnlyLifecycle": "PASS_LOCAL_ONLY_BINANCE_UNVERIFIED",
+    "localConvergence": "PASS",
+    "gridStatsParser": "PASS for current actual rejected TradingView payloads except intentionally empty matrix id 7",
+    "runAllLiveReadonly": "NOT_RUN_BY_POLICY_BECAUSE_UID154_PRIVATE_API_FORBIDDEN_AND_REPEAT_418_RISK"
+  },
+  "gitStatus": {
+    "sourceFilesModifiedThisRun": ["legacy/backend/pid-position-ledger.js", "legacy/backend/coin.js"],
+    "reportFilesAddedThisRun": ["qa-uid147-binance-reaudit-uid154-local-audit-after-418-manual-cleanup-20260503-123312.json", "qa-uid147-binance-reaudit-uid154-local-audit-after-418-manual-cleanup-20260503-123312.md"],
+    "qaConfigStaged": "NO",
+    "push": "NO"
+  },
+  "exactUserActionRequired": "No immediate Binance/local cleanup action required from the current evidence. UID154 remains Binance-unverified from this IP; if full Binance-source audit is required, use an IP/key context where jhkim API is permitted.",
+  "nextStep": "Keep all PIDs OFF until the next explicit Live QA setup. If restarting Live QA, first run a scoped readiness check without UID154 private API storm.",
+  "didNotDo": [
+    "No Binance order create/cancel/close/protection order",
+    "No matched webhook",
+    "No TradingView alert edit",
+    "No strategy ON/OFF or PID enabled change",
+    "No live-write-mode switch",
+    "No QA_DISABLE_BINANCE_WRITES release",
+    "No raw SQL production patch",
+    "No DB schema/stored procedure change",
+    "No run-all-data-replay",
+    "No cleanup script",
+    "No push",
+    "No API key/secret/password/ngrok token raw output"
+  ]
+}

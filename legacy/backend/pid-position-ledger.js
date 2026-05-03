@@ -1497,6 +1497,165 @@ const markReservationsCanceled = async (clientOrderIds = [], scope = {}) => {
   return affectedRows;
 };
 
+const markReservationFilledFromExchangeEvidence = async (clientOrderId, evidence = {}, scope = {}) => {
+  const normalizedClientOrderId = String(clientOrderId || "").trim();
+  if (!normalizedClientOrderId) {
+    return { ok: false, affectedRows: 0, reason: "MISSING_CLIENT_ORDER_ID" };
+  }
+
+  const reservationScope = buildReservationClientOrderScope({
+    clientOrderId: normalizedClientOrderId,
+    uid: scope.uid,
+    pid: scope.pid,
+    strategyCategory: scope.strategyCategory,
+    positionSide: scope.positionSide,
+    stage: "MARK_RESERVATION_FILLED_FROM_EXCHANGE",
+  });
+  if (!reservationScope.ok) {
+    logLedgerStateChange("RESERVATION_CLIENT_ORDER_PARSE_FAILED", {
+      stage: "MARK_RESERVATION_FILLED_FROM_EXCHANGE",
+      clientOrderId: normalizedClientOrderId,
+      uid: scope.uid || null,
+      pid: scope.pid || null,
+    });
+    return { ok: false, affectedRows: 0, reason: "CLIENT_ORDER_SCOPE_FAILED" };
+  }
+
+  const actualOrderId = evidence.actualOrderId == null ? null : String(evidence.actualOrderId);
+  const where = reservationScope.clauses.slice();
+  const params = reservationScope.params.slice();
+  if (actualOrderId) {
+    where.push(`(actualOrderId IS NULL OR actualOrderId = ?)`);
+    params.push(actualOrderId);
+  }
+
+  const [rows] = await db.query(
+    `SELECT *
+       FROM live_pid_exit_reservation
+      WHERE ${where.join(" AND ")}
+      ORDER BY id DESC
+      LIMIT 1`,
+    params
+  );
+
+  const current = rows?.[0];
+  if (!current) {
+    return { ok: false, affectedRows: 0, reason: "RESERVATION_NOT_FOUND" };
+  }
+
+  const reservedQty = toNumber(current.reservedQty);
+  const filledQtyFromEvidence = toNumber(evidence.filledQty, reservedQty);
+  const filledQtyAfter =
+    reservedQty > 0
+      ? Math.min(Math.max(filledQtyFromEvidence, toNumber(current.filledQty)), reservedQty)
+      : Math.max(filledQtyFromEvidence, toNumber(current.filledQty));
+  const noteSuffix = evidence.note ? ` | ${String(evidence.note).slice(0, 512)}` : "";
+
+  const [result] = await db.query(
+    `UPDATE live_pid_exit_reservation
+        SET filledQty = ?,
+            status = 'FILLED',
+            actualOrderId = COALESCE(?, actualOrderId),
+            note = CONCAT(COALESCE(note, ''), ?),
+            updatedAt = CURRENT_TIMESTAMP
+      WHERE id = ?
+        AND status IN ('ACTIVE', 'PARTIAL', 'CANCEL_REQUESTED', 'CANCEL_PENDING', 'UNKNOWN_CANCEL_STATE')`,
+    [filledQtyAfter, actualOrderId, noteSuffix, current.id]
+  );
+
+  const affectedRows = Number(result?.affectedRows || 0);
+  if (affectedRows > 0) {
+    logLedgerStateChange("RESERVATION_FILL_CONFIRMED_FROM_EXCHANGE", {
+      clientOrderId: normalizedClientOrderId,
+      reservationId: current.id,
+      strategyCategory: current.strategyCategory || null,
+      pid: Number(current.pid || 0),
+      uid: Number(current.uid || 0),
+      positionSide: current.positionSide || null,
+      reservationKind: current.reservationKind || null,
+      actualOrderId,
+      filledQtyBefore: toNumber(current.filledQty),
+      filledQtyAfter,
+      reservedQty,
+      evidenceStatus: evidence.status || null,
+    });
+  }
+
+  return {
+    ok: affectedRows > 0 || current.status === "FILLED",
+    affectedRows,
+    reservationId: current.id,
+    statusBefore: current.status,
+    filledQtyBefore: toNumber(current.filledQty),
+    filledQtyAfter: affectedRows > 0 ? filledQtyAfter : toNumber(current.filledQty),
+  };
+};
+
+const terminalizeStaleReservationsAfterOwnerClose = async (clientOrderIds = [], evidence = {}, scope = {}) => {
+  const normalizedIds = []
+    .concat(clientOrderIds || [])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+
+  if (normalizedIds.length === 0) {
+    return { ok: false, affectedRows: 0, reason: "MISSING_CLIENT_ORDER_IDS" };
+  }
+
+  let affectedRows = 0;
+  const results = [];
+  const noteSuffix = evidence.note ? ` | ${String(evidence.note).slice(0, 512)}` : "";
+  const status = evidence.status === "EXPIRED" ? "EXPIRED" : "CANCELED";
+
+  for (const clientOrderId of normalizedIds) {
+    const reservationScope = buildReservationClientOrderScope({
+      clientOrderId,
+      uid: scope.uid,
+      pid: scope.pid,
+      strategyCategory: scope.strategyCategory,
+      positionSide: scope.positionSide,
+      stage: "TERMINALIZE_STALE_RESERVATION_AFTER_OWNER_CLOSE",
+    });
+    if (!reservationScope.ok) {
+      logLedgerStateChange("RESERVATION_CLIENT_ORDER_PARSE_FAILED", {
+        stage: "TERMINALIZE_STALE_RESERVATION_AFTER_OWNER_CLOSE",
+        clientOrderId,
+        uid: scope.uid || null,
+        pid: scope.pid || null,
+      });
+      results.push({ clientOrderId, ok: false, reason: "CLIENT_ORDER_SCOPE_FAILED" });
+      continue;
+    }
+
+    const [result] = await db.query(
+      `UPDATE live_pid_exit_reservation
+          SET status = ?,
+              note = CONCAT(COALESCE(note, ''), ?),
+              updatedAt = CURRENT_TIMESTAMP
+        WHERE ${reservationScope.clauses.join(" AND ")}
+          AND status IN ('ACTIVE', 'PARTIAL', 'CANCEL_REQUESTED', 'CANCEL_PENDING', 'UNKNOWN_CANCEL_STATE')`,
+      [status, noteSuffix, ...reservationScope.params]
+    );
+    const rowCount = Number(result?.affectedRows || 0);
+    affectedRows += rowCount;
+    results.push({ clientOrderId, ok: rowCount > 0, affectedRows: rowCount });
+  }
+
+  if (affectedRows > 0) {
+    logLedgerStateChange("STALE_RESERVATION_TERMINALIZED_AFTER_OWNER_CLOSE", {
+      clientOrderIds: normalizedIds,
+      status,
+      affectedRows,
+      uid: scope.uid || null,
+      pid: scope.pid || null,
+      strategyCategory: scope.strategyCategory || null,
+      positionSide: scope.positionSide || null,
+      evidence: evidence.summary || null,
+    });
+  }
+
+  return { ok: affectedRows > 0, affectedRows, results };
+};
+
 const bindReservationActualOrderId = async (clientOrderId, actualOrderId, scope = {}) => {
   const normalizedClientOrderId = String(clientOrderId || "").trim();
   if (!normalizedClientOrderId || actualOrderId == null || actualOrderId === "") {
@@ -1906,6 +2065,8 @@ module.exports = {
   getCycleTotals,
   replaceExitReservations,
   markReservationsCanceled,
+  markReservationFilledFromExchangeEvidence,
+  terminalizeStaleReservationsAfterOwnerClose,
   bindReservationActualOrderId,
   loadActiveReservations,
   loadRecentReservations,

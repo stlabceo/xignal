@@ -750,6 +750,41 @@ const BINANCE_ERROR_GUIDE_KO = {
     [-4401]: '二쇰Ц 議곌굔???좏슚?섏? ?딆뒿?덈떎. ?낅젰媛??섏젙???꾩슂?⑸땲??',
 };
 
+const BINANCE_ERROR_GUIDE_CLEAN_KO = {
+    [-1001]: 'Binance 내부 오류입니다. 잠시 후 자동 재시도합니다.',
+    [-1003]: 'Binance 요청 제한에 도달했습니다. Retry-After 이후에만 다시 조회합니다.',
+    [-1006]: 'Binance 응답이 불명확합니다. 주문/체결 상태를 재조회해야 합니다.',
+    [-1007]: 'Binance 요청 시간이 초과되었습니다. 주문/체결 상태를 재조회해야 합니다.',
+    [-1008]: 'Binance 서버가 바쁜 상태입니다. 잠시 후 자동 재시도합니다.',
+    [-1021]: '요청 시간이 Binance 서버 시간과 맞지 않습니다. 시간 동기화 후 재시도합니다.',
+    [-2011]: '주문을 찾을 수 없습니다. 최신 주문 상태를 재조회해야 합니다.',
+    [-2013]: '해당 주문이 존재하지 않습니다. 주문 ID와 계정 범위를 확인해야 합니다.',
+    [-2014]: 'API 키 형식 또는 권한 문제가 있습니다. API 설정을 확인해 주세요.',
+    [-2015]: 'API 키, Secret, IP 제한 또는 Futures 권한 문제가 있습니다.',
+    [-2018]: '잔고가 부족합니다. 주문 수량과 사용 가능 증거금을 확인해 주세요.',
+    [-2019]: '증거금이 부족합니다. 주문 수량과 레버리지 설정을 확인해 주세요.',
+    [-2021]: '주문이 즉시 체결되어야 하는 조건을 만족하지 않습니다. 가격과 주문 방향을 확인해야 합니다.',
+    [-2022]: 'Reduce Only 주문이 현재 포지션과 맞지 않습니다. 포지션/주문 상태를 재조회해야 합니다.',
+    [-2024]: '포지션이 부족합니다. 현재 포지션 수량을 확인해야 합니다.',
+    [-2025]: '허용 가능한 주문 수를 초과했습니다. 열린 주문을 확인해 주세요.',
+    [-4004]: '주문 수량이 최소 수량보다 작습니다. 심볼 step size와 주문 수량을 확인해 주세요.',
+    [-4014]: '주문 가격이 tick size와 맞지 않습니다. 가격 단위를 확인해 주세요.',
+    [-4023]: '주문 수량이 step size와 맞지 않습니다. 수량 단위를 확인해 주세요.',
+    [-4051]: 'Position Side 설정이 맞지 않습니다. Hedge Mode/positionSide 설정을 확인해 주세요.',
+    [-4061]: 'Position Side가 계정 모드와 맞지 않습니다. Hedge Mode와 주문 positionSide를 확인해 주세요.',
+    [-4118]: 'Reduce Only 주문 조건이 현재 포지션과 맞지 않습니다. 포지션 수량을 확인해 주세요.',
+    [-4120]: '조건부 주문 타입 또는 엔드포인트가 맞지 않습니다. algoOrder 엔드포인트 사용 여부를 확인해야 합니다.',
+    [-4131]: '주문 가격이 허용 범위를 벗어났습니다. 가격 보호/필터 조건을 확인해 주세요.',
+    [-4142]: '주문 수량 또는 명목 금액이 허용 범위를 벗어났습니다. 주문 수량을 확인해 주세요.',
+    [-4164]: '주문이 심볼 제한 조건을 만족하지 않습니다. 거래 규칙을 확인해 주세요.',
+    [-4192]: 'Reduce Only 또는 포지션 방향 조건이 맞지 않습니다. 포지션과 주문 방향을 확인해 주세요.',
+    [-4400]: '계정 거래가 제한된 상태입니다. Binance 계정 상태를 확인해 주세요.',
+    [-4401]: '계정 주문 기능이 제한된 상태입니다. Binance 계정 상태를 확인해 주세요.',
+};
+
+Object.assign(BINANCE_ERROR_GUIDE, BINANCE_ERROR_GUIDE_CLEAN_KO);
+Object.assign(BINANCE_ERROR_GUIDE_KO, BINANCE_ERROR_GUIDE_CLEAN_KO);
+
 const extractBinanceError = (error) => {
     const fallback = {
         code: 404,
@@ -809,7 +844,16 @@ const toRuntimeMessage = (message, extra = null) => {
     return message;
 }
 
+const BINANCE_ACTION_LABEL_KO = {
+    retry: '자동 재시도',
+    requery: '주문 재조회',
+    manual: '사용자 확인 필요',
+    reject: '요청 거부',
+};
+
 const describeBinanceAction = (action) => {
+    return BINANCE_ACTION_LABEL_KO[action] || BINANCE_ACTION_LABEL_KO.reject;
+
     switch(action){
         case 'retry':
             return '자동 재시도';
@@ -827,6 +871,12 @@ const appendBinanceErrorGuide = (message, code, action) => {
     const actionLabel = describeBinanceAction(action);
 
     if(guide){
+        return toRuntimeMessage(message, `조치:${actionLabel}, 안내:${guide}`);
+    }
+
+    return toRuntimeMessage(message, `조치:${actionLabel}`);
+
+    if(guide){
         return toRuntimeMessage(message, `???${actionLabel}, ?덈궡:${guide}`);
     }
 
@@ -841,6 +891,14 @@ const formatBinanceErrorGuide = (message, code, action) => {
         reject: '利됱떆 嫄곕?',
     };
     const guide = BINANCE_ERROR_GUIDE_KO[code];
+    const cleanActionLabel = BINANCE_ACTION_LABEL_KO[action] || BINANCE_ACTION_LABEL_KO.reject;
+
+    if(guide){
+        return toRuntimeMessage(message, `조치:${cleanActionLabel}, 안내:${guide}`);
+    }
+
+    return toRuntimeMessage(message, `조치:${cleanActionLabel}`);
+
     const actionLabel = actionLabelMap[action] || actionLabelMap.reject;
 
     if(guide){
@@ -858,6 +916,14 @@ const formatBinanceErrorGuideClean = (message, code, action) => {
         reject: '利됱떆 嫄곕?',
     };
     const guide = BINANCE_ERROR_GUIDE_KO[code];
+    const cleanActionLabel = BINANCE_ACTION_LABEL_KO[action] || BINANCE_ACTION_LABEL_KO.reject;
+
+    if(guide){
+        return toRuntimeMessage(message, `조치:${cleanActionLabel}, 안내:${guide}`);
+    }
+
+    return toRuntimeMessage(message, `조치:${cleanActionLabel}`);
+
     const actionLabel = actionLabelMap[action] || actionLabelMap.reject;
 
     if(guide){
