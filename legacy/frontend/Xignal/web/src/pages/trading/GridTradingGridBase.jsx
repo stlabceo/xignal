@@ -3,7 +3,7 @@ import { trading } from '../../services/trading';
 import { useMessageModal } from '../../hooks/useMessageModal';
 import { comma, formatPrice } from '../../utils/comma';
 import { buildStrategyDeletePayload, confirmStrategyDelete, isTradingEnabled, stopTradingActionEvent } from './tradingState';
-import { estimateGridUnrealizedPnl } from './estimatedPnl';
+import { estimateGridUnrealizedPnl, getMarketPriceForSymbol } from './estimatedPnl';
 
 const cardClass = 'rounded-xl border border-[#27313D] bg-[#151A22]';
 
@@ -59,8 +59,6 @@ const getRealizedPnl = (item = {}) =>
 	item.realizedPnlNet !== null && item.realizedPnlNet !== undefined && item.realizedPnlNet !== ''
 		? item.realizedPnlNet
 		: getMetricValue(item, ['realizedPnlTotal', 'cumulativePnl', 'totalRealizedPnl', 'r_pol_sum']);
-
-const getMarkPrice = (priceRow = {}) => priceRow?.markPrice ?? priceRow?.lastPrice ?? priceRow?.price;
 
 const formatEstimatedPnl = (estimate) => {
 	if (!estimate || estimate.status === 'FLAT') return '-';
@@ -147,7 +145,7 @@ const GridTradingGridBase = ({ mode = 'live', listData = [], setTradingDetailId,
 	);
 
 	const renderMobileCard = (item) => {
-		const currentPrice = getMarkPrice(livePriceMap[item.symbol]);
+		const currentPrice = getMarketPriceForSymbol(livePriceMap, item.symbol);
 		const estimatedPnl = estimateGridUnrealizedPnl(item, currentPrice);
 		const currentRegimeTakeProfitCount = getMetricValue(item, ['currentRegimeTakeProfitCount', 'regimeTakeProfitCount', 'currentTpCount']);
 		const cumulativePnl = getRealizedPnl(item);
@@ -253,7 +251,7 @@ const GridTradingGridBase = ({ mode = 'live', listData = [], setTradingDetailId,
 							</tr>
 						) : (
 							rows.map((item) => {
-								const currentPrice = getMarkPrice(livePriceMap[item.symbol]);
+								const currentPrice = getMarketPriceForSymbol(livePriceMap, item.symbol);
 								const currentRegimeTakeProfitCount = getMetricValue(item, ['currentRegimeTakeProfitCount', 'regimeTakeProfitCount', 'currentTpCount']);
 								const cumulativePnl = getRealizedPnl(item);
 								const cumulativeTakeProfitCount = getMetricValue(item, ['cumulativeTakeProfitCount', 'totalTakeProfitCount', 'profitCount']);

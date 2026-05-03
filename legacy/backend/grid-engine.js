@@ -973,6 +973,16 @@ const convergeLiveGridLegToExchangeFlat = async (
     leg,
     exchangeSnapshot,
   });
+  if (exchangePosition?.readOk === false) {
+    logGridRuntimeTrace("GRID_EXCHANGE_FLAT_CONVERGENCE_BLOCKED_READ_FAILED", {
+      uid: current.uid,
+      pid: current.id,
+      symbol: current.symbol,
+      positionSide: leg,
+      readError: exchangePosition.readError || null,
+    });
+    return false;
+  }
   const exchangeQty = toNumber(exchangePosition?.qty);
   if (exchangeQty > 0) {
     return false;
@@ -1148,6 +1158,16 @@ const reconcileEndedGridLegIfExchangeFlat = async (
     leg,
     exchangeSnapshot,
   });
+  if (exchangePosition?.readOk === false) {
+    logGridRuntimeTrace("GRID_RECONCILE_ENDED_LEG_SKIPPED_READ_FAILED", {
+      uid: row.uid,
+      pid: row.id,
+      symbol: row.symbol,
+      positionSide: leg,
+      readError: exchangePosition.readError || null,
+    });
+    return false;
+  }
   const exchangeQty = toNumber(exchangePosition?.qty);
   if (exchangeQty > 0) {
     return false;
@@ -1339,6 +1359,16 @@ const truthSyncLiveGridRow = async ({ row, exchangeSnapshotCache = null } = {}) 
       leg,
       exchangeSnapshot,
     });
+    if (exchangePosition?.readOk === false) {
+      logGridRuntimeTrace("GRID_TRUTH_SYNC_SKIPPED_EXCHANGE_READ_FAILED", {
+        uid: refreshed.uid,
+        pid: refreshed.id,
+        symbol: refreshed.symbol,
+        positionSide: leg,
+        readError: exchangePosition.readError || null,
+      });
+      return null;
+    }
     const exchangeQty = toNumber(exchangePosition?.qty);
     const localRowQty = toNumber(refreshed?.[`${prefix}Qty`]);
     const hasLocalOpen =

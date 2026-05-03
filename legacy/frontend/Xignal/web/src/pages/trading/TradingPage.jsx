@@ -7,7 +7,7 @@ import { trading } from '../../services/trading';
 import TradingViewWidget from './TradingViewWidget';
 import { useChartStore } from '../../store/useChartStore';
 import { comma } from '../../utils/comma';
-import { buildEstimatedUnrealizedPnl, estimateGridUnrealizedPnl } from './estimatedPnl';
+import { buildEstimatedUnrealizedPnl, estimateGridUnrealizedPnl, getMarketPriceForSymbol } from './estimatedPnl';
 
 const STRATEGY_CATEGORY = {
 	SIGNAL: 'SIGNAL',
@@ -32,20 +32,18 @@ const formatWinRate = (value) => (value === null || value === undefined ? 'ì§‘ê³
 
 const getSignalOpenQty = (item = {}) => toNumber(item.openQty || item.r_qty);
 const getSignalEntryPrice = (item = {}) => toNumber(item.avgEntryPrice || item.entryPrice || item.r_exactPrice || item.r_signalPrice);
-const getMarkPrice = (priceRow = {}) => priceRow?.markPrice ?? priceRow?.lastPrice ?? priceRow?.price;
-
 const getSignalUnrealizedPnl = (item = {}, marketPrices = {}) => {
 	return buildEstimatedUnrealizedPnl({
 		side: item.signalType,
 		positionSide: item.positionSide,
 		openQty: getSignalOpenQty(item),
 		avgEntryPrice: getSignalEntryPrice(item),
-		markPrice: getMarkPrice(marketPrices?.[item.symbol])
+		markPrice: getMarketPriceForSymbol(marketPrices, item.symbol)
 	});
 };
 
 const getGridUnrealizedPnl = (item = {}, marketPrices = {}) => {
-	return estimateGridUnrealizedPnl(item, getMarkPrice(marketPrices?.[item.symbol]));
+	return estimateGridUnrealizedPnl(item, getMarketPriceForSymbol(marketPrices, item.symbol));
 };
 
 const SummaryCard = ({ label, value, tone = 'neutral', helper }) => {

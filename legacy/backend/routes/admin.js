@@ -2494,7 +2494,7 @@ const buildTrackRecordDateRange = ({ sDate = "", eDate = "" } = {}) => ({
 });
 
 const matchesTrackRecordCompletion = (processRow, statusFilter) => {
-  const needsReview = Boolean(processRow?.isAbnormal && !processRow?.isExpectedIgnore);
+  const needsReview = isTrackRecordActionableReview(processRow);
   if (statusFilter === "all") {
     return true;
   }
@@ -2507,6 +2507,27 @@ const matchesTrackRecordCompletion = (processRow, statusFilter) => {
   }
 
   return Boolean(processRow?.completed) && !needsReview;
+};
+
+const isTrackRecordActionableReview = (processRow = {}) => {
+  if (processRow?.isExpectedIgnore) {
+    return false;
+  }
+
+  const lifecycleStatus = String(processRow?.lifecycleStatus || processRow?.lifecycleResult || "")
+    .trim()
+    .toUpperCase();
+  if (lifecycleStatus === "RESOLVED" || lifecycleStatus === "EXPECTED") {
+    return false;
+  }
+
+  const severity = String(processRow?.severity || "").trim().toUpperCase();
+  return (
+    processRow?.currentRisk === true ||
+    lifecycleStatus === "CURRENT_RISK" ||
+    severity === "CRITICAL" ||
+    severity === "WARN"
+  );
 };
 
 const getTrackRecordCycleRealizedPnl = (processRow = {}) => {
@@ -2542,6 +2563,7 @@ const buildTrackRecordListItem = (processRow = {}) => {
   const isGrid = String(processRow.strategyCategory || "").trim().toLowerCase() === "grid";
   const cycleRealizedPnl = getTrackRecordCycleRealizedPnl(processRow);
   const meta = isGrid ? processRow.gridMeta || {} : processRow.algorithmMeta || {};
+  const needsReview = isTrackRecordActionableReview(processRow);
   const seriesId = toNumber(processRow.eventId, 0) > 0 ? Number(processRow.eventId) : null;
   const statusLabel = meta.statusLabel || meta.overallStatusLabel || processRow.currentStepLabel || "-";
   const statusSubLabel =
@@ -2565,12 +2587,16 @@ const buildTrackRecordListItem = (processRow = {}) => {
     signalType: processRow.signalType || meta.direction || null,
     directionLabel: getTrackRecordDirectionLabel(processRow),
     completed: Boolean(processRow.completed),
-    needsReview: Boolean(processRow.isAbnormal && !processRow.isExpectedIgnore),
+    needsReview,
     overallResultLabel: processRow.overallResultLabel || (processRow.completed ? "완료" : "진행중"),
     summaryStatusLabel:
       processRow.summaryStatusLabel ||
-      (processRow.isAbnormal && !processRow.isExpectedIgnore ? "확인 필요" : processRow.completed ? "성과 기록" : "진행중"),
-    summaryText: processRow.summaryText || "-",
+      (needsReview ? "확인 필요" : processRow.completed ? "성과 기록" : "진행중"),
+    summaryText: needsReview
+      ? processRow.summaryText || processRow.issueReason || "-"
+      : processRow.completed
+        ? "정상 종료"
+        : "진행중",
     statusLabel,
     statusSubLabel,
     overallStatusLabel: meta.overallStatusLabel || null,
@@ -2584,7 +2610,7 @@ const buildTrackRecordListItem = (processRow = {}) => {
     result:
       !processRow.completed
         ? "OPEN"
-        : processRow.isAbnormal && !processRow.isExpectedIgnore
+        : needsReview
           ? "REVIEW"
           : cycleRealizedPnl > 0
             ? "WIN"
@@ -2604,7 +2630,7 @@ const buildTrackRecordListItem = (processRow = {}) => {
 
 const buildTrackRecordSummary = (processRows = []) => {
   const performanceRows = (processRows || []).filter(
-    (row) => row?.completed && !(row?.isAbnormal && !row?.isExpectedIgnore)
+    (row) => row?.completed && !isTrackRecordActionableReview(row)
   );
   const totalRealizedPnl = performanceRows.reduce(
     (sum, row) => sum + getTrackRecordCycleRealizedPnl(row),
@@ -2628,10 +2654,10 @@ const buildTrackRecordSummary = (processRows = []) => {
     totalRealizedPnl,
     completedCount,
     activeCount: (processRows || []).filter(
-      (row) => !row?.completed && !(row?.isAbnormal && !row?.isExpectedIgnore)
+      (row) => !row?.completed && !isTrackRecordActionableReview(row)
     ).length,
-    reviewCount: (processRows || []).filter((row) => row?.isAbnormal && !row?.isExpectedIgnore).length,
-    abnormalCount: (processRows || []).filter((row) => row?.isAbnormal && !row?.isExpectedIgnore).length,
+    reviewCount: (processRows || []).filter((row) => isTrackRecordActionableReview(row)).length,
+    abnormalCount: (processRows || []).filter((row) => isTrackRecordActionableReview(row)).length,
     winCount,
     loseCount,
     winRate: completedCount > 0 ? (winCount / completedCount) * 100 : 0,

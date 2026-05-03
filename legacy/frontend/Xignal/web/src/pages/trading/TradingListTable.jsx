@@ -3,7 +3,7 @@ import OnOffToggle from '../../components/ui/toggle/OnOffToggle';
 import { comma, formatPrice } from '../../utils/comma';
 import { trading } from '../../services/trading';
 import { buildStrategyDeletePayload, confirmStrategyDelete, isTradingEnabled, stopTradingActionEvent } from './tradingState';
-import { buildEstimatedUnrealizedPnl } from './estimatedPnl';
+import { buildEstimatedUnrealizedPnl, getMarketPriceForSymbol } from './estimatedPnl';
 
 const strategyLabelMap = {
 	'ATF+VIXFIX': 'ATF+VIXFIX',
@@ -75,8 +75,6 @@ const getOpenQty = (item = {}) => {
 	if (backendValue > 0) return backendValue;
 	return toNumber(item.r_qty);
 };
-
-const getMarkPrice = (priceRow = {}) => priceRow?.markPrice ?? priceRow?.lastPrice ?? priceRow?.price;
 
 const getEstimatedPnl = (item = {}, currentPrice) =>
 	buildEstimatedUnrealizedPnl({
@@ -150,7 +148,7 @@ const TradingListTable = ({ setTradingDetailId, listData: data = [], getListData
 	};
 
 	const renderMobileCard = (item) => {
-		const currentPrice = getMarkPrice(livePriceMap[item.symbol]);
+		const currentPrice = getMarketPriceForSymbol(livePriceMap, item.symbol);
 		const estimatedPnl = getEstimatedPnl(item, currentPrice);
 		const lastTradeAt = item.lastTradeAt || item.r_exactTime || item.updatedAt || item.created_at;
 
@@ -273,7 +271,7 @@ const TradingListTable = ({ setTradingDetailId, listData: data = [], getListData
 							</tr>
 						) : (
 							filteredData.map((item) => {
-								const currentPrice = getMarkPrice(livePriceMap[item.symbol]);
+								const currentPrice = getMarketPriceForSymbol(livePriceMap, item.symbol);
 								const estimatedPnl = getEstimatedPnl(item, currentPrice);
 								const lastTradeAt = item.lastTradeAt || item.r_exactTime || item.updatedAt || item.created_at;
 

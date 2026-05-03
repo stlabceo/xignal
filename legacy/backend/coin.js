@@ -5243,6 +5243,15 @@ const getGridExchangePosition = async (uid, symbol, leg, options = {}) => {
 
     const exchangeSnapshot = options.exchangeSnapshot || null;
     if(exchangeSnapshot){
+        if(exchangeSnapshot.readOk === false){
+            return {
+                qty: null,
+                readOk: false,
+                readError: exchangeSnapshot.readError || null,
+                raw: exchangeSnapshot,
+            };
+        }
+
         const qty = getExchangeQtyForPositionSide(exchangeSnapshot, leg);
         if(!(qty > 0)){
             return null;
@@ -5255,7 +5264,11 @@ const getGridExchangePosition = async (uid, symbol, leg, options = {}) => {
     }
 
     if(!(await ensureBinanceApiClient(uid))){
-        return null;
+        return {
+            qty: null,
+            readOk: false,
+            readError: 'BINANCE_CLIENT_UNAVAILABLE',
+        };
     }
 
     try{
@@ -5275,7 +5288,13 @@ const getGridExchangePosition = async (uid, symbol, leg, options = {}) => {
             raw: matched,
         };
     }catch(error){
-        return null;
+        return {
+            qty: null,
+            readOk: false,
+            readError: error?.response?.status
+                ? `BINANCE_READ_FAILED_${error.response.status}`
+                : (error?.message || 'BINANCE_READ_FAILED'),
+        };
     }
 }
 
@@ -5759,6 +5778,8 @@ const getExchangePositionSnapshot = async (uid, symbol) => {
         shortQty: 0,
         bothQty: 0,
         netQty: 0,
+        readOk: true,
+        readError: null,
     };
 
     if(!symbol){
@@ -5766,6 +5787,8 @@ const getExchangePositionSnapshot = async (uid, symbol) => {
     }
 
     if(!(await ensureBinanceApiClient(uid))){
+        snapshot.readOk = false;
+        snapshot.readError = 'BINANCE_CLIENT_UNAVAILABLE';
         return snapshot;
     }
 
@@ -5787,6 +5810,10 @@ const getExchangePositionSnapshot = async (uid, symbol) => {
             }
         }
     }catch(error){
+        snapshot.readOk = false;
+        snapshot.readError = error?.response?.status
+            ? `BINANCE_READ_FAILED_${error.response.status}`
+            : (error?.message || 'BINANCE_READ_FAILED');
     }
 
     return snapshot;
@@ -6001,6 +6028,16 @@ const convergeLiveSignalPositionToExchangeFlat = async (play, {
     }
 
     const exchangeSnapshot = await loadCachedExchangePositionSnapshot(current.uid, current.symbol, exchangeSnapshotCache);
+    if(exchangeSnapshot?.readOk === false){
+        logOrderRuntimeTrace('SIGNAL_EXCHANGE_FLAT_CONVERGENCE_BLOCKED_READ_FAILED', {
+            uid: current.uid,
+            pid: current.id,
+            symbol: current.symbol,
+            positionSide,
+            readError: exchangeSnapshot.readError || null,
+        });
+        return false;
+    }
     const exchangeQty = getExchangeQtyForPositionSide(exchangeSnapshot, positionSide);
     if(exchangeQty > 0){
         return false;
@@ -6131,6 +6168,16 @@ const truthSyncLiveSignalPlay = async ({ row, exchangeSnapshotCache = null } = {
 
     const repaired = [];
     const exchangeSnapshot = await loadCachedExchangePositionSnapshot(refreshed.uid, refreshed.symbol, exchangeSnapshotCache);
+    if(exchangeSnapshot?.readOk === false){
+        logOrderRuntimeTrace('SIGNAL_TRUTH_SYNC_SKIPPED_EXCHANGE_READ_FAILED', {
+            uid: refreshed.uid,
+            pid: refreshed.id,
+            symbol: refreshed.symbol,
+            positionSide,
+            readError: exchangeSnapshot.readError || null,
+        });
+        return null;
+    }
     const exchangeQty = getExchangeQtyForPositionSide(exchangeSnapshot, positionSide);
     const snapshotState = await pidPositionLedger.loadSnapshot({
         uid: refreshed.uid,
@@ -6307,6 +6354,10 @@ const buildSignalRuntimeIssues = async (uid) => {
             snapshot = await getExchangePositionSnapshot(uid, symbol);
             exchangeSnapshots.set(symbol, snapshot);
         }
+        if(snapshot?.readOk === false){
+            bucketExchangeQty.set(bucketKey, null);
+            return null;
+        }
 
         const exchangeQty = signalType === 'BUY'
             ? Number(snapshot.longQty || snapshot.bothQty || 0)
@@ -6369,22 +6420,25 @@ const buildSignalRuntimeIssues = async (uid) => {
                 })
               : [];
 
-          if(row.status === 'READY' && effectiveDbQty > 0 && expectedQty > 0){
+          if(expectedQty === null){
+              issues.push('BINANCE_POSITION_READ_FAILED');
+          }
+          if(expectedQty !== null && row.status === 'READY' && effectiveDbQty > 0 && expectedQty > 0){
               issues.push('READY_WITH_OPEN_POSITION');
           }
-          if(row.status === 'EXACT_WAIT' && expectedQty > 0){
+          if(expectedQty !== null && row.status === 'EXACT_WAIT' && expectedQty > 0){
               issues.push('ENTRY_PENDING_BUT_POSITION_OPEN');
           }
-          if(row.status === 'EXACT' && effectiveDbQty <= 0 && expectedQty > 0){
+          if(expectedQty !== null && row.status === 'EXACT' && effectiveDbQty <= 0 && expectedQty > 0){
               issues.push('ENTRY_FILL_MISSED');
           }
           if(!row.r_signalType && signalType){
             issues.push('MISSING_RUNTIME_SIGNAL_TYPE');
         }
-        if(effectiveDbQty > 0 && expectedQty <= 0){
+        if(expectedQty !== null && effectiveDbQty > 0 && expectedQty <= 0){
             issues.push('DB_OPEN_NO_POSITION');
           }
-          if(effectiveDbQty > 0 && expectedQty > 0 && hasMeaningfulQtyMismatch(effectiveDbQty, expectedQty)){
+          if(expectedQty !== null && effectiveDbQty > 0 && expectedQty > 0 && hasMeaningfulQtyMismatch(effectiveDbQty, expectedQty)){
               issues.push('POSITION_BUCKET_QTY_MISMATCH');
           }
           if(effectiveDbQty > 0 && positionSide){
@@ -6428,7 +6482,7 @@ const buildSignalRuntimeIssues = async (uid) => {
                   dbQty: effectiveDbQty,
                   runtimeQty,
                   snapshotQty,
-                  exchangeQty: expectedQty,
+                  exchangeQty: expectedQty === null ? null : expectedQty,
                 bucketDbQty: internalBucketQty,
                 openExitOrderCount: openExitOrders.length,
                 issues,
@@ -6472,6 +6526,7 @@ const buildGridRuntimeIssues = async (uid) => {
         const longExitOrders = openOrders.filter((item) => /^(GTP_L_|GSTOP_L_)/.test(String(item.clientOrderId || '')));
         const shortExitOrders = openOrders.filter((item) => /^(GTP_S_|GSTOP_S_)/.test(String(item.clientOrderId || '')));
         const issues = [];
+        const exchangeReadOk = exchangeSnapshot?.readOk !== false;
         const snapshotLongQty = Number(snapshotQtyByPidLeg.get(`${row.id}:LONG`) || 0);
         const snapshotShortQty = Number(snapshotQtyByPidLeg.get(`${row.id}:SHORT`) || 0);
         const longQty = Math.max(Number(row.longQty || 0), snapshotLongQty);
@@ -6488,7 +6543,10 @@ const buildGridRuntimeIssues = async (uid) => {
             || 0
         );
 
-        if(row.regimeStatus === 'WAITING_WEBHOOK' && (openOrders.length > 0 || exchangeLongQty > 0 || exchangeShortQty > 0)){
+        if(!exchangeReadOk){
+            issues.push('BINANCE_POSITION_READ_FAILED');
+        }
+        if(exchangeReadOk && row.regimeStatus === 'WAITING_WEBHOOK' && (openOrders.length > 0 || exchangeLongQty > 0 || exchangeShortQty > 0)){
             issues.push('WAITING_WITH_EXCHANGE_ACTIVITY');
         }
         if(row.longLegStatus === 'ENTRY_ARMED' && longEntryOrders.length === 0){
@@ -6497,16 +6555,16 @@ const buildGridRuntimeIssues = async (uid) => {
         if(row.shortLegStatus === 'ENTRY_ARMED' && shortEntryOrders.length === 0){
             issues.push('SHORT_ARMED_WITHOUT_ENTRY_ORDER');
         }
-        if(row.longLegStatus === 'ENTRY_ARMED' && exchangeLongQty > 0){
+        if(exchangeReadOk && row.longLegStatus === 'ENTRY_ARMED' && exchangeLongQty > 0){
             issues.push('LONG_ENTRY_PENDING_WITH_OPEN_POSITION');
         }
-        if(row.shortLegStatus === 'ENTRY_ARMED' && exchangeShortQty > 0){
+        if(exchangeReadOk && row.shortLegStatus === 'ENTRY_ARMED' && exchangeShortQty > 0){
             issues.push('SHORT_ENTRY_PENDING_WITH_OPEN_POSITION');
         }
-        if((row.longLegStatus === 'OPEN' || snapshotLongQty > 0) && exchangeLongQty <= 0){
+        if(exchangeReadOk && (row.longLegStatus === 'OPEN' || snapshotLongQty > 0) && exchangeLongQty <= 0){
             issues.push('LONG_OPEN_NO_POSITION');
         }
-        if((row.shortLegStatus === 'OPEN' || snapshotShortQty > 0) && exchangeShortQty <= 0){
+        if(exchangeReadOk && (row.shortLegStatus === 'OPEN' || snapshotShortQty > 0) && exchangeShortQty <= 0){
             issues.push('SHORT_OPEN_NO_POSITION');
         }
         if(row.longLegStatus === 'OPEN' && longExitOrders.length < 2){
@@ -6515,7 +6573,7 @@ const buildGridRuntimeIssues = async (uid) => {
         if(row.shortLegStatus === 'OPEN' && shortExitOrders.length < 2){
             issues.push('SHORT_OPEN_INCOMPLETE_EXIT_ORDERS');
         }
-        if(row.regimeStatus === 'ENDED' && (openOrders.length > 0 || exchangeLongQty > 0 || exchangeShortQty > 0)){
+        if(exchangeReadOk && row.regimeStatus === 'ENDED' && (openOrders.length > 0 || exchangeLongQty > 0 || exchangeShortQty > 0)){
             issues.push('ENDED_WITH_EXCHANGE_ACTIVITY');
         }
 
@@ -9998,6 +10056,14 @@ exports.sendForcing = async (type = null, symbol = null, side = null, userQty = 
         const exchangeSnapshot = positionSide
             ? await getExchangePositionSnapshot(uid, symbol)
             : null;
+        if(exchangeSnapshot?.readOk === false){
+            const mismatchData = buildStateMismatchResponse(
+                -90006,
+                `signal close blocked because exchange position read failed:${exchangeSnapshot.readError || 'UNKNOWN'}`
+            );
+            exports.msgAdd('sendForcing', String(mismatchData.errCode), mismatchData.errMsg, uid, pid, r_tid, symbol, side);
+            return mismatchData;
+        }
         const exchangeAggregateQty = positionSide
             ? getExchangeQtyForPositionSide(exchangeSnapshot, positionSide)
             : 0;

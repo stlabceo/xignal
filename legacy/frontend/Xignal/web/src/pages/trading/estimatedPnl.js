@@ -5,6 +5,41 @@ export const toFiniteNumber = (value) => {
 	return Number.isFinite(numeric) ? numeric : 0;
 };
 
+export const normalizeMarketSymbol = (value) =>
+	String(value || '')
+		.trim()
+		.toUpperCase()
+		.replace(/^BINANCE:/, '')
+		.replace(/\.P$/, '');
+
+export const getMarketPriceFromRow = (priceRow = {}) => {
+	const directPrice = toFiniteNumber(priceRow?.markPrice ?? priceRow?.lastPrice ?? priceRow?.price);
+	if (directPrice > 0) return directPrice;
+
+	const bestBid = toFiniteNumber(priceRow?.bestBid ?? priceRow?.bidPrice);
+	const bestAsk = toFiniteNumber(priceRow?.bestAsk ?? priceRow?.askPrice);
+	if (bestBid > 0 && bestAsk > 0) return (bestBid + bestAsk) / 2;
+	return bestBid || bestAsk || 0;
+};
+
+export const getMarketPriceForSymbol = (priceMap = {}, symbol) => {
+	const normalized = normalizeMarketSymbol(symbol);
+	const candidates = [
+		symbol,
+		String(symbol || '').trim().toUpperCase(),
+		normalized,
+		normalized ? `${normalized}.P` : '',
+		normalized ? `BINANCE:${normalized}.P` : ''
+	].filter(Boolean);
+
+	for (const key of candidates) {
+		const price = getMarketPriceFromRow(priceMap?.[key]);
+		if (price > 0) return price;
+	}
+
+	return 0;
+};
+
 export const normalizePositionSide = (value) => {
 	const normalized = String(value || '').trim().toUpperCase();
 	if (normalized === 'LONG' || normalized === 'BUY') return 'LONG';
