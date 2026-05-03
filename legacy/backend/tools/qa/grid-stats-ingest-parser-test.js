@@ -83,6 +83,24 @@ assert.strictEqual(Number(matrixOnlyBestcases.find((item) => item.periodKey === 
 const fieldSpecific = { ...payload, matrix: {} };
 const fieldSpecificValidation = gridStats.validateGridStatsPayload(fieldSpecific);
 assert.strictEqual(fieldSpecificValidation.ok, false);
-assert(fieldSpecificValidation.errors.some((error) => error.startsWith("MATRIX_PERIOD_MISSING:")));
+assert(fieldSpecificValidation.errors.includes("MATRIX_EMPTY_NO_USABLE_PERIOD"));
+
+const partialNoData = buildValidPayload();
+partialNoData.symbol = "PUMPUSDT.P";
+partialNoData.timeframe = "30min";
+partialNoData.matrix["12month"] = null;
+partialNoData.matrix["6month"] = {};
+delete partialNoData.bestcase["12month"];
+delete partialNoData.bestcase["6month"];
+const partialNoDataValidation = gridStats.validateGridStatsPayload(partialNoData);
+assert.strictEqual(partialNoDataValidation.ok, true, partialNoDataValidation.errors.join(","));
+assert.deepStrictEqual(partialNoDataValidation.normalized.skippedPeriods.sort(), ["12month", "6month"].sort());
+assert.strictEqual(gridStats.expandGridStatsMetrics(partialNoData).length, 36);
+assert.strictEqual(gridStats.extractGridStatsBestcases(partialNoData).length, 3);
+
+const missingBestcaseButInferrable = buildValidPayload();
+delete missingBestcaseButInferrable.bestcase;
+const inferredBestcaseValidation = gridStats.validateGridStatsPayload(missingBestcaseButInferrable);
+assert.strictEqual(inferredBestcaseValidation.ok, true, inferredBestcaseValidation.errors.join(","));
 
 console.log("grid-stats-ingest-parser-test PASS");

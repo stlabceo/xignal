@@ -111,6 +111,18 @@ const toStatsMetricNumber = (value) => {
 };
 
 const getPeriodMatrix = (payload = {}, periodKey) => {
+  if (
+    Object.prototype.hasOwnProperty.call(payload.matrix || {}, periodKey) &&
+    payload.matrix?.[periodKey] == null
+  ) {
+    return null;
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(payload.periods || {}, periodKey) &&
+    payload.periods?.[periodKey] == null
+  ) {
+    return null;
+  }
   const direct = payload.matrix?.[periodKey];
   if (direct && typeof direct === "object") {
     return direct;
@@ -213,6 +225,9 @@ const computeStatsPayloadHash = (payload) =>
 
 const validateGridStatsPayload = (payload = {}) => {
   const errors = [];
+  const warnings = [];
+  const usablePeriods = [];
+  const skippedPeriods = [];
   const symbol = normalizeGridStatsSymbol(payload.symbol);
   const timeframe = normalizeGridStatsTimeframe(payload.timeframe ?? payload.candle_min ?? payload.candleMin);
   const calcMode = String(payload.calc_mode || payload.calcMode || "").trim();
@@ -232,43 +247,63 @@ const validateGridStatsPayload = (payload = {}) => {
 
   for (const periodKey of REQUIRED_PERIODS) {
     const periodMatrix = getPeriodMatrix(payload, periodKey);
-    if (!periodMatrix || typeof periodMatrix !== "object") {
-      errors.push(`MATRIX_PERIOD_MISSING:${periodKey}`);
+    const periodPresent =
+      Object.prototype.hasOwnProperty.call(payload.matrix || {}, periodKey) ||
+      Object.prototype.hasOwnProperty.call(payload.periods || {}, periodKey);
+    if (!periodMatrix || typeof periodMatrix !== "object" || Object.keys(periodMatrix).length === 0) {
+      skippedPeriods.push(periodKey);
+      warnings.push(periodPresent ? `NO_DATA_PERIOD_SKIPPED:${periodKey}` : `MATRIX_PERIOD_MISSING:${periodKey}`);
       continue;
     }
 
+    let periodHasError = false;
     for (const tp of TP_CANDIDATES) {
       const cell = getTpCell(periodMatrix, tp);
       if (!cell || typeof cell !== "object") {
         errors.push(`MATRIX_CELL_MISSING:${periodKey}:${tp}`);
+        periodHasError = true;
         continue;
       }
       const winRaw = readMetricValueWithPresence(cell, ["winrate", "winRate"]);
       const netRaw = readMetricValueWithPresence(cell, ["net_profit", "netProfit", "netPnl"]);
       if (!winRaw.present || toStatsMetricNumber(winRaw.value) == null) {
         errors.push(`MATRIX_WINRATE_INVALID:${periodKey}:${tp}`);
+        periodHasError = true;
       }
       if (!netRaw.present || toStatsMetricNumber(netRaw.value) == null) {
         errors.push(`MATRIX_NET_PROFIT_INVALID:${periodKey}:${tp}`);
+        periodHasError = true;
       }
     }
 
     const best = getBestcaseCell(payload, periodKey);
     if (!best || typeof best !== "object") {
       errors.push(`BESTCASE_MISSING:${periodKey}`);
+      periodHasError = true;
     } else {
       if (toNumber(best.tp ?? best.tpPct ?? best.takeProfit) == null) {
         errors.push(`BESTCASE_TP_INVALID:${periodKey}`);
+        periodHasError = true;
       }
       const bestWinRaw = readMetricValueWithPresence(best, ["winrate", "winRate"]);
       const bestNetRaw = readMetricValueWithPresence(best, ["net_profit", "netProfit", "netPnl"]);
       if (!bestWinRaw.present || toStatsMetricNumber(bestWinRaw.value) == null) {
         errors.push(`BESTCASE_WINRATE_INVALID:${periodKey}`);
+        periodHasError = true;
       }
       if (!bestNetRaw.present || toStatsMetricNumber(bestNetRaw.value) == null) {
         errors.push(`BESTCASE_NET_PROFIT_INVALID:${periodKey}`);
+        periodHasError = true;
       }
     }
+
+    if (!periodHasError) {
+      usablePeriods.push(periodKey);
+    }
+  }
+
+  if (usablePeriods.length === 0) {
+    errors.push("MATRIX_EMPTY_NO_USABLE_PERIOD");
   }
 
   const expectedPairCount = REQUIRED_PERIODS.length * TP_CANDIDATES.length;
@@ -289,6 +324,9 @@ const validateGridStatsPayload = (payload = {}) => {
       timeframe,
       calcMode,
       pairCount: expectedPairCount,
+      usablePeriods,
+      skippedPeriods,
+      warnings,
     },
   };
 };
@@ -300,7 +338,7 @@ const expandGridStatsMetrics = (payload = {}) => {
   }
   const base = validation.normalized;
   const rows = [];
-  for (const periodKey of REQUIRED_PERIODS) {
+  for (const periodKey of base.usablePeriods || REQUIRED_PERIODS) {
     for (const tp of TP_CANDIDATES) {
       const cell = getTpCell(getPeriodMatrix(payload, periodKey), tp);
       rows.push({
@@ -326,7 +364,7 @@ const extractGridStatsBestcases = (payload = {}) => {
     return [];
   }
   const base = validation.normalized;
-  return REQUIRED_PERIODS.map((periodKey) => {
+  return (base.usablePeriods || REQUIRED_PERIODS).map((periodKey) => {
     const best = getBestcaseCell(payload, periodKey);
     return {
       category: base.category,
