@@ -1,7 +1,13 @@
 import api from '../api';
 import { clearSessionAuth, persistSessionAuth } from '../utils/sessionAuth';
 
-const OPS_ADMIN_IDS = new Set(['test1']);
+const DEFAULT_OPS_ADMIN_IDS = 'test1,quantu.ceo';
+const OPS_ADMIN_IDS = new Set(
+	String(import.meta.env.VITE_OPS_ADMIN_IDS || DEFAULT_OPS_ADMIN_IDS)
+		.split(',')
+		.map((item) => item.trim())
+		.filter(Boolean)
+);
 
 const performLogin = async ({ userId, password, adminSession = false }) => {
 	const res = await api.post('/user/admin/login', { userId, password });

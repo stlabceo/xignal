@@ -105,9 +105,17 @@ const readFingerprint = async (connection) => {
   return rows[0];
 };
 
-const readAdminCount = async (connection) => {
+const readMemberCount = async (connection) => {
   const [[row]] = await connection.query("SELECT COUNT(*) AS count FROM admin_member");
   return Number(row.count || 0);
+};
+
+const readMemberByMemId = async (connection, memId) => {
+  const [rows] = await connection.query(
+    "SELECT id, mem_id AS memId FROM admin_member WHERE mem_id = ? LIMIT 1",
+    [memId]
+  );
+  return rows[0] || null;
 };
 
 const insertAudit = async (connection, { runId, fingerprint, startedAt, result, reason }) => {
@@ -153,9 +161,10 @@ const run = async () => {
 
   try {
     const fingerprint = await readFingerprint(connection);
-    const beforeAdminCount = await readAdminCount(connection);
-    if (options.apply && beforeAdminCount !== 0) {
-      throw new Error("Admin bootstrap apply is only allowed when admin_member is empty");
+    const beforeMemberCount = await readMemberCount(connection);
+    const existingMember = await readMemberByMemId(connection, options.adminId);
+    if (existingMember) {
+      throw new Error("Admin bootstrap target id already exists");
     }
 
     await connection.beginTransaction();
@@ -186,7 +195,7 @@ const run = async () => {
       await connection.rollback();
     }
 
-    const finalAdminCount = options.apply ? await readAdminCount(connection) : beforeAdminCount;
+    const finalMemberCount = options.apply ? await readMemberCount(connection) : beforeMemberCount;
     const payload = {
       ok: true,
       apply: Boolean(options.apply),
@@ -194,8 +203,8 @@ const run = async () => {
       rolledBack: !options.apply,
       localOnly: true,
       adminId: options.apply ? createdId : null,
-      beforeAdminCount,
-      finalAdminCount,
+      beforeMemberCount,
+      finalMemberCount,
       rawPasswordReturned: false,
       fingerprint,
       approvalPhraseRequiredForApply: APPROVAL_PHRASE,
