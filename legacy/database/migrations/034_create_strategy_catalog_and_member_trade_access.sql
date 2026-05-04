@@ -56,7 +56,7 @@ VALUES
   ),
   (
     'grid',
-    'STATIC_GRID',
+    'SQZ+GRID',
     'SQZ+GRID',
     JSON_ARRAY('PUMPUSDT'),
     JSON_ARRAY('5MIN'),
