@@ -1,22 +1,22 @@
 services:
   mysql:
     image: mysql:8.4
-    container_name: xignal-mysql
+    container_name: quantu-mysql
     environment:
-      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_PASSWORD: ${QUANTU_MYSQL_ROOT_PASSWORD:?set QUANTU_MYSQL_ROOT_PASSWORD}
       MYSQL_ROOT_HOST: "%"
-      MYSQL_DATABASE: xignal
+      MYSQL_DATABASE: quantu_local
     ports:
-      - "3306:3306"
+      - "127.0.0.1:3307:3306"
     volumes:
-      - mysql-data:/var/lib/mysql
+      - quantu-mysql-data:/var/lib/mysql
     
 
   redis:
     image: redis:7.4
-    container_name: xignal-redis
+    container_name: quantu-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
 volumes:
-  mysql-data:
+  quantu-mysql-data:

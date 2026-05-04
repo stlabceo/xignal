@@ -1,9 +1,15 @@
 const fs = require("fs");
 const path = require("path");
+const {
+  assertSafeDbEnv,
+  getBackendEnvPath,
+  loadEnvFileIfPresent,
+} = require("../../database/db-fingerprint-guard");
 
 const QA_DIR = __dirname;
 const EXAMPLE_CONFIG_PATH = path.join(QA_DIR, "qa-config.example.json");
 const LOCAL_CONFIG_PATH = path.join(QA_DIR, "qa-config.local.json");
+const BACKEND_ENV_PATH = getBackendEnvPath();
 
 const DEFAULTS = {
   mode: "data-replay",
@@ -127,6 +133,9 @@ const finalizeConfig = (config = {}, meta = {}) => {
 };
 
 const loadQaConfig = (options = {}) => {
+  loadEnvFileIfPresent(BACKEND_ENV_PATH);
+  assertSafeDbEnv({ context: "qa-runner" });
+
   const args = parseArgs(options.argv);
   const explicitConfigPath = args.config
     ? path.resolve(process.cwd(), args.config)

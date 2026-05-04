@@ -18,10 +18,10 @@ Windows PowerShell example:
 
 ```powershell
 $env:DB_HOST="127.0.0.1"
-$env:DB_PORT="3306"
-$env:DB_USER="root"
-$env:DB_PASSWORD="root"
-$env:DB_NAME="xignal"
+$env:DB_PORT="3307"
+$env:DB_USER="quantu_app"
+$env:DB_PASSWORD="<local-quantu-password>"
+$env:DB_NAME="quantu_local"
 ```
 
 Optional:

@@ -35,7 +35,7 @@ Invoke-RestMethod -Method Post -Uri 'http://localhost:3003/api/v1/internal/obser
 DB query:
 
 ```powershell
-docker exec xignal-mysql mysql -uroot -proot xignal -B -N -e "SELECT id, dedupe_key, error_instance_seq, occurrence_count, IFNULL(DATE_FORMAT(resolved_at, '%Y-%m-%d %H:%i:%s.%f'), 'NULL') FROM notification_errors WHERE execution_unit_id = 9001 ORDER BY id ASC;"
+docker exec --env "MYSQL_PWD=<local-quantu-password>" quantu-mysql mysql -uquantu_app quantu_local -B -N -e "SELECT id, dedupe_key, error_instance_seq, occurrence_count, IFNULL(DATE_FORMAT(resolved_at, '%Y-%m-%d %H:%i:%s.%f'), 'NULL') FROM notification_errors WHERE execution_unit_id = 9001 ORDER BY id ASC;"
 ```
 
 log file check:

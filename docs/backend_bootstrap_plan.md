@@ -17,10 +17,10 @@ Suggested flow:
 npm install
 docker compose -f infra/docker/docker-compose.yml up -d
 set DB_HOST=127.0.0.1
-set DB_PORT=3306
-set DB_USER=root
-set DB_PASSWORD=root
-set DB_NAME=xignal
+set DB_PORT=3307
+set DB_USER=quantu_app
+set DB_PASSWORD=<local-quantu-password>
+set DB_NAME=quantu_local
 npm --workspace apps/backend run dev
 ```
 

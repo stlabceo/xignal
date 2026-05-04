@@ -1,18 +1,16 @@
-// const db = require('mysql');
-
-// const conn = db.createConnection({
-//     host:'localhost',
-//     port:3306,
-//     user:'root',
-//     password:'zx2356',
-//     database:'seon'
-// });
 const mysql = require('mysql2/promise');
 const path = require('path');
+const {
+    assertSafeDatabaseFingerprint,
+    assertSafeDbEnv,
+} = require('../db-fingerprint-guard');
+
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
+assertSafeDbEnv({ context: 'runtime' });
 
 const conn = mysql.createPool({
     host: process.env.MYSQL_HOST,
+    port: Number(process.env.MYSQL_PORT || process.env.DB_PORT || 3306),
     user: process.env.MYSQL_USER,
     password: process.env.MYSQL_PW,
     database: process.env.MYSQL_DB,
@@ -25,5 +23,16 @@ const conn = mysql.createPool({
     keepAliveInitialDelay: 0,
     queueLimit: 0,
 })
+
+const startupFingerprintCheck = assertSafeDatabaseFingerprint(conn, {
+    context: 'runtime-fingerprint',
+    host: process.env.MYSQL_HOST,
+}).catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+    setImmediate(() => process.exit(1));
+});
+
+conn.__startupFingerprintCheck = startupFingerprintCheck;
 
 module.exports = conn;
