@@ -638,6 +638,23 @@ const OPS_ADMIN_IDS = new Set(
     .filter(Boolean)
 );
 
+const hasOpsAdminAccess = (member = {}) => {
+  if (!member) {
+    return false;
+  }
+  if (Number(member.grade) > 0) {
+    return false;
+  }
+  return OPS_ADMIN_IDS.has(String(member.mem_id || "").trim());
+};
+
+const decorateOpsAdminMemberForClient = (member = {}) => ({
+  ...sanitizeMemberForClient(member),
+  isOpsAdmin: true,
+  adminRole: "ops",
+  permissions: ["ops_admin"],
+});
+
 const prettifyWebhookResultCode = (value) =>
   String(value || "")
     .trim()
@@ -970,11 +987,7 @@ const loadOpsAccessMember = async (userId) => {
     return null;
   }
 
-  if (Number(member.grade) > 0) {
-    return false;
-  }
-
-  if (!OPS_ADMIN_IDS.has(String(member.mem_id || "").trim())) {
+  if (!hasOpsAdminAccess(member)) {
     return false;
   }
 
@@ -986,7 +999,7 @@ const loadAdminConsoleAccessMember = async (userId) => {
   if (!member) {
     return null;
   }
-  if (Number(member.grade) > 0) {
+  if (!hasOpsAdminAccess(member)) {
     return false;
   }
   return member;
@@ -4010,9 +4023,15 @@ router.post("/logout", async (req, res) => {
 router.get("/myinfo", async (req, res) => {
   const userId = req.decoded.userId;
 
-  let reData = await dbcon.DBOneCall(`CALL SP_A_PER_MY_GET(?)`, [userId]);
+  const accessMember = await loadOpsAccessMember(userId);
+  if (accessMember === null) {
+    return sendRouteError(res, 404, "회원 정보를 찾을 수 없습니다.");
+  }
+  if (accessMember === false) {
+    return sendRouteError(res, 403, "관리자 접근 권한이 없습니다.");
+  }
 
-  return res.send(reData);
+  return res.send(decorateOpsAdminMemberForClient(accessMember));
 });
 
 router.get("/member", async (req, res) => {

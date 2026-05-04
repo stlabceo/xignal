@@ -1,14 +1,6 @@
 import api from '../api';
 import { clearSessionAuth, persistSessionAuth } from '../utils/sessionAuth';
 
-const DEFAULT_OPS_ADMIN_IDS = 'test1,quantu.ceo';
-const OPS_ADMIN_IDS = new Set(
-	String(import.meta.env.VITE_OPS_ADMIN_IDS || DEFAULT_OPS_ADMIN_IDS)
-		.split(',')
-		.map((item) => item.trim())
-		.filter(Boolean)
-);
-
 const performLogin = async ({ userId, password, adminSession = false }) => {
 	const res = await api.post('/user/admin/login', { userId, password });
 	const { token } = res || {};
@@ -60,7 +52,7 @@ export const auth = {
 		performLogin({ ...body, adminSession: true })
 			.then(() => api.get('/admin/myinfo'))
 			.then((res) => {
-				if (Number(res?.grade) <= 0 && OPS_ADMIN_IDS.has(String(res?.mem_id || '').trim())) {
+				if (res?.isOpsAdmin === true || res?.adminRole === 'ops' || res?.permissions?.includes?.('ops_admin')) {
 					callback({ ok: true, profile: res });
 					return;
 				}
