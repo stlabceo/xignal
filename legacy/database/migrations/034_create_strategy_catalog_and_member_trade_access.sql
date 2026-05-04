@@ -44,6 +44,17 @@ VALUES
     'Default signal strategy catalog'
   ),
   (
+    'signal',
+    'SQZ+GRID+BREAKOUT',
+    'SQZGBRK',
+    JSON_ARRAY('PUMPUSDT'),
+    JSON_ARRAY('5MIN'),
+    'ALL',
+    NULL,
+    'Y',
+    'QUANTU signal breakout strategy; displayName=SQZ+GRID+BREAKOUT; runtimeCode=SQZGBRK'
+  ),
+  (
     'grid',
     'STATIC_GRID',
     'SQZ+GRID',
