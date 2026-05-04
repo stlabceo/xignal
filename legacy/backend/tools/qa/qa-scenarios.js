@@ -117,6 +117,9 @@ const filterAuditLogs = (logs = []) =>
     || line.includes("USER_ACTION_REQUIRED_OVERFILLED_OR_CROSS_PID")
     || line.includes("PID_CLOSE_QTY_GUARD")
     || line.includes("CROSS_PID_AGGREGATE_MISMATCH_DETECTED")
+    || line.includes("GRID_MANUAL_CLOSE_IN_FLIGHT_BLOCKED")
+    || line.includes("BOUND_LOCAL_IDEMPOTENT_OK")
+    || line.includes("EXIT_FILL_WITHOUT_PID_OWNED_QTY_BLOCKED")
     || line.includes("SIGNAL_EXCHANGE_FLAT_RECONCILE")
     || line.includes("GRID_EXCHANGE_FLAT_RECONCILE")
     || line.includes("SNAPSHOT_ORPHAN_CLOSED")
@@ -5015,6 +5018,645 @@ const runCrossPidOverfillGuardWithTpGmanual = async ({ uid, cleanup = true } = {
   }
 };
 
+const buildPumpMockBinanceClient = ({
+  symbol = "QAPUMPUSDT",
+  positionSide = "SHORT",
+  aggregateQty = 0,
+  placedOrders = [],
+  placedAlgoOrders = [],
+} = {}) => ({
+  __qaMockBinanceClient: true,
+  futuresExchangeInfo: async () => ({
+    symbols: [{
+      symbol: normalizeSymbol(symbol),
+      filters: [
+        { filterType: "LOT_SIZE", minQty: "0.001", stepSize: "0.001" },
+        { filterType: "PRICE_FILTER", tickSize: "0.0000001" },
+      ],
+    }],
+  }),
+  futuresPositionRisk: async () => ([{
+    symbol: normalizeSymbol(symbol),
+    positionSide,
+    positionAmt: positionSide === "SHORT" ? `-${aggregateQty}` : `${aggregateQty}`,
+  }]),
+  futuresOrder: async (type, side, orderSymbol, quantity, price, options = {}) => {
+    placedOrders.push({
+      type,
+      side,
+      symbol: orderSymbol,
+      quantity,
+      price,
+      options,
+      orderId: `QA-MOCK-ORDER-${placedOrders.length + 1}`,
+      clientOrderId: options?.newClientOrderId || null,
+    });
+    return placedOrders[placedOrders.length - 1];
+  },
+  futuresOpenOrders: async () => [],
+  privateFuturesRequest: async (endpoint, params = {}, method = "GET") => {
+    if (method === "POST") {
+      placedAlgoOrders.push({ endpoint, ...params, strategyId: `QA-MOCK-ALGO-${placedAlgoOrders.length + 1}` });
+      return placedAlgoOrders[placedAlgoOrders.length - 1];
+    }
+    return [];
+  },
+});
+
+const runPumpCrossPidGridGmanualOverclose = async ({ uid, cleanup = true } = {}) => {
+  const resolvedUid = await resolveReplayUid(uid || DEFAULT_REPLAY_UID_FALLBACK);
+  const coinQa = loadCoinQaModule();
+  const targetGrid = await createTempGridStrategy({
+    uid: resolvedUid,
+    symbol: "QAPUMPUSDT",
+    bunbong: "1MIN",
+    regimeStatus: "ACTIVE",
+    shortLegStatus: "OPEN",
+    shortQty: 13950,
+  });
+  const siblingSignal = await createTempSignalPlay({
+    uid: resolvedUid,
+    symbol: "QAPUMPUSDT",
+    bunbong: "1MIN",
+    status: "EXACT",
+    signalType: "SELL",
+    rSignalType: "SELL",
+    rQty: 13906,
+  });
+  const cleanupPids = [targetGrid.id, siblingSignal.id];
+  const rowCountsBefore = await countArtifactRowsForPids({ uid: resolvedUid, pids: cleanupPids });
+  const cleanupArtifactsForScenario = async () => cleanupArtifacts({ uid: resolvedUid, pids: cleanupPids });
+  const placedOrders = [];
+  const aggregateQty = 13950 + 13906;
+  coinQa.__qa.binance[resolvedUid] = buildPumpMockBinanceClient({
+    symbol: "QAPUMPUSDT",
+    positionSide: "SHORT",
+    aggregateQty,
+    placedOrders,
+  });
+
+  try {
+    const scenario = createScenario(
+      "PUMP cross-PID grid GMANUAL overclose",
+      "GMANUAL close is clamped to PID-owned qty and duplicate in-flight close cannot consume sibling exposure"
+    );
+
+    await pidPositionLedger.applyEntryFill(createEntryPayload({
+      uid: resolvedUid,
+      pid: targetGrid.id,
+      strategyCategory: "grid",
+      symbol: "QAPUMPUSDT",
+      positionSide: "SHORT",
+      sourceClientOrderId: `GENTRY_S_${resolvedUid}_${targetGrid.id}_PUMP1`,
+      sourceOrderId: `PUMP1-GENTRY-${targetGrid.id}`,
+      sourceTradeId: `PUMP1-GENTRY-T-${targetGrid.id}`,
+      fillQty: 13950,
+      fillPrice: 0.002,
+      eventType: "GRID_ENTRY_FILL",
+      tradeTime: "2026-05-04T00:00:00Z",
+    }));
+    await pidPositionLedger.applyEntryFill(createEntryPayload({
+      uid: resolvedUid,
+      pid: siblingSignal.id,
+      strategyCategory: "signal",
+      symbol: "QAPUMPUSDT",
+      positionSide: "SHORT",
+      sourceClientOrderId: `NEW_${resolvedUid}_${siblingSignal.id}_PUMP1`,
+      sourceOrderId: `PUMP1-SENTRY-${siblingSignal.id}`,
+      sourceTradeId: `PUMP1-SENTRY-T-${siblingSignal.id}`,
+      fillQty: 13906,
+      fillPrice: 0.002,
+      eventType: "SIGNAL_ENTRY_FILL",
+      tradeTime: "2026-05-04T00:00:01Z",
+    }));
+
+    const captured = await captureConsoleLogs(async () => {
+      await coinQa.__qa.closeGridLegMarketOrder({
+        uid: resolvedUid,
+        pid: targetGrid.id,
+        symbol: "QAPUMPUSDT",
+        leg: "SHORT",
+        qty: aggregateQty,
+      });
+      await coinQa.__qa.closeGridLegMarketOrder({
+        uid: resolvedUid,
+        pid: targetGrid.id,
+        symbol: "QAPUMPUSDT",
+        leg: "SHORT",
+        qty: aggregateQty,
+      });
+    });
+
+    const targetState = await loadScenarioState({
+      uid: resolvedUid,
+      pid: targetGrid.id,
+      strategyCategory: "grid",
+      positionSide: "SHORT",
+    });
+    const siblingState = await loadScenarioState({
+      uid: resolvedUid,
+      pid: siblingSignal.id,
+      strategyCategory: "signal",
+      positionSide: "SHORT",
+    });
+
+    expectEqual(scenario, placedOrders.length, 1, "only one GMANUAL close order should be submitted");
+    expectApprox(scenario, Number(placedOrders[0]?.quantity || 0), 13950, 1e-9, "GMANUAL qty should be clamped to target PID-owned qty");
+    expectApprox(scenario, siblingState.snapshot?.openQty, 13906, 1e-9, "sibling PID exposure should remain untouched");
+    expectTrue(
+      scenario,
+      filterAuditLogs(captured.logs).some((line) => line.includes("GRID_MANUAL_CLOSE_IN_FLIGHT_BLOCKED")),
+      "duplicate GMANUAL should be blocked by in-flight reservation"
+    );
+
+    return finalizeScenario(scenario, {
+      uid: resolvedUid,
+      pid: `${targetGrid.id},${siblingSignal.id}`,
+      strategyCategory: "mixed",
+      symbol: "QAPUMPUSDT",
+      cleanupPids,
+      rowCountsBefore,
+      ledgerRows: targetState.ledgerRows.concat(siblingState.ledgerRows),
+      snapshot: {
+        target: summarizeSnapshot(targetState.snapshot),
+        sibling: summarizeSnapshot(siblingState.snapshot),
+      },
+      row: { placedOrders },
+      reservations: targetState.reservations.concat(siblingState.reservations),
+      msgList: targetState.msgList.concat(siblingState.msgList),
+      auditLogs: filterAuditLogs(captured.logs),
+    });
+  } finally {
+    delete coinQa.__qa.binance[resolvedUid];
+    if (cleanup !== false) {
+      await cleanupArtifactsForScenario();
+    }
+  }
+};
+
+const runPumpSignalDuplicateTpOverclose = async ({ uid, cleanup = true } = {}) => {
+  const resolvedUid = await resolveReplayUid(uid || DEFAULT_REPLAY_UID_FALLBACK);
+  const coinQa = loadCoinQaModule();
+  const targetPlay = await createTempSignalPlay({
+    uid: resolvedUid,
+    symbol: "QAPUMPUSDT",
+    bunbong: "1MIN",
+    status: "EXACT",
+    signalType: "BUY",
+    rSignalType: "BUY",
+    rExactPrice: 0.002,
+    rQty: 13774,
+  });
+  const siblingA = await createTempSignalPlay({
+    uid: resolvedUid,
+    symbol: "QAPUMPUSDT",
+    bunbong: "1MIN",
+    status: "EXACT",
+    signalType: "BUY",
+    rSignalType: "BUY",
+    rQty: 13751,
+  });
+  const siblingB = await createTempSignalPlay({
+    uid: resolvedUid,
+    symbol: "QAPUMPUSDT",
+    bunbong: "1MIN",
+    status: "EXACT",
+    signalType: "BUY",
+    rSignalType: "BUY",
+    rQty: 13751,
+  });
+  const cleanupPids = [targetPlay.id, siblingA.id, siblingB.id];
+  const rowCountsBefore = await countArtifactRowsForPids({ uid: resolvedUid, pids: cleanupPids });
+  const cleanupArtifactsForScenario = async () => cleanupArtifacts({ uid: resolvedUid, pids: cleanupPids });
+  const placedAlgoOrders = [];
+  coinQa.__qa.binance[resolvedUid] = buildPumpMockBinanceClient({
+    symbol: "QAPUMPUSDT",
+    positionSide: "LONG",
+    aggregateQty: 41276,
+    placedAlgoOrders,
+  });
+
+  try {
+    const scenario = createScenario(
+      "PUMP signal duplicate TP overclose",
+      "duplicate TP emission is idempotent and duplicate TP fill cannot apply beyond PID-owned openQty"
+    );
+    const entryOrderId = `E${targetPlay.id}P2`;
+    await query(
+      `UPDATE live_play_list
+          SET profit = 0.3,
+              profitTradeType = 'per',
+              st = 0.0021,
+              autoST = 'N',
+              r_tid = ?
+        WHERE id = ?`,
+      [entryOrderId, targetPlay.id]
+    );
+
+    for (const payload of [
+      { pid: targetPlay.id, qty: 13774, cid: entryOrderId, oid: `PUMP2-E-${targetPlay.id}`, tid: `PUMP2-ET-${targetPlay.id}` },
+      { pid: siblingA.id, qty: 13751, cid: `E${siblingA.id}P2`, oid: `PUMP2-E-${siblingA.id}`, tid: `PUMP2-ET-${siblingA.id}` },
+      { pid: siblingB.id, qty: 13751, cid: `E${siblingB.id}P2`, oid: `PUMP2-E-${siblingB.id}`, tid: `PUMP2-ET-${siblingB.id}` },
+    ]) {
+      await pidPositionLedger.applyEntryFill(createEntryPayload({
+        uid: resolvedUid,
+        pid: payload.pid,
+        strategyCategory: "signal",
+        symbol: "QAPUMPUSDT",
+        positionSide: "LONG",
+        sourceClientOrderId: payload.cid,
+        sourceOrderId: payload.oid,
+        sourceTradeId: payload.tid,
+        fillQty: payload.qty,
+        fillPrice: 0.002,
+        eventType: "SIGNAL_ENTRY_FILL",
+        tradeTime: "2026-05-04T00:10:00Z",
+      }));
+    }
+
+    const profitClientOrderId = `PROFIT_${resolvedUid}_${targetPlay.id}_${entryOrderId}`;
+    await insertReservation({
+      uid: resolvedUid,
+      pid: targetPlay.id,
+      strategyCategory: "signal",
+      symbol: "QAPUMPUSDT",
+      positionSide: "LONG",
+      clientOrderId: profitClientOrderId,
+      sourceOrderId: `P2O${targetPlay.id}`,
+      reservationKind: "BOUND_PROFIT",
+      reservedQty: 13774,
+      status: "ACTIVE",
+    });
+
+    const captured = await captureConsoleLogs(async () => {
+      const localCoverage = await coinQa.__qa.hasRecentLocalBoundReservationCoverage({
+        uid: resolvedUid,
+        pid: targetPlay.id,
+        symbol: "QAPUMPUSDT",
+        positionSide: "LONG",
+        entryOrderId,
+        expectedTargets: [{ prefix: "PROFIT", quantity: 13774 }],
+        quantityTolerance: 0.001,
+      });
+      if (!localCoverage) {
+        throw new Error("local duplicate TP reservation coverage was not detected");
+      }
+      await pidPositionLedger.applyExitFill(createExitPayload({
+        uid: resolvedUid,
+        pid: targetPlay.id,
+        strategyCategory: "signal",
+        symbol: "QAPUMPUSDT",
+        positionSide: "LONG",
+        sourceClientOrderId: profitClientOrderId,
+        sourceOrderId: `P2O${targetPlay.id}`,
+        sourceTradeId: `P2T1${targetPlay.id}`,
+        fillQty: 13774,
+        fillPrice: 0.0022,
+        realizedPnl: 2,
+        eventType: "SIGNAL_TP_FILL",
+        tradeTime: "2026-05-04T00:11:00Z",
+      }));
+      await pidPositionLedger.applyExitFill(createExitPayload({
+        uid: resolvedUid,
+        pid: targetPlay.id,
+        strategyCategory: "signal",
+        symbol: "QAPUMPUSDT",
+        positionSide: "LONG",
+        sourceClientOrderId: profitClientOrderId,
+        sourceOrderId: `P2D${targetPlay.id}`,
+        sourceTradeId: `P2T2${targetPlay.id}`,
+        fillQty: 13774,
+        fillPrice: 0.0022,
+        realizedPnl: 2,
+        eventType: "SIGNAL_TP_FILL",
+        tradeTime: "2026-05-04T00:11:01Z",
+      }));
+    });
+
+    const targetState = await loadScenarioState({
+      uid: resolvedUid,
+      pid: targetPlay.id,
+      strategyCategory: "signal",
+      positionSide: "LONG",
+    });
+    const siblingAState = await loadScenarioState({
+      uid: resolvedUid,
+      pid: siblingA.id,
+      strategyCategory: "signal",
+      positionSide: "LONG",
+    });
+    const siblingBState = await loadScenarioState({
+      uid: resolvedUid,
+      pid: siblingB.id,
+      strategyCategory: "signal",
+      positionSide: "LONG",
+    });
+    const targetExitRows = targetState.ledgerRows.filter((row) => row.eventType === "SIGNAL_TP_FILL");
+
+    expectEqual(scenario, placedAlgoOrders.length, 0, "local active TP reservation should prevent duplicate TP algo emission");
+    expectEqual(scenario, targetExitRows.length, 1, "duplicate TP fill after closed PID should not create a second ledger exit");
+    expectApprox(scenario, targetState.snapshot?.openQty, 0, 1e-9, "target PID should close exactly once");
+    expectApprox(scenario, siblingAState.snapshot?.openQty, 13751, 1e-9, "first sibling remains open");
+    expectApprox(scenario, siblingBState.snapshot?.openQty, 13751, 1e-9, "second sibling remains open");
+    expectTrue(
+      scenario,
+      filterAuditLogs(captured.logs).some((line) => line.includes("BOUND_LOCAL_IDEMPOTENT_OK")),
+      "duplicate TP emission should be idempotent from local reservation"
+    );
+    expectTrue(
+      scenario,
+      filterAuditLogs(captured.logs).some((line) => line.includes("EXIT_FILL_WITHOUT_PID_OWNED_QTY_BLOCKED")),
+      "second TP fill should be blocked when PID-owned qty is already zero"
+    );
+
+    return finalizeScenario(scenario, {
+      uid: resolvedUid,
+      pid: `${targetPlay.id},${siblingA.id},${siblingB.id}`,
+      strategyCategory: "mixed",
+      symbol: "QAPUMPUSDT",
+      cleanupPids,
+      rowCountsBefore,
+      ledgerRows: targetState.ledgerRows.concat(siblingAState.ledgerRows, siblingBState.ledgerRows),
+      snapshot: {
+        target: summarizeSnapshot(targetState.snapshot),
+        siblingA: summarizeSnapshot(siblingAState.snapshot),
+        siblingB: summarizeSnapshot(siblingBState.snapshot),
+      },
+      row: { placedAlgoOrders },
+      reservations: targetState.reservations.concat(siblingAState.reservations, siblingBState.reservations),
+      msgList: targetState.msgList.concat(siblingAState.msgList, siblingBState.msgList),
+      auditLogs: filterAuditLogs(captured.logs),
+    });
+  } finally {
+    delete coinQa.__qa.binance[resolvedUid];
+    if (cleanup !== false) {
+      await cleanupArtifactsForScenario();
+    }
+  }
+};
+
+const runPumpCrossPidGridManualLongOverclose = async ({ uid, cleanup = true } = {}) => {
+  const resolvedUid = await resolveReplayUid(uid || DEFAULT_REPLAY_UID_FALLBACK);
+  const coinQa = loadCoinQaModule();
+  const targetGrid = await createTempGridStrategy({
+    uid: resolvedUid,
+    symbol: "QAPUMPUSDT",
+    bunbong: "1MIN",
+    regimeStatus: "ACTIVE",
+    longLegStatus: "OPEN",
+    longQty: 11140,
+  });
+  const siblingGrid = await createTempGridStrategy({
+    uid: resolvedUid,
+    symbol: "QAPUMPUSDT",
+    bunbong: "1MIN",
+    regimeStatus: "ACTIVE",
+    longLegStatus: "OPEN",
+    longQty: 2679,
+  });
+  const cleanupPids = [targetGrid.id, siblingGrid.id];
+  const rowCountsBefore = await countArtifactRowsForPids({ uid: resolvedUid, pids: cleanupPids });
+  const cleanupArtifactsForScenario = async () => cleanupArtifacts({ uid: resolvedUid, pids: cleanupPids });
+  const placedOrders = [];
+  const aggregateQty = 11140 + 2679;
+  coinQa.__qa.binance[resolvedUid] = buildPumpMockBinanceClient({
+    symbol: "QAPUMPUSDT",
+    positionSide: "LONG",
+    aggregateQty,
+    placedOrders,
+  });
+
+  try {
+    const scenario = createScenario(
+      "PUMP cross-PID grid manual LONG overclose",
+      "GMANUAL_L close cannot consume sibling grid LONG exposure"
+    );
+
+    await pidPositionLedger.applyEntryFill(createEntryPayload({
+      uid: resolvedUid,
+      pid: targetGrid.id,
+      strategyCategory: "grid",
+      symbol: "QAPUMPUSDT",
+      positionSide: "LONG",
+      sourceClientOrderId: `GENTRY_L_${resolvedUid}_${targetGrid.id}_PUMP3`,
+      sourceOrderId: `PUMP3-GENTRY-${targetGrid.id}`,
+      sourceTradeId: `PUMP3-GENTRY-T-${targetGrid.id}`,
+      fillQty: 11140,
+      fillPrice: 0.002,
+      eventType: "GRID_ENTRY_FILL",
+      tradeTime: "2026-05-04T00:20:00Z",
+    }));
+    await pidPositionLedger.applyEntryFill(createEntryPayload({
+      uid: resolvedUid,
+      pid: siblingGrid.id,
+      strategyCategory: "grid",
+      symbol: "QAPUMPUSDT",
+      positionSide: "LONG",
+      sourceClientOrderId: `GENTRY_L_${resolvedUid}_${siblingGrid.id}_PUMP3`,
+      sourceOrderId: `PUMP3-GENTRY-${siblingGrid.id}`,
+      sourceTradeId: `PUMP3-GENTRY-T-${siblingGrid.id}`,
+      fillQty: 2679,
+      fillPrice: 0.002,
+      eventType: "GRID_ENTRY_FILL",
+      tradeTime: "2026-05-04T00:20:01Z",
+    }));
+
+    const captured = await captureConsoleLogs(async () => {
+      await coinQa.__qa.closeGridLegMarketOrder({
+        uid: resolvedUid,
+        pid: targetGrid.id,
+        symbol: "QAPUMPUSDT",
+        leg: "LONG",
+        qty: aggregateQty,
+      });
+      await coinQa.__qa.closeGridLegMarketOrder({
+        uid: resolvedUid,
+        pid: targetGrid.id,
+        symbol: "QAPUMPUSDT",
+        leg: "LONG",
+        qty: aggregateQty,
+      });
+    });
+
+    const targetState = await loadScenarioState({
+      uid: resolvedUid,
+      pid: targetGrid.id,
+      strategyCategory: "grid",
+      positionSide: "LONG",
+    });
+    const siblingState = await loadScenarioState({
+      uid: resolvedUid,
+      pid: siblingGrid.id,
+      strategyCategory: "grid",
+      positionSide: "LONG",
+    });
+
+    expectEqual(scenario, placedOrders.length, 1, "only one GMANUAL_L close order should be submitted");
+    expectApprox(scenario, Number(placedOrders[0]?.quantity || 0), 11140, 1e-9, "GMANUAL_L qty should be clamped to target PID-owned qty");
+    expectApprox(scenario, siblingState.snapshot?.openQty, 2679, 1e-9, "sibling LONG PID remains open");
+    expectTrue(
+      scenario,
+      filterAuditLogs(captured.logs).some((line) => line.includes("GRID_MANUAL_CLOSE_IN_FLIGHT_BLOCKED")),
+      "duplicate GMANUAL_L should be blocked by in-flight reservation"
+    );
+
+    return finalizeScenario(scenario, {
+      uid: resolvedUid,
+      pid: `${targetGrid.id},${siblingGrid.id}`,
+      strategyCategory: "mixed",
+      symbol: "QAPUMPUSDT",
+      cleanupPids,
+      rowCountsBefore,
+      ledgerRows: targetState.ledgerRows.concat(siblingState.ledgerRows),
+      snapshot: {
+        target: summarizeSnapshot(targetState.snapshot),
+        sibling: summarizeSnapshot(siblingState.snapshot),
+      },
+      row: { placedOrders },
+      reservations: targetState.reservations.concat(siblingState.reservations),
+      msgList: targetState.msgList.concat(siblingState.msgList),
+      auditLogs: filterAuditLogs(captured.logs),
+    });
+  } finally {
+    delete coinQa.__qa.binance[resolvedUid];
+    if (cleanup !== false) {
+      await cleanupArtifactsForScenario();
+    }
+  }
+};
+
+const runPumpPartialResidualProjection = async ({ uid, cleanup = true } = {}) => {
+  const resolvedUid = await resolveReplayUid(uid || DEFAULT_REPLAY_UID_FALLBACK);
+  const play = await createTempSignalPlay({
+    uid: resolvedUid,
+    symbol: "QAPUMPUSDT",
+    bunbong: "1MIN",
+    status: "EXACT",
+    signalType: "SELL",
+    rSignalType: "SELL",
+    rExactPrice: 0.002,
+    rQty: 13906,
+  });
+  const cleanupPids = [play.id];
+  const rowCountsBefore = await countArtifactRowsForPids({ uid: resolvedUid, pids: cleanupPids });
+  const cleanupArtifactsForScenario = async () => cleanupArtifacts({ uid: resolvedUid, pids: cleanupPids });
+
+  try {
+    const scenario = createScenario(
+      "PUMP partial residual projection",
+      "partial close updates PID-owned remaining openQty and final residual close moves to CLOSED"
+    );
+
+    await pidPositionLedger.applyEntryFill(createEntryPayload({
+      uid: resolvedUid,
+      pid: play.id,
+      strategyCategory: "signal",
+      symbol: "QAPUMPUSDT",
+      positionSide: "SHORT",
+      sourceClientOrderId: `NEW_${resolvedUid}_${play.id}_PUMP4`,
+      sourceOrderId: `PUMP4-E-${play.id}`,
+      sourceTradeId: `PUMP4-ET-${play.id}`,
+      fillQty: 13906,
+      fillPrice: 0.002,
+      eventType: "SIGNAL_ENTRY_FILL",
+      tradeTime: "2026-05-04T00:30:00Z",
+    }));
+    await pidPositionLedger.applyExitFill(createExitPayload({
+      uid: resolvedUid,
+      pid: play.id,
+      strategyCategory: "signal",
+      symbol: "QAPUMPUSDT",
+      positionSide: "SHORT",
+      sourceClientOrderId: `PROFIT_${resolvedUid}_${play.id}_P4P`,
+      sourceOrderId: `P4P${play.id}`,
+      sourceTradeId: `P4PT${play.id}`,
+      fillQty: 13819,
+      fillPrice: 0.0019,
+      realizedPnl: 1,
+      eventType: "SIGNAL_TP_FILL",
+      tradeTime: "2026-05-04T00:31:00Z",
+    }));
+    await pidPositionLedger.syncSignalPlaySnapshot(play.id, "SHORT");
+    const residualSnapshot = await loadSnapshot({
+      uid: resolvedUid,
+      pid: play.id,
+      strategyCategory: "signal",
+      positionSide: "SHORT",
+    });
+    const residualRow = await loadSignalRow(play.id);
+
+    await insertReservation({
+      uid: resolvedUid,
+      pid: play.id,
+      strategyCategory: "signal",
+      symbol: "QAPUMPUSDT",
+      positionSide: "SHORT",
+      clientOrderId: `PROFIT_${resolvedUid}_${play.id}_P4F`,
+      sourceOrderId: `P4F${play.id}`,
+      reservationKind: "BOUND_PROFIT",
+      reservedQty: 87,
+      status: "ACTIVE",
+    });
+    await pidPositionLedger.applyExitFill(createExitPayload({
+      uid: resolvedUid,
+      pid: play.id,
+      strategyCategory: "signal",
+      symbol: "QAPUMPUSDT",
+      positionSide: "SHORT",
+      sourceClientOrderId: `PROFIT_${resolvedUid}_${play.id}_P4F`,
+      sourceOrderId: `P4F${play.id}`,
+      sourceTradeId: `P4FT${play.id}`,
+      fillQty: 87,
+      fillPrice: 0.00185,
+      realizedPnl: 0.1,
+      eventType: "SIGNAL_TP_FILL",
+      tradeTime: "2026-05-04T00:32:00Z",
+    }));
+    await pidPositionLedger.syncSignalPlaySnapshot(play.id, "SHORT");
+
+    const state = await loadScenarioState({
+      uid: resolvedUid,
+      pid: play.id,
+      strategyCategory: "signal",
+      positionSide: "SHORT",
+    });
+
+    expectApprox(scenario, residualSnapshot?.openQty, 87, 1e-9, "snapshot should show residual qty after partial close");
+    expectApprox(scenario, residualRow?.r_qty, 87, 1e-9, "user projection row should show residual qty after partial close");
+    expectEqual(scenario, residualSnapshot?.status, "OPEN", "residual snapshot remains OPEN");
+    expectApprox(scenario, state.snapshot?.openQty, 0, 1e-9, "final residual close should flatten PID-owned qty");
+    expectEqual(scenario, state.snapshot?.status, "CLOSED", "final residual close should mark CLOSED");
+
+    return finalizeScenario(scenario, {
+      uid: resolvedUid,
+      pid: play.id,
+      strategyCategory: "signal",
+      symbol: "QAPUMPUSDT",
+      cleanupPids,
+      rowCountsBefore,
+      ledgerRows: state.ledgerRows,
+      snapshot: state.snapshot,
+      row: {
+        residual: {
+          snapshot: summarizeSnapshot(residualSnapshot),
+          r_qty: Number(residualRow?.r_qty || 0),
+        },
+        final: state.row,
+      },
+      reservations: state.reservations,
+      msgList: state.msgList,
+      auditLogs: [],
+    });
+  } finally {
+    if (cleanup !== false) {
+      await cleanupArtifactsForScenario();
+    }
+  }
+};
+
+const runGridStaleReservationDoesNotCancelCurrentProtection = async (options = {}) =>
+  await runGridDuplicateExitRecoveryDoesNotCancelCurrentProtection(options);
+
 const runDirectOrphanFlatten = async ({ uid, cleanup = true } = {}) => {
   const resolvedUid = await resolveReplayUid(uid || DEFAULT_REPLAY_UID_FALLBACK);
   const play = await createTempSignalPlay({
@@ -5651,6 +6293,11 @@ module.exports = {
   runLiveReadonlyDetectsOrphanCloseOrderForFlatSide,
   runLiveReadonlyDetectsOversizedProtectionVsPosition,
   runCrossPidOverfillGuardWithTpGmanual,
+  runPumpCrossPidGridGmanualOverclose,
+  runPumpSignalDuplicateTpOverclose,
+  runPumpCrossPidGridManualLongOverclose,
+  runPumpPartialResidualProjection,
+  runGridStaleReservationDoesNotCancelCurrentProtection,
   runDirectOrphanFlatten,
   runCorrectionPnlIntegrity,
 };

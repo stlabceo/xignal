@@ -170,6 +170,40 @@ const runNodeChecks = (targets = []) => {
   return results;
 };
 
+const runGuardScript = ({ configPath = null } = {}) => {
+  const scriptPath = path.join(QA_DIR, "live-execution-trigger-webhook.js");
+  if (!fs.existsSync(scriptPath)) {
+    return {
+      exitCode: 0,
+      blocked: true,
+      notImplemented: true,
+      output: "LIVE_EXECUTION_TRIGGER_SCRIPT_NOT_PRESENT_FAIL_CLOSED",
+    };
+  }
+
+  const args = [scriptPath, "--dry-run"];
+  if (configPath) {
+    args.push("--config", configPath);
+  }
+  const result = spawnSync(process.execPath, args, {
+    cwd: path.resolve(QA_DIR, "../../../.."),
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      QA_DISABLE_BINANCE_WRITES: "1",
+      QA_REPLAY_MODE: process.env.QA_REPLAY_MODE || "1",
+    },
+  });
+  const output = `${result.stdout || ""}${result.stderr || ""}`;
+  return {
+    exitCode: Number(result.status || 0),
+    blocked: Number(result.status || 0) !== 0 || /BLOCK|DISABLE|DRY_RUN|NO_MATCH|GUARD/i.test(output),
+    notImplemented: false,
+    output,
+  };
+};
+
 const writeReportFiles = ({ reportType, runId, report }) => {
   ensureReportsDir();
   const timestamp = buildTimestampSlug(report.finishedAt || report.startedAt || new Date());

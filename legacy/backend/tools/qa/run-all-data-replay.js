@@ -65,6 +65,11 @@ const {
   runLiveReadonlyDetectsOrphanCloseOrderForFlatSide,
   runLiveReadonlyDetectsOversizedProtectionVsPosition,
   runCrossPidOverfillGuardWithTpGmanual,
+  runPumpCrossPidGridGmanualOverclose,
+  runPumpSignalDuplicateTpOverclose,
+  runPumpCrossPidGridManualLongOverclose,
+  runPumpPartialResidualProjection,
+  runGridStaleReservationDoesNotCancelCurrentProtection,
   runDirectOrphanFlatten,
   runCorrectionPnlIntegrity,
 } = require("./qa-scenarios");
@@ -274,6 +279,36 @@ const run = async () => {
         await runLiveReadonlyDetectsOrphanCloseOrderForFlatSide({ uid: resolvedUid, cleanup: false }),
         await runLiveReadonlyDetectsOversizedProtectionVsPosition({ uid: resolvedUid, cleanup: false }),
         await runCrossPidOverfillGuardWithTpGmanual({ uid: resolvedUid, cleanup: false }),
+      ]),
+    },
+    {
+      scriptName: "data-replay-pump-cross-pid-grid-gmanual-overclose.js",
+      run: async () => ([
+        await runPumpCrossPidGridGmanualOverclose({ uid: resolvedUid, cleanup: false }),
+      ]),
+    },
+    {
+      scriptName: "data-replay-pump-signal-duplicate-tp-overclose.js",
+      run: async () => ([
+        await runPumpSignalDuplicateTpOverclose({ uid: resolvedUid, cleanup: false }),
+      ]),
+    },
+    {
+      scriptName: "data-replay-pump-cross-pid-grid-manual-long-overclose.js",
+      run: async () => ([
+        await runPumpCrossPidGridManualLongOverclose({ uid: resolvedUid, cleanup: false }),
+      ]),
+    },
+    {
+      scriptName: "data-replay-pump-partial-residual-projection.js",
+      run: async () => ([
+        await runPumpPartialResidualProjection({ uid: resolvedUid, cleanup: false }),
+      ]),
+    },
+    {
+      scriptName: "data-replay-grid-stale-reservation-does-not-cancel-current-protection.js",
+      run: async () => ([
+        await runGridStaleReservationDoesNotCancelCurrentProtection({ uid: resolvedUid, cleanup: false }),
       ]),
     },
     {

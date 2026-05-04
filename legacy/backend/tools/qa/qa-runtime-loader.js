@@ -20,6 +20,8 @@ module.exports.__qa = {
   recoverGridExitFillFromExchange: exports.recoverGridExitFillFromExchange,
   convergeLiveSignalPositionToExchangeFlat,
   loadLivePlaySnapshot,
+  syncLiveBoundExitOrders,
+  hasRecentLocalBoundReservationCoverage,
   resolvePidOwnedCloseQtyGuard,
   closeGridLegMarketOrder: exports.closeGridLegMarketOrder
 };

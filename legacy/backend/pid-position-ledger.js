@@ -1056,6 +1056,29 @@ const applyExitFill = async ({
         }
       }
       const overfillTolerance = 1e-9;
+      if (!(baseOpenQty > overfillTolerance)) {
+        logLedgerStateChange("EXIT_FILL_WITHOUT_PID_OWNED_QTY_BLOCKED", {
+          uid,
+          pid,
+          strategyCategory: normalizedCategory,
+          symbol: normalizedSymbol,
+          positionSide: normalizedPositionSide,
+          sourceClientOrderId: normalizeSourceId(sourceClientOrderId),
+          sourceOrderId: normalizeSourceId(sourceOrderId),
+          sourceTradeId: normalizeTradeId(sourceTradeId),
+          requestedQty,
+          pidOwnedOpenQty: baseOpenQty,
+          eventType,
+          reason: "PID_OWNED_QTY_ZERO_OR_ALREADY_CLOSED",
+        });
+        return {
+          ok: false,
+          blocked: true,
+          reason: "PID_OWNED_QTY_ZERO",
+          snapshot: current,
+          appliedQty: 0,
+        };
+      }
       if (requestedQty > baseOpenQty + overfillTolerance) {
         logLedgerStateChange("FILL_QTY_EXCEEDS_PID_OWNED_QTY", {
           uid,
@@ -1096,7 +1119,10 @@ const applyExitFill = async ({
           });
         }
       }
-      const appliedQty = Math.min(requestedQty, baseOpenQty > 0 ? baseOpenQty : requestedQty);
+      const appliedQty = Math.min(requestedQty, baseOpenQty);
+      const appliedRatio = requestedQty > 0 ? Math.min(1, Math.max(0, appliedQty / requestedQty)) : 0;
+      const appliedFee = resolvedFee * appliedRatio;
+      const appliedPnl = resolvedPnl * appliedRatio;
       const averageEntryPrice =
         baseOpenQty > 0 && baseOpenCost > 0 ? baseOpenCost / baseOpenQty : toNumber(current?.avgEntryPrice, resolvedPrice);
       const costReduction = appliedQty > 0 ? averageEntryPrice * appliedQty : 0;
@@ -1108,8 +1134,8 @@ const applyExitFill = async ({
         openQty: nextOpenQty,
         openCost: nextOpenCost,
         avgEntryPrice: nextAvgEntryPrice,
-        cycleRealizedPnl: toNumber(current?.cycleRealizedPnl) + resolvedPnl,
-        cycleFees: toNumber(current?.cycleFees) + resolvedFee,
+        cycleRealizedPnl: toNumber(current?.cycleRealizedPnl) + appliedPnl,
+        cycleFees: toNumber(current?.cycleFees) + appliedFee,
         entryFillCount: toNumber(current?.entryFillCount),
         exitFillCount: toNumber(current?.exitFillCount) + 1,
         lastExitAt: toSqlDateTime(tradeTime),
@@ -1128,8 +1154,8 @@ const applyExitFill = async ({
         fillQty: appliedQty,
         fillPrice: resolvedPrice,
         fillValue: appliedQty * resolvedPrice,
-        fee: resolvedFee,
-        realizedPnl: resolvedPnl,
+        fee: appliedFee,
+        realizedPnl: appliedPnl,
         openQtyAfter: nextOpenQty,
         openCostAfter: nextOpenCost,
         avgEntryPriceAfter: nextAvgEntryPrice,
@@ -1206,7 +1232,7 @@ const applyExitFill = async ({
         eventType,
         fillQty: appliedQty,
         fillPrice: resolvedPrice,
-        realizedPnl: resolvedPnl,
+        realizedPnl: appliedPnl,
         tradeTime: toSqlDateTime(tradeTime),
         snapshotStatus: snapshot?.status || null,
         openQtyAfter: toNumber(snapshot?.openQty),

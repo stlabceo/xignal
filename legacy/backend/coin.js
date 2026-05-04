@@ -5243,6 +5243,168 @@ const hasMatchingBoundOrderCoverage = (existingBoundOrders, expectedTargets, opt
     }));
 }
 
+const EXIT_RESERVATION_IDEMPOTENCY_WINDOW_MS = 120000;
+const LOCAL_ACTIVE_EXIT_RESERVATION_STATUSES = new Set([
+    'ACTIVE',
+    'PARTIAL',
+    'CANCEL_REQUESTED',
+    'UNKNOWN_CANCEL_STATE',
+]);
+const LOCAL_RECENT_EXIT_RESERVATION_STATUSES = new Set([
+    'ACTIVE',
+    'PARTIAL',
+    'CANCEL_REQUESTED',
+    'CANCEL_PENDING',
+    'UNKNOWN_CANCEL_STATE',
+]);
+
+const getReservationTimeMs = (reservation = {}) => {
+    const raw = reservation.updatedAt || reservation.createdAt || reservation.updated_at || reservation.created_at || null;
+    const parsed = raw ? new Date(raw).getTime() : 0;
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+const isRecentExitReservation = (reservation = {}, maxAgeMs = EXIT_RESERVATION_IDEMPOTENCY_WINDOW_MS) => {
+    const timeMs = getReservationTimeMs(reservation);
+    if(!(timeMs > 0)){
+        return false;
+    }
+    return Date.now() - timeMs <= maxAgeMs;
+}
+
+const getReservationRemainingQty = (reservation = {}) => Math.max(
+    0,
+    Number(reservation.reservedQty || 0) - Number(reservation.filledQty || 0)
+);
+
+const normalizeRuntimeReservationSymbol = (value = '') => String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/^BINANCE:/, '')
+    .replace(/\.P$/, '');
+
+const loadPidExitReservationsForRuntimeGuard = async ({
+    uid,
+    pid,
+    strategyCategory,
+    positionSide,
+    symbol = null,
+    includeRecentCancelPending = false,
+} = {}) => {
+    const rows = await pidPositionLedger.loadActiveReservations({
+        uid,
+        pid,
+        strategyCategory,
+        positionSide,
+    });
+    const normalizedSymbol = symbol ? normalizeRuntimeReservationSymbol(symbol) : null;
+    const statusSet = includeRecentCancelPending
+        ? LOCAL_RECENT_EXIT_RESERVATION_STATUSES
+        : LOCAL_ACTIVE_EXIT_RESERVATION_STATUSES;
+
+    return (rows || []).filter((reservation) => {
+        const status = String(reservation.status || '').trim().toUpperCase();
+        if(!statusSet.has(status)){
+            return false;
+        }
+        if(status === 'CANCEL_PENDING' && !isRecentExitReservation(reservation)){
+            return false;
+        }
+        if(normalizedSymbol && normalizeRuntimeReservationSymbol(reservation.symbol || '') !== normalizedSymbol){
+            return false;
+        }
+        return getReservationRemainingQty(reservation) > 1e-9;
+    });
+}
+
+const findInFlightGridManualCloseReservation = async ({
+    uid,
+    pid,
+    symbol,
+    leg,
+} = {}) => {
+    if(!uid || !pid || !symbol || !leg){
+        return null;
+    }
+    const reservations = await loadPidExitReservationsForRuntimeGuard({
+        uid,
+        pid,
+        strategyCategory: 'grid',
+        positionSide: String(leg || '').trim().toUpperCase(),
+        symbol,
+        includeRecentCancelPending: true,
+    });
+    return reservations.find((reservation) =>
+        String(reservation.reservationKind || '').trim().toUpperCase() === 'GRID_MANUAL_OFF'
+    ) || null;
+}
+
+const hasRecentLocalBoundReservationCoverage = async ({
+    uid,
+    pid,
+    symbol,
+    positionSide,
+    entryOrderId,
+    expectedTargets,
+    quantityTolerance = 1e-9,
+} = {}) => {
+    const targets = Array.isArray(expectedTargets) ? expectedTargets : [];
+    if(!uid || !pid || !positionSide || !entryOrderId || targets.length === 0){
+        return false;
+    }
+    const reservations = await loadPidExitReservationsForRuntimeGuard({
+        uid,
+        pid,
+        strategyCategory: 'signal',
+        positionSide,
+        symbol,
+        includeRecentCancelPending: false,
+    });
+    if(reservations.length === 0){
+        return false;
+    }
+    const tolerance = Math.max(Number(quantityTolerance || 0), 1e-9);
+    const covered = targets.every((target) => {
+        const expectedClientOrderId = getCloseClientOrderId(target.prefix, uid, pid, entryOrderId);
+        const expectedQty = Number(target.quantity || 0);
+        return reservations.some((reservation) => {
+            if(String(reservation.clientOrderId || '') !== expectedClientOrderId){
+                return false;
+            }
+            const reservedQty = Number(reservation.reservedQty || 0);
+            const remainingQty = getReservationRemainingQty(reservation);
+            return (
+                Math.abs(reservedQty - expectedQty) <= tolerance
+                || Math.abs(remainingQty - expectedQty) <= tolerance
+            );
+        });
+    });
+
+    if(covered){
+        logOrderRuntimeTrace('BOUND_LOCAL_IDEMPOTENT_OK', {
+            uid,
+            pid,
+            strategyCategory: 'signal',
+            symbol,
+            positionSide,
+            entryOrderId,
+            expectedTargets: targets.map((target) => ({
+                prefix: target.prefix,
+                quantity: Number(target.quantity || 0),
+            })),
+            reservations: reservations.map((reservation) => ({
+                id: reservation.id || null,
+                clientOrderId: reservation.clientOrderId || null,
+                reservationKind: reservation.reservationKind || null,
+                status: reservation.status || null,
+                reservedQty: Number(reservation.reservedQty || 0),
+                filledQty: Number(reservation.filledQty || 0),
+            })),
+        });
+    }
+    return covered;
+}
+
 const hasExchangeOpenPosition = async (uid, symbol, signalSide) => {
     if(!symbol || !signalSide){
         return false;
@@ -5579,6 +5741,40 @@ exports.closeGridLegMarketOrder = async ({
     }
 
     if(!(await ensureBinanceApiClient(uid))){
+        return null;
+    }
+
+    const inFlightManualClose = await findInFlightGridManualCloseReservation({
+        uid,
+        pid,
+        symbol,
+        leg,
+    });
+    if(inFlightManualClose){
+        const remainingQty = getReservationRemainingQty(inFlightManualClose);
+        logOrderRuntimeTrace('GRID_MANUAL_CLOSE_IN_FLIGHT_BLOCKED', {
+            uid,
+            pid,
+            strategyCategory: 'grid',
+            symbol,
+            positionSide: leg,
+            requestedQty: Number(qty || 0),
+            reservationId: inFlightManualClose.id || null,
+            clientOrderId: inFlightManualClose.clientOrderId || null,
+            status: inFlightManualClose.status || null,
+            remainingQty,
+            reason: 'PID_OWNED_MANUAL_CLOSE_ALREADY_IN_FLIGHT',
+        });
+        exports.msgAdd(
+            'closeGridLegMarketOrder',
+            'GRID_MANUAL_CLOSE_IN_FLIGHT_BLOCKED',
+            `pid:${pid}, symbol:${symbol}, leg:${leg}, remainingQty:${remainingQty}`,
+            uid,
+            pid,
+            inFlightManualClose.clientOrderId || null,
+            symbol,
+            leg
+        );
         return null;
     }
 
@@ -7845,7 +8041,7 @@ const syncLiveBoundExitOrders = async ({ uid, pid, symbol, entryOrderId = null, 
             );
             return true;
         }
-        const existingBoundOrders = await listOpenBoundExitOrders(uid, symbol, pid);
+        const entryTid = entryOrderId || play.r_tid;
         const expectedBoundTargets = buildExpectedSignalBoundTargets({
             play: {
                 ...play,
@@ -7857,6 +8053,30 @@ const syncLiveBoundExitOrders = async ({ uid, pid, symbol, entryOrderId = null, 
         });
         const quantityTolerance = Math.max(Number(orderRules.stepSize || 0), 1e-9) / 2;
         const priceTolerance = Math.max(Number(orderRules.tickSize || 0), 1e-9) / 2;
+        const hasRecentLocalBoundCoverage = await hasRecentLocalBoundReservationCoverage({
+            uid,
+            pid,
+            symbol,
+            positionSide,
+            entryOrderId: entryTid,
+            expectedTargets: expectedBoundTargets,
+            quantityTolerance,
+        });
+        if(hasRecentLocalBoundCoverage){
+            exports.msgAdd(
+                'syncLiveBoundExitOrd',
+                'BOUND_LOCAL_IDEMPOTENT_OK',
+                `pid:${pid}, symbol:${symbol}, entryTid:${entryTid}, boundTargets:${expectedBoundTargets.length}`,
+                uid,
+                pid,
+                entryTid,
+                symbol,
+                resolvedSignalType || null
+            );
+            return true;
+        }
+
+        const existingBoundOrders = await listOpenBoundExitOrders(uid, symbol, pid);
         const hasMatchingExistingBounds = hasMatchingBoundOrderCoverage(existingBoundOrders, expectedBoundTargets, {
             quantityTolerance,
             priceTolerance,
@@ -7871,7 +8091,6 @@ const syncLiveBoundExitOrders = async ({ uid, pid, symbol, entryOrderId = null, 
             return true;
         }
 
-        const entryTid = entryOrderId || play.r_tid;
         let createdReservations = [];
         let lastBindError = null;
         for(let attempt = 1; attempt <= 5; attempt += 1){
