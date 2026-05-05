@@ -29,6 +29,7 @@ const accountReadiness = require("../account-readiness");
 const binanceWriteGuard = require("../binance-write-guard");
 const adminOrderMonitor = require("../admin-order-monitor");
 const credentialSecrets = require("../credential-secrets");
+const trackRecordClassifier = require("../track-record-classifier");
 
 const dt = require("../data");
 const dayjs = require("dayjs");
@@ -2307,6 +2308,26 @@ const buildOrderProcessRow = async (targetRow, options = {}) => {
       eventCode.includes("MANUAL_CLOSE")
     );
   });
+  const projectionEntryLedgerRows = projectionLedgerRows.filter((row) =>
+    isPidEntryLedgerEvent(row.eventType)
+  );
+  const projectionExitLedgerRows = projectionLedgerRows.filter((row) =>
+    isPidExitLedgerEvent(row.eventType)
+  );
+  const entryHasTerminalEvent = entryRows.some((row) => {
+    const eventCode = String(row.eventCode || row.orderStatus || "").trim().toUpperCase();
+    return (
+      eventCode.includes("FILLED") ||
+      eventCode.includes("CANCELED") ||
+      eventCode.includes("CANCELLED") ||
+      eventCode.includes("EXPIRED") ||
+      eventCode.includes("REJECT")
+    );
+  });
+  const activeEntryRows = entryHasTerminalEvent ? [] : entryRows.filter((row) => {
+    const eventCode = String(row.eventCode || row.orderStatus || "").trim().toUpperCase();
+    return eventCode.includes("NEW") || eventCode.includes("PARTIAL");
+  });
   const issueMeta = buildOrderProcessIssueMeta({
     targetRow,
     webhookRow,
@@ -2372,6 +2393,7 @@ const buildOrderProcessRow = async (targetRow, options = {}) => {
     createdAt: targetRow.createdAt,
     routePath: targetRow.routePath,
     webhookResultCode: targetRow.webhookResultCode,
+    targetResultCode: targetRow.resultCode,
     processStatus: normalizedStages.processStatus,
     normalityLabel: normalizedStages.processStatusLabel,
     isAbnormal: normalizedStages.abnormal,
@@ -2416,6 +2438,15 @@ const buildOrderProcessRow = async (targetRow, options = {}) => {
     exitReservationCount: projectionReservationRows.length,
     ledgerFillCount: projectionLedgerRows.length,
     runtimeMessageCount: projectionMsgRows.length,
+    entryLedgerCount: projectionEntryLedgerRows.length,
+    exitLedgerCount: projectionExitLedgerRows.length,
+    entryOrderEventCount: entryRows.length,
+    exitOrderEventCount: exitPendingRows.length,
+    activeEntryOrderCount: activeEntryRows.length,
+    activeReservationCount: activeProtectionCount,
+    actualEntryNotional:
+      (detailProjection.gridMeta || detailProjection.algorithmMeta || {}).actualEntryNotional || null,
+    recoveryReason: issueMeta.issueCode || null,
     ...viewProjection,
     ...detailProjection,
     ...issueMeta,
@@ -2507,48 +2538,27 @@ const buildTrackRecordDateRange = ({ sDate = "", eDate = "" } = {}) => ({
 });
 
 const matchesTrackRecordCompletion = (processRow, statusFilter) => {
-  const needsReview = isTrackRecordActionableReview(processRow);
+  const classification = trackRecordClassifier.classifyTrackRecordRow(processRow);
   if (statusFilter === "all") {
     return true;
   }
   if (statusFilter === "review") {
-    return needsReview;
+    return classification.bucket === "review";
   }
 
   if (statusFilter === "active") {
-    return !processRow?.completed && !needsReview;
+    return classification.bucket === "active";
   }
 
-  return Boolean(processRow?.completed) && !needsReview;
+  return classification.bucket === "completed" && classification.performanceEligible;
 };
 
 const isTrackRecordActionableReview = (processRow = {}) => {
-  if (processRow?.isExpectedIgnore) {
-    return false;
-  }
-
-  const lifecycleStatus = String(processRow?.lifecycleStatus || processRow?.lifecycleResult || "")
-    .trim()
-    .toUpperCase();
-  if (lifecycleStatus === "RESOLVED" || lifecycleStatus === "EXPECTED") {
-    return false;
-  }
-
-  const severity = String(processRow?.severity || "").trim().toUpperCase();
-  return (
-    processRow?.currentRisk === true ||
-    lifecycleStatus === "CURRENT_RISK" ||
-    severity === "CRITICAL" ||
-    severity === "WARN"
-  );
+  return trackRecordClassifier.classifyTrackRecordRow(processRow).needsReview;
 };
 
 const getTrackRecordCycleRealizedPnl = (processRow = {}) => {
-  if (String(processRow.strategyCategory || "").trim().toLowerCase() === "grid") {
-    return toNumber(processRow?.gridMeta?.currentRegimeRealizedPnl, 0);
-  }
-
-  return toNumber(processRow?.algorithmMeta?.realizedPnl, 0);
+  return trackRecordClassifier.getTrackRecordCycleRealizedPnl(processRow);
 };
 
 const getTrackRecordDirectionLabel = (processRow = {}) => {
@@ -2574,9 +2584,10 @@ const getTrackRecordDirectionLabel = (processRow = {}) => {
 
 const buildTrackRecordListItem = (processRow = {}) => {
   const isGrid = String(processRow.strategyCategory || "").trim().toLowerCase() === "grid";
-  const cycleRealizedPnl = getTrackRecordCycleRealizedPnl(processRow);
   const meta = isGrid ? processRow.gridMeta || {} : processRow.algorithmMeta || {};
-  const needsReview = isTrackRecordActionableReview(processRow);
+  const classification = trackRecordClassifier.classifyTrackRecordRow(processRow);
+  const needsReview = classification.needsReview;
+  const cycleRealizedPnl = classification.performanceEligible ? classification.realizedPnl : 0;
   const seriesId = toNumber(processRow.eventId, 0) > 0 ? Number(processRow.eventId) : null;
   const statusLabel = meta.statusLabel || meta.overallStatusLabel || processRow.currentStepLabel || "-";
   const statusSubLabel =
@@ -2599,17 +2610,21 @@ const buildTrackRecordListItem = (processRow = {}) => {
     bunbong: processRow.bunbong || "-",
     signalType: processRow.signalType || meta.direction || null,
     directionLabel: getTrackRecordDirectionLabel(processRow),
-    completed: Boolean(processRow.completed),
+    completed: classification.bucket === "completed",
     needsReview,
-    overallResultLabel: processRow.overallResultLabel || (processRow.completed ? "완료" : "진행중"),
+    trackRecordBucket: classification.bucket,
+    evidenceQuality: classification.evidenceQuality,
+    reconciliationOrigin: classification.reconciliationOrigin,
+    performanceEligible: classification.performanceEligible,
+    overallResultLabel: processRow.overallResultLabel || (classification.bucket === "completed" ? "완료" : classification.bucket === "review" ? "확인 필요" : "진행중"),
     summaryStatusLabel: needsReview
-      ? processRow.summaryStatusLabel || "확인 필요"
-      : processRow.completed
+      ? classification.summaryStatusLabel || processRow.summaryStatusLabel || "확인 필요"
+      : classification.bucket === "completed"
         ? "성과 기록"
         : "진행중",
     summaryText: needsReview
-      ? processRow.summaryText || processRow.issueReason || "-"
-      : processRow.completed
+      ? classification.summaryText || processRow.issueReason || "-"
+      : classification.bucket === "completed"
         ? "정상 종료"
         : "진행중",
     statusLabel,
@@ -2621,17 +2636,8 @@ const buildTrackRecordListItem = (processRow = {}) => {
     entryAvgPrice: toNumber(meta.entryPrice || meta.avgEntryPrice, 0) || null,
     exitAvgPrice: toNumber(meta.exitPrice || meta.avgExitPrice, 0) || null,
     realizedPnl: cycleRealizedPnl,
-    returnPct: toNumber(meta.tradeAmount, 0) > 0 ? (cycleRealizedPnl / toNumber(meta.tradeAmount, 0)) * 100 : null,
-    result:
-      !processRow.completed
-        ? "OPEN"
-        : needsReview
-          ? "REVIEW"
-          : cycleRealizedPnl > 0
-            ? "WIN"
-            : cycleRealizedPnl < 0
-              ? "LOSS"
-              : "BREAKEVEN",
+    returnPct: classification.returnPct,
+    result: classification.result,
     source: "live-ledger",
     issueCategoryLabel: needsReview ? processRow.issueCategoryLabel || null : null,
     issueSourceLabel: needsReview ? processRow.issueSourceLabel || null : null,
@@ -2645,7 +2651,7 @@ const buildTrackRecordListItem = (processRow = {}) => {
 
 const buildTrackRecordSummary = (processRows = []) => {
   const performanceRows = (processRows || []).filter(
-    (row) => row?.completed && !isTrackRecordActionableReview(row)
+    (row) => trackRecordClassifier.classifyTrackRecordRow(row).performanceEligible
   );
   const totalRealizedPnl = performanceRows.reduce(
     (sum, row) => sum + getTrackRecordCycleRealizedPnl(row),
@@ -2669,7 +2675,7 @@ const buildTrackRecordSummary = (processRows = []) => {
     totalRealizedPnl,
     completedCount,
     activeCount: (processRows || []).filter(
-      (row) => !row?.completed && !isTrackRecordActionableReview(row)
+      (row) => trackRecordClassifier.classifyTrackRecordRow(row).bucket === "active"
     ).length,
     reviewCount: (processRows || []).filter((row) => isTrackRecordActionableReview(row)).length,
     abnormalCount: (processRows || []).filter((row) => isTrackRecordActionableReview(row)).length,

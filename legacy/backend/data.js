@@ -14,6 +14,7 @@ exports.getPrice = (symbol) => {
             lastPrice: exports.price[symbol].lastPrice ? parseFloat(exports.price[symbol].lastPrice) : 0,
             lastQty: exports.price[symbol].lastQty ? parseFloat(exports.price[symbol].lastQty) : 0,
             lastTradeTime: exports.price[symbol].lastTradeTime || 0,
+            quoteTime: exports.price[symbol].quoteTime || exports.price[symbol].lastTradeTime || 0,
             st: true,
         }
     }else{
@@ -26,6 +27,7 @@ exports.getPrice = (symbol) => {
             lastPrice: 0,
             lastQty: 0,
             lastTradeTime: 0,
+            quoteTime: 0,
             st: false,
         }
     }

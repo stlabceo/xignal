@@ -379,7 +379,8 @@ const hydratePriceSlotFromBookTicker = async (symbol) => {
             data.askPrice ||
             0,
         lastQty: slot.lastQty || 0,
-        lastTradeTime: Date.now(),
+        quoteTime: Date.now(),
+        lastTradeTime: slot.lastTradeTime || 0,
     };
 
     return dt.getPrice(normalizedSymbol);
@@ -8763,6 +8764,7 @@ const getTick = async () => {
             dt.price[re.symbol] = {
                 ...slot,
                 ...re,
+                quoteTime: re.eventTime || Date.now(),
             };
         }
     });
@@ -8775,6 +8777,7 @@ const getTick = async () => {
                 lastPrice: re.price,
                 lastQty: re.quantity,
                 lastTradeTime: re.tradeTime || re.eventTime || Date.now(),
+                quoteTime: slot.quoteTime || 0,
             };
         });
     });

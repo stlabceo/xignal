@@ -1,6 +1,7 @@
 const axios = require("axios");
 const db = require("./database/connect/config");
 const data = require("./data");
+const priceFeedStatus = require("./price-feed-status");
 const canonicalRuntimeState = require("./canonical-runtime-state");
 const gridRuntime = require("./grid-runtime");
 const signalStrategyIdentity = require("./signal-strategy-identity");
@@ -1117,7 +1118,7 @@ const listStrategyCatalogOverview = async () => {
       backtestRows.filter((row) => normalizeStrategyKey(row.strategy_key) === catalogRow.strategyKey)
     );
 
-    const priceFeedStatus = getPriceFeedStatus(
+    const priceFeed = priceFeedStatus.getPriceFeedStatus(
       catalogRow.allowedSymbols.length
         ? catalogRow.allowedSymbols
         : uniq(matchingInstances.map((item) => item.symbol))
@@ -1150,7 +1151,7 @@ const listStrategyCatalogOverview = async () => {
       ...catalogRow,
       signalWebhookStatus,
       statsWebhookStatus,
-      priceFeedStatus,
+      priceFeedStatus: priceFeed,
       usage: {
         usersTotal,
         registeredCount,
@@ -1524,6 +1525,7 @@ module.exports = {
   listStrategyCatalogOverview,
   getStrategyCatalogItem,
   listUserSelectableStrategyCatalog,
+  getPriceFeedStatus: priceFeedStatus.getPriceFeedStatus,
   saveStrategyCatalog,
   deleteStrategyCatalog,
   listUserManagementOverview,

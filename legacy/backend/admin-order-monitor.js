@@ -1,5 +1,6 @@
 const db = require("./database/connect/config");
 const qaBinance = require("./tools/qa/qa-binance");
+const { parsePlatformClientOrderId } = require("./order-client-id");
 
 const DEFAULT_SYMBOLS = ["PUMPUSDT", "XRPUSDT"];
 const POSITION_SIDES = ["LONG", "SHORT"];
@@ -43,12 +44,18 @@ const includesOrderIntent = (clientOrderId, tokens = []) => {
 };
 
 const inferPidFromClientOrderId = (clientOrderId) => {
+  const parsed = parsePlatformClientOrderId(clientOrderId);
+  if (parsed?.pid > 0) {
+    return parsed.pid;
+  }
   const numericTokens = String(clientOrderId || "")
     .split("_")
     .map((token) => Number(token))
     .filter((value) => Number.isInteger(value) && value > 0);
-  const pidLike = numericTokens.find((value) => value >= 1000);
-  return pidLike || numericTokens[1] || numericTokens[0] || null;
+  if (numericTokens.length >= 2) {
+    return numericTokens[1];
+  }
+  return null;
 };
 
 const inferOrderIntent = (order = {}) => {
@@ -95,12 +102,55 @@ const isActiveBinanceProtection = (order = {}) => {
   return type.includes("STOP") || type.includes("TAKE_PROFIT");
 };
 
+const isActiveBinanceEntryOrder = (order = {}) => {
+  const status = String(order.status || order.algoStatus || "").trim().toUpperCase();
+  if (status && !["NEW", "PARTIALLY_FILLED"].includes(status)) {
+    return false;
+  }
+  if (order.reduceOnly === true || String(order.reduceOnly || "").toLowerCase() === "true") {
+    return false;
+  }
+  return inferOrderIntent(order) === "GRID_ENTRY" || inferOrderIntent(order) === "ENTRY";
+};
+
 const isEntryLedgerEvent = (row = {}) =>
   String(row.eventType || "").trim().toUpperCase().includes("ENTRY");
 
 const isExitLedgerEvent = (row = {}) => {
   const eventType = String(row.eventType || "").trim().toUpperCase();
   return eventType.includes("EXIT") || eventType.includes("CLOSE") || eventType.includes("TP") || eventType.includes("STOP");
+};
+
+const detectCycleReconciliationOrigin = ({ ledgerRows = [], rawOrders = [], reservations = [] } = {}) => {
+  const evidenceText = [
+    ...ledgerRows.flatMap((row) => [row.eventType, row.sourceClientOrderId, row.note]),
+    ...rawOrders.flatMap((row) => [row.clientOrderId, row.inferredIntent, row.status]),
+    ...reservations.flatMap((row) => [row.clientOrderId, row.status, row.note]),
+  ]
+    .map((value) => String(value || ""))
+    .join(" ")
+    .toUpperCase();
+  if (!evidenceText) {
+    return "NORMAL_NO_RECONCILIATION";
+  }
+  if (
+    evidenceText.includes("GRID_EXCHANGE_RECONCILED") ||
+    evidenceText.includes("RECONCILED") ||
+    evidenceText.includes("TRUTH_SYNC") ||
+    evidenceText.includes("RECOVERED") ||
+    evidenceText.includes("ENDED_STALE") ||
+    evidenceText.includes("GMANUAL")
+  ) {
+    if (
+      evidenceText.includes("PARTIALLY_FILLED") ||
+      evidenceText.includes("WEBSOCKET_LOSS_EXPECTED") ||
+      evidenceText.includes("USER_MANUAL_EXTERNAL_ACTION")
+    ) {
+      return "NORMAL_WITH_EXPECTED_RECOVERY";
+    }
+    return "RECONCILED_AFTER_PROJECTION_DEFECT";
+  }
+  return "NORMAL_NO_RECONCILIATION";
 };
 
 const isExpectedIgnoreCode = (value) => {
@@ -133,6 +183,7 @@ const severityForLifecycle = (lifecycleStatus) => {
   }
   if ([
     "ENTRY_TERMINAL_NO_FILL",
+    "ACTIVE_ENTRY_PENDING",
     "RESOLVED_PROTECTION_DELAY",
     "RESOLVED_SAFE_CLEANUP",
     "RESOLVED_CONTROLLED_RESTORE",
@@ -206,6 +257,8 @@ const classifyCurrentRisk = ({
   activeProtectionCount,
   expectedProtectionCount,
   activeProtectionQty,
+  activeEntryCount,
+  activeEntryQty,
   localReservationCount,
   actualTP,
   actualSTOP,
@@ -216,14 +269,21 @@ const classifyCurrentRisk = ({
   const bQty = abs(binanceQty);
   const lQty = abs(localOpenQty);
   const pQty = abs(activeProtectionQty);
+  const entryQty = abs(activeEntryQty);
   const hasOpen = bQty > 0 || lQty > 0;
   const hasActiveProtection = Number(activeProtectionCount || 0) > 0;
+  const hasActiveEntry = Number(activeEntryCount || 0) > 0;
   let lifecycleStatus = "CLOSED_FLAT_CLEAN";
   let verdict = "FLAT_CLEAN";
   let issueReason = null;
   let nextAction = "No action";
 
-  if (bQty > 0 && lQty === 0) {
+  if (!hasOpen && hasActiveEntry) {
+    lifecycleStatus = "ACTIVE_ENTRY_PENDING";
+    verdict = "ACTIVE_ENTRY_CAN_OPEN_EXPOSURE";
+    issueReason = "ReduceOnly=false active entry order can open new exposure and must be projected as ongoing/current.";
+    nextAction = "Show as pending active cycle and verify sibling grid lifecycle before continuing Live QA.";
+  } else if (bQty > 0 && lQty === 0) {
     lifecycleStatus = "BINANCE_OPEN_LOCAL_FLAT";
     verdict = "BINANCE_OPEN_LOCAL_FLAT";
     issueReason = "Binance position exists without matching local ownership projection.";
@@ -262,6 +322,8 @@ const classifyCurrentRisk = ({
     localOpenQty: String(lQty),
     ownerPids: unique(ownerPids || []),
     activeProtectionCount: Number(activeProtectionCount || 0),
+    activeEntryCount: Number(activeEntryCount || 0),
+    activeEntryQty: String(entryQty),
     expectedProtectionCount: Number(expectedProtectionCount || 0),
     localReservationCount: Number(localReservationCount || 0),
     actualTP: Number(actualTP || 0),
@@ -272,7 +334,7 @@ const classifyCurrentRisk = ({
     lifecycleStatus,
     verdict,
     severity,
-    currentRisk: severity === "CRITICAL",
+    currentRisk: severity === "CRITICAL" || lifecycleStatus === "ACTIVE_ENTRY_PENDING",
     issueReason,
     nextAction,
   };
@@ -317,11 +379,17 @@ const classifyOrderCycle = ({
   const exitExecutedQty = exitLedger.reduce((sum, row) => sum + abs(row.fillQty), 0);
   const entryTradeIds = unique(entryLedger.map((row) => row.sourceTradeId));
   const exitTradeIds = unique(exitLedger.map((row) => row.sourceTradeId));
+  const activeEntryOrders = rawOrders.filter(isActiveBinanceEntryOrder);
+  const reconciliationOrigin = detectCycleReconciliationOrigin({ ledgerRows, rawOrders, reservations });
   let lifecycleStatus = "WAITING_SIGNAL";
   let protectionStatus = "NONE_REQUIRED";
   let currentRisk = false;
 
-  if (currentOpenQty > 0 && activeReservations.length >= 2) {
+  if (currentOpenQty === 0 && activeEntryOrders.length > 0) {
+    lifecycleStatus = "ACTIVE_ENTRY_PENDING";
+    protectionStatus = "ENTRY_PENDING";
+    currentRisk = true;
+  } else if (currentOpenQty > 0 && activeReservations.length >= 2) {
     lifecycleStatus = "OPEN_PROTECTED";
     protectionStatus = "PROTECTED";
   } else if (currentOpenQty > 0 && activeReservations.length > 0) {
@@ -352,7 +420,11 @@ const classifyOrderCycle = ({
     protectionStatus = "PENDING";
   }
 
-  const severity = currentRisk ? "CRITICAL" : severityForLifecycle(lifecycleStatus);
+  const severity = currentRisk
+    ? severityForLifecycle(lifecycleStatus)
+    : reconciliationOrigin.startsWith("RECONCILED_AFTER_")
+      ? "WARN"
+      : severityForLifecycle(lifecycleStatus);
   const lastEventTime =
     latestOrder.eventTime ||
     latestOrder.updateTime ||
@@ -376,6 +448,7 @@ const classifyOrderCycle = ({
     protectionStatus,
     expectedProtectionCount: currentOpenQty > 0 ? 2 : 0,
     activeProtectionCount: activeReservations.length,
+    activeEntryCount: activeEntryOrders.length,
     localOpenQty: String(currentOpenQty),
     expectedTP: currentOpenQty > 0 ? 1 : 0,
     expectedSTOP: currentOpenQty > 0 ? 1 : 0,
@@ -390,6 +463,11 @@ const classifyOrderCycle = ({
     exitTradeIds,
     realizedPnl: String(realizedPnl),
     lifecycleStatus,
+    reconciliationOrigin,
+    evidenceScope:
+      ledgerRows.length || snapshots.length || reservations.length || currentOpenQty > 0 || activeEntryOrders.length
+        ? "CURRENT_OR_LOCAL_CYCLE"
+        : "HISTORICAL_EXCHANGE_EVIDENCE",
     severity,
     currentRisk,
     historicalIssueCount: 0,
@@ -438,6 +516,7 @@ const buildRawOrderRow = ({ order = {}, trades = [], ledgerRows = [], reservatio
     tradeIds,
     inferredPid,
     inferredIntent,
+    evidenceScope: "HISTORICAL_EXCHANGE_EVIDENCE",
     localLedgerMatch,
     localReservationMatch,
   };
@@ -673,6 +752,15 @@ const buildCurrentRiskBoard = ({ uid, symbols, localRows, binanceEvidence }) => 
         const orderSide = normalizeSide(order.side);
         return !orderSide || orderSide === sideCloseOrderSide(side);
       });
+      const activeEntryOrders = openOrders.filter((order) => {
+        if (!isActiveBinanceEntryOrder(order)) return false;
+        if (normalizeSymbol(order.symbol) !== symbol) return false;
+        const orderPositionSide = sideToPositionSide(order.positionSide || order.side);
+        return !orderPositionSide || orderPositionSide === side;
+      });
+      const activeEntryOwnerPids = activeEntryOrders
+        .map((order) => inferPidFromClientOrderId(order.clientOrderId || order.clientAlgoId))
+        .filter(Boolean);
       const reservations = activeReservations.filter(
         (row) => normalizeSymbol(row.symbol) === symbol && normalizeSide(row.positionSide) === side
       );
@@ -690,8 +778,13 @@ const buildCurrentRiskBoard = ({ uid, symbols, localRows, binanceEvidence }) => 
         side,
         binanceQty,
         localOpenQty,
-        ownerPids,
+        ownerPids: unique([...(ownerPids || []), ...activeEntryOwnerPids]),
         activeProtectionCount: activeProtection.length,
+        activeEntryCount: activeEntryOrders.length,
+        activeEntryQty: activeEntryOrders.reduce(
+          (sumQty, order) => sumQty + abs(order.origQty || order.quantity),
+          0
+        ),
         expectedProtectionCount: binanceQty > 0 || localOpenQty > 0 ? 2 : 0,
         activeProtectionQty: activeProtection.reduce(
           (maxQty, order) => Math.max(maxQty, abs(order.origQty || order.quantity)),
@@ -854,6 +947,7 @@ const buildProtectionMatrix = ({ uid, currentRiskBoard, orderCycles = [] }) => {
       row.currentRisk ||
       abs(row.localOpenQty) > 0 ||
       abs(row.binanceQty) > 0 ||
+      Number(row.activeEntryCount || 0) > 0 ||
       Number(row.activeProtectionCount || 0) > 0 ||
       Number(row.localReservationCount || 0) > 0
     )
@@ -867,6 +961,8 @@ const buildProtectionMatrix = ({ uid, currentRiskBoard, orderCycles = [] }) => {
       binanceQtyContribution: row.binanceQty,
       expectedTP: Number(row.expectedProtectionCount || 0) > 0 ? 1 : 0,
       expectedSTOP: Number(row.expectedProtectionCount || 0) > 0 ? 1 : 0,
+      activeEntryCount: Number(row.activeEntryCount || 0),
+      activeEntryQty: row.activeEntryQty || "0",
       actualTP: row.actualTP || 0,
       actualSTOP: row.actualSTOP || 0,
       localReservationTP: row.localReservationTP || 0,
@@ -896,6 +992,27 @@ const buildProtectionMatrix = ({ uid, currentRiskBoard, orderCycles = [] }) => {
   }));
 
   return [...currentRows, ...cycleRows].slice(0, 160);
+};
+
+const dedupeAnnotationOnlyRows = (rows = []) => {
+  const map = new Map();
+  rows.forEach((row) => {
+    const key = [
+      row.source,
+      row.code || row.eventType,
+      row.fun || "",
+      row.expectedIgnore ? "Y" : "N",
+    ].join(":");
+    const current = map.get(key);
+    if (!current) {
+      map.set(key, { ...row, duplicateCount: 0 });
+      return;
+    }
+    current.duplicateCount += 1;
+    current.latestId = row.id || current.latestId || null;
+    current.latestAt = row.createdAt || current.latestAt || null;
+  });
+  return [...map.values()];
 };
 
 const buildIssueCenter = ({ uid, currentRiskBoard, controlRows, rawBinanceOrders, msgRows, runtimeRows }) => {
@@ -985,7 +1102,7 @@ const buildIssueCenter = ({ uid, currentRiskBoard, controlRows, rawBinanceOrders
       });
     });
 
-  const annotationOnly = [
+  const annotationOnly = dedupeAnnotationOnlyRows([
     ...msgRows.slice(0, 20).map((row) => ({
       source: "msg_list",
       id: row.id,
@@ -1002,7 +1119,7 @@ const buildIssueCenter = ({ uid, currentRiskBoard, controlRows, rawBinanceOrders
       expectedIgnore: isExpectedIgnoreCode(row.event_code),
       createdAt: isoOrNull(row.created_at),
     })),
-  ];
+  ]);
 
   return {
     open,
@@ -1041,7 +1158,14 @@ const buildAdminOrderMonitor = async (uid, options = {}) => {
     ? buildLocalOnlyCurrentRiskBoard({ uid: targetUid, symbols: expandedSymbols, localRows })
     : buildCurrentRiskBoard({ uid: targetUid, symbols: expandedSymbols, localRows, binanceEvidence });
   const orderCycles = buildOrderCycles({ uid: targetUid, localRows, rawBinanceOrders });
-  const protectionMatrix = buildProtectionMatrix({ uid: targetUid, currentRiskBoard, orderCycles });
+  const currentOrderCycles = orderCycles.filter(
+    (row) =>
+      row.currentRisk ||
+      row.evidenceScope !== "HISTORICAL_EXCHANGE_EVIDENCE" ||
+      row.lifecycleStatus === "ACTIVE_ENTRY_PENDING"
+  );
+  const historicalOrderCycles = orderCycles.filter((row) => !currentOrderCycles.includes(row));
+  const protectionMatrix = buildProtectionMatrix({ uid: targetUid, currentRiskBoard, orderCycles: currentOrderCycles });
   const issueCenter = buildIssueCenter({
     uid: targetUid,
     currentRiskBoard,
@@ -1052,6 +1176,7 @@ const buildAdminOrderMonitor = async (uid, options = {}) => {
   });
   const currentCriticalCount = currentRiskBoard.filter((row) => row.severity === "CRITICAL").length;
   const unresolvedWarnCount = currentRiskBoard.filter((row) => row.severity === "WARN").length;
+  const currentRiskCount = currentRiskBoard.filter((row) => row.currentRisk).length;
 
   return {
     generatedAt: new Date().toISOString(),
@@ -1084,19 +1209,27 @@ const buildAdminOrderMonitor = async (uid, options = {}) => {
         "msg_list",
       ],
     },
+    viewPolicy: {
+      currentCycles: "position/openOrders/openAlgoOrders plus local current projection",
+      historicalExchangeEvidence: "allOrders/userTrades evidence only; never counted as current risk by itself",
+    },
     sourceStatus: binanceEvidence.sourceStatus,
     summary: {
       currentCriticalCount,
       unresolvedWarnCount,
-      currentRiskCount: currentCriticalCount,
+      currentRiskCount,
       openIssueCount: issueCenter.open.length,
       resolvedIssueCount: issueCenter.resolved.length,
-      cycleCount: orderCycles.length,
+      cycleCount: currentOrderCycles.length,
+      allCycleCount: orderCycles.length,
+      historicalCycleCount: historicalOrderCycles.length,
       rawOrderCount: rawBinanceOrders.length,
-      normalCycleCount: orderCycles.filter((row) => ["OK", "INFO"].includes(row.severity)).length,
+      historicalExchangeEvidenceCount: rawBinanceOrders.length,
+      normalCycleCount: currentOrderCycles.filter((row) => ["OK", "INFO"].includes(row.severity)).length,
     },
     currentRiskBoard,
-    orderCycles,
+    orderCycles: currentOrderCycles,
+    historicalOrderCycles,
     protectionMatrix,
     issueCenter,
     rawBinanceOrders: rawBinanceOrders.slice(0, Number(options.rawLimit || 120)),
@@ -1120,6 +1253,7 @@ module.exports = {
   classifyCurrentRisk,
   classifyOrderCycle,
   buildRawOrderRow,
+  inferPidFromClientOrderId,
   inferOrderIntent,
   isExpectedIgnoreCode,
 };

@@ -100,8 +100,9 @@ const run = () => {
     snapshots: [{ openQty: "0" }],
     reservations: [],
   });
-  assertEqual(gridManualCycle.lifecycleStatus, "CLOSED_BY_MANUAL", "normal grid manual close lifecycle");
-  assertEqual(gridManualCycle.severity, "OK", "normal grid manual close severity");
+  assertEqual(gridManualCycle.lifecycleStatus, "CLOSED_BY_MANUAL", "grid manual close lifecycle");
+  assertEqual(gridManualCycle.reconciliationOrigin, "RECONCILED_AFTER_PROJECTION_DEFECT", "GMANUAL is origin evidence, not normal proof");
+  assertEqual(gridManualCycle.severity, "WARN", "GMANUAL cycle is warning until expected recovery is proven");
 
   assertEqual(monitor.isExpectedIgnoreCode("NO_MATCHING_STRATEGY"), true, "NO_MATCHING_STRATEGY expected ignore");
   assertEqual(monitor.isExpectedIgnoreCode("GRID_ACTIVE_IGNORED"), true, "GRID_ACTIVE_IGNORED expected ignore");
@@ -128,6 +129,39 @@ const run = () => {
   assertEqual(raw.inferredIntent, "GRID_MANUAL_CLOSE", "raw order intent inference");
   assertEqual(raw.tradeIds.length, 2, "raw order trade ids preserved");
   assertEqual(raw.localLedgerMatch, true, "raw order ledger match by trade id");
+
+  const pidParserCases = [
+    ["GENTRY_S_156_9_35612954", 9],
+    ["GMANUAL_S_156_9_45968208", 9],
+    ["NEW_156_10", 10],
+    ["STOP_156_10_123456", 10],
+    ["SPLITTP_156_7_123456", 7],
+    ["TIME_156_8_123456", 8],
+    ["unknown_999999", null],
+  ];
+  pidParserCases.forEach(([clientOrderId, expectedPid]) => {
+    assertEqual(
+      monitor.inferPidFromClientOrderId(clientOrderId),
+      expectedPid,
+      `clientOrderId parser ${clientOrderId}`
+    );
+  });
+
+  const activeEntry = monitor.classifyCurrentRisk({
+    uid: 156,
+    symbol: "PUMPUSDT",
+    side: "SHORT",
+    binanceQty: 0,
+    localOpenQty: 0,
+    activeProtectionCount: 0,
+    expectedProtectionCount: 0,
+    activeProtectionQty: 0,
+    activeEntryCount: 1,
+    activeEntryQty: 13601,
+    ownerPids: [9],
+  });
+  assertEqual(activeEntry.lifecycleStatus, "ACTIVE_ENTRY_PENDING", "active entry pending lifecycle");
+  assertEqual(activeEntry.currentRisk, true, "active entry must appear as current risk");
 
   const keyA = monitor.buildIssueKey({
     uid: 147,
@@ -157,9 +191,11 @@ const run = () => {
       "current flat clean gate current CRITICAL 0",
       "protection issue attaches to affected cycle/order key",
       "normal closed TP cycle shows OK",
-      "normal grid manual close cycle shows OK",
+      "GMANUAL cycle is tagged as reconciliation-origin warning",
       "NO_MATCHING_STRATEGY/GRID_ACTIVE_IGNORED/duplicate ignored are expected",
       "raw Binance order explorer preserves orderId/tradeId evidence",
+      "clientOrderId parser uses token positions, not numeric suffix",
+      "active reduceOnly=false entry is surfaced as current risk",
       "msg_list is not used by classifier",
     ],
   }));
