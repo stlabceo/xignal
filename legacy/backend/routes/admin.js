@@ -1687,7 +1687,25 @@ const buildOrderProcessIssueMeta = ({
   });
 };
 
-const PID_ENTRY_LEDGER_EVENTS = new Set(["ENTRY_FILL", "GRID_ENTRY_FILL"]);
+const PID_ENTRY_LEDGER_EVENTS = new Set([
+  "ENTRY_FILL",
+  "GRID_ENTRY_FILL",
+  "SIGNAL_ENTRY_FILL",
+  "GRID_EXCHANGE_RECONCILED_ENTRY_FILL",
+]);
+const PID_EXIT_LEDGER_EVENTS = new Set([
+  "SPLIT_TAKE_PROFIT_FILL",
+  "BOUND_PROFIT_FILL",
+  "BOUND_STOP_FILL",
+  "GRID_TAKE_PROFIT_FILL",
+  "GRID_STOP_FILL",
+  "GRID_MANUAL_CLOSE_FILL",
+  "GRID_EXCHANGE_RECONCILED_EXIT_FILL",
+  "SIGNAL_EXIT_FILL",
+  "MARKET_EXIT_FILL",
+  "MANUAL_CLOSE_FILL",
+  "EXIT_FILL",
+]);
 const PID_EXIT_LEDGER_EVENT_LABELS = {
   SPLIT_TAKE_PROFIT_FILL: "분할 익절 체결",
   BOUND_PROFIT_FILL: "익절 체결",
@@ -1700,10 +1718,120 @@ const PID_EXIT_LEDGER_EVENT_LABELS = {
   EXIT_FILL: "청산 체결",
 };
 
-const isPidEntryLedgerEvent = (eventType) =>
-  PID_ENTRY_LEDGER_EVENTS.has(String(eventType || "").trim().toUpperCase());
+const isPidEntryLedgerEvent = (eventType) => {
+  const normalized = String(eventType || "").trim().toUpperCase();
+  if (!normalized) {
+    return false;
+  }
+  if (PID_ENTRY_LEDGER_EVENTS.has(normalized)) {
+    return true;
+  }
+  return normalized.includes("ENTRY") &&
+    !normalized.includes("EXIT") &&
+    !normalized.includes("CLOSE") &&
+    !normalized.includes("STOP") &&
+    !normalized.includes("TP");
+};
 
-const isPidExitLedgerEvent = (eventType) => !isPidEntryLedgerEvent(eventType);
+const isPidExitLedgerEvent = (eventType) => {
+  const normalized = String(eventType || "").trim().toUpperCase();
+  if (!normalized) {
+    return false;
+  }
+  if (PID_EXIT_LEDGER_EVENTS.has(normalized)) {
+    return true;
+  }
+  return normalized.includes("EXIT") ||
+    normalized.includes("CLOSE") ||
+    normalized.includes("STOP") ||
+    normalized.includes("TAKE_PROFIT") ||
+    normalized.includes("TP");
+};
+
+const hasOriginToken = (text, tokens = []) => tokens.some((token) => text.includes(token));
+
+const detectOrderProcessReconciliationOrigin = ({
+  ledgerRows = [],
+  msgRows = [],
+  reservationRows = [],
+  issueMeta = {},
+  stages = {},
+} = {}) => {
+  const evidenceText = [
+    issueMeta.issueCode,
+    issueMeta.issueLabel,
+    issueMeta.issueDetail,
+    stages.problemDetail,
+    stages.currentStepLabel,
+    stages.latestRuntimeIssue?.detail,
+    ...ledgerRows.flatMap((row) => [row.eventType, row.sourceClientOrderId, row.note]),
+    ...msgRows.flatMap((row) => [row.code, row.fun, row.msg]),
+    ...reservationRows.flatMap((row) => [row.clientOrderId, row.status, row.note]),
+  ]
+    .map((value) => String(value || ""))
+    .join(" ")
+    .toUpperCase();
+
+  if (!evidenceText) {
+    return "NORMAL_NO_RECONCILIATION";
+  }
+
+  const hasReconciliationEvidence = hasOriginToken(evidenceText, [
+    "GRID_EXCHANGE_RECONCILED",
+    "EXCHANGE-ENTRY-RECONCILE",
+    "EXCHANGE-CLOSE-RECONCILE",
+    "ENTRY_FILL_RECOVERED",
+    "EXIT_FILL_RECOVERED",
+    "TRUTH_SYNC",
+    "RECOVERED",
+    "ENDED_STALE_POSITION",
+    "GMANUAL",
+    "GRID_MANUAL_CLOSE",
+  ]);
+
+  if (!hasReconciliationEvidence) {
+    return "NORMAL_NO_RECONCILIATION";
+  }
+
+  if (hasOriginToken(evidenceText, [
+    "PARTIALLY_FILLED",
+    "WEBSOCKET_LOSS_EXPECTED",
+    "USER_MANUAL_EXTERNAL_ACTION",
+    "EXPECTED_RECOVERY",
+    "RESTART_GAP",
+  ])) {
+    return "NORMAL_WITH_EXPECTED_RECOVERY";
+  }
+
+  if (hasOriginToken(evidenceText, [
+    "ENTRY_FAIL",
+    "DISPATCH-TIMEOUT",
+    "EXACT_WAIT",
+    "SOURCE_DEFECT",
+    "OVER_CLOSE",
+    "WRONG_OWNER",
+  ])) {
+    return "RECONCILED_AFTER_SOURCE_DEFECT";
+  }
+
+  if (hasOriginToken(evidenceText, [
+    "TRUTH_SYNC_WITH_EXCHANGE_POSITION",
+    "TRUTH_SYNC_EXCHANGE_FLAT",
+    "TRUTH_SYNC_RESERVATION_OWNED_EXIT",
+    "GRID_EXCHANGE_RECONCILED_ENTRY_FILL",
+    "GRID_EXCHANGE_RECONCILED_EXIT_FILL",
+    "EXCHANGE-ENTRY-RECONCILE",
+    "EXCHANGE-CLOSE-RECONCILE",
+    "ENTRY_FILL_RECOVERED",
+    "EXIT_FILL_RECOVERED",
+    "RESERVATION_MISSING",
+    "PROJECTION",
+  ])) {
+    return "RECONCILED_AFTER_PROJECTION_DEFECT";
+  }
+
+  return "RECONCILED_AFTER_UNKNOWN_DEFECT";
+};
 
 const sumNumericField = (rows = [], field) =>
   rows.reduce((sum, row) => sum + Number(row?.[field] || 0), 0);
@@ -2371,6 +2499,13 @@ const buildOrderProcessRow = async (targetRow, options = {}) => {
   const latestOrderEvent = [...projectionBinanceRows]
     .sort((a, b) => new Date(b.eventTime || b.createdAt || 0).getTime() - new Date(a.eventTime || a.createdAt || 0).getTime())[0] || {};
   const realizedPnl = projectionLedgerRows.reduce((sum, row) => sum + Number(row.realizedPnl || 0), 0);
+  const reconciliationOrigin = detectOrderProcessReconciliationOrigin({
+    ledgerRows: projectionLedgerRows,
+    msgRows: projectionMsgRows,
+    reservationRows: projectionReservationRows,
+    issueMeta,
+    stages: normalizedStages,
+  });
 
   const baseRow = {
     id: targetRow.id,
@@ -2446,6 +2581,7 @@ const buildOrderProcessRow = async (targetRow, options = {}) => {
     activeReservationCount: activeProtectionCount,
     actualEntryNotional:
       (detailProjection.gridMeta || detailProjection.algorithmMeta || {}).actualEntryNotional || null,
+    reconciliationOrigin,
     recoveryReason: issueMeta.issueCode || null,
     ...viewProjection,
     ...detailProjection,
