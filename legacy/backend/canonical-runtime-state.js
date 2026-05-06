@@ -181,6 +181,13 @@ const deriveGridRuntimeState = (item = {}, options = {}) => {
     regimeStatus === "PAIR_ONE_LEG_UNPROTECTED" ||
     regimeStatus === "GRID_PARTIAL_PROTECTION" ||
     regimeStatus === "GRID_UNPROTECTED" ||
+    regimeStatus === "REENTRY_INTENT_PENDING" ||
+    regimeStatus === "REENTRY_CREATE_RUNNING" ||
+    regimeStatus === "REENTRY_PENDING" ||
+    regimeStatus === "REENTRY_FAILED" ||
+    regimeStatus === "REENTRY_BLOCKED_PRICE_STALE" ||
+    regimeStatus === "REENTRY_BLOCKED_OWNERSHIP" ||
+    regimeStatus === "REENTRY_BLOCKED_REDIS" ||
     regimeStatus === "GRID_REENTRY_STALE" ||
     regimeStatus === "GRID_REENTRY_FAILED" ||
     regimeStatus === "GRID_SL_CLEANUP_PENDING" ||
@@ -200,6 +207,13 @@ const GRID_CRITICAL_REGIME_STATES = new Set([
   "PAIR_ONE_LEG_UNPROTECTED",
   "GRID_PARTIAL_PROTECTION",
   "GRID_UNPROTECTED",
+  "REENTRY_INTENT_PENDING",
+  "REENTRY_CREATE_RUNNING",
+  "REENTRY_PENDING",
+  "REENTRY_FAILED",
+  "REENTRY_BLOCKED_PRICE_STALE",
+  "REENTRY_BLOCKED_OWNERSHIP",
+  "REENTRY_BLOCKED_REDIS",
   "GRID_REENTRY_STALE",
   "GRID_REENTRY_FAILED",
   "GRID_SL_CLEANUP_PENDING",

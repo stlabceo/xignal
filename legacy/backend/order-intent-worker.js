@@ -7,6 +7,7 @@ const redisClient = require("./util/redis.util");
 const db = require("./database/connect/config");
 const gridProtectionGuarantee = require("./grid-protection-guarantee");
 const pidPositionLedger = require("./pid-position-ledger");
+const gridReentrySlPolicy = require("./grid-reentry-sl-policy");
 
 const DEFAULT_POLL_MS = 500;
 const DEFAULT_STALE_SECONDS = 90;
@@ -35,7 +36,25 @@ const PROTECTION_QUEUE_STATE = Object.freeze({
   PROTECTED: "PROTECTION_PROTECTED",
 });
 
+const REENTRY_QUEUE_STATE = Object.freeze({
+  INTENT_PENDING: "REENTRY_INTENT_PENDING",
+  RUNNING: "REENTRY_CREATE_RUNNING",
+  PENDING: "REENTRY_PENDING",
+  FAILED: "REENTRY_FAILED",
+  BLOCKED_PRICE_STALE: "REENTRY_BLOCKED_PRICE_STALE",
+  BLOCKED_OWNERSHIP: "REENTRY_BLOCKED_OWNERSHIP",
+  BLOCKED_REDIS: "REENTRY_BLOCKED_REDIS",
+});
+
 const getLegPrefix = (leg) => (String(leg || "").toUpperCase() === "SHORT" ? "short" : "long");
+
+const loadFreshGridDecisionPriceForWorker = async (symbol, options = {}) => {
+  const coin = require("./coin");
+  if (typeof coin.ensurePublicMarketPrice === "function") {
+    return await coin.ensurePublicMarketPrice(symbol, options);
+  }
+  return require("./data").getPrice(symbol);
+};
 
 const deriveFallbackProtectionClientOrderId = ({ payload = {}, prefix }) => {
   const derived = gridProtectionGuarantee.deriveProtectionClientOrderId({
@@ -144,6 +163,278 @@ const syncProtectionReservationsForIntent = async ({ payload = {}, result = {}, 
     positionSide: payload.positionSide,
     reservations,
   });
+};
+
+const updateGridReentryProjection = async ({ payload = {}, state, clientOrderId = null, reason = null } = {}) => {
+  const rowId = Number(payload.gridRowId || payload.regimeId || payload.pid || 0);
+  if (!(rowId > 0)) {
+    return false;
+  }
+
+  const leg = String(payload.positionSide || payload.leg || "").toUpperCase();
+  const prefix = getLegPrefix(leg);
+  const patch = {
+    [`${prefix}LegStatus`]: state === REENTRY_QUEUE_STATE.PENDING ? "ENTRY_ARMED" : "IDLE",
+    [`${prefix}EntryOrderId`]: state === REENTRY_QUEUE_STATE.PENDING ? clientOrderId : null,
+    [`${prefix}ExitOrderId`]: null,
+    [`${prefix}StopOrderId`]: null,
+    [`${prefix}Qty`]: 0,
+    [`${prefix}EntryPrice`]: null,
+    [`${prefix}TakeProfitPrice`]: null,
+    [`${prefix}StopPrice`]: null,
+    regimeStatus: state === REENTRY_QUEUE_STATE.PENDING ? "ACTIVE" : state,
+    regimeEndReason: state === REENTRY_QUEUE_STATE.PENDING ? null : reason || state,
+  };
+
+  const assignments = Object.keys(patch).map((key) => `${key} = ?`).join(", ");
+  await db.query(
+    `UPDATE live_grid_strategy_list
+        SET ${assignments},
+            updatedAt = CURRENT_TIMESTAMP
+      WHERE id = ?
+        AND uid = ?`,
+    [...Object.values(patch), rowId, Number(payload.uid || 0)]
+  );
+  return true;
+};
+
+const loadActiveCloseReservationCount = async (payload = {}) => {
+  const [rows] = await db.query(
+    `SELECT COUNT(*) AS cnt
+       FROM live_pid_exit_reservation
+      WHERE uid = ?
+        AND pid = ?
+        AND strategyCategory = 'grid'
+        AND symbol = ?
+        AND positionSide = ?
+        AND status IN ('ACTIVE', 'PARTIAL', 'CANCEL_REQUESTED', 'CANCEL_PENDING', 'UNKNOWN_CANCEL_STATE')`,
+    [
+      Number(payload.uid || 0),
+      Number(payload.pid || 0),
+      String(payload.symbol || "").toUpperCase(),
+      String(payload.positionSide || "").toUpperCase(),
+    ]
+  );
+  return Number(rows?.[0]?.cnt || 0);
+};
+
+const getReentryPriceDecisionForIntent = async (payload = {}, options = {}) => {
+  if (options.mockPriceDecision) {
+    return options.mockPriceDecision;
+  }
+  if (payload.priceFreshnessEvidence && typeof payload.priceFreshnessEvidence === "object") {
+    return payload.priceFreshnessEvidence;
+  }
+  const price = await loadFreshGridDecisionPriceForWorker(payload.symbol);
+  return gridReentrySlPolicy.getReentryPriceDecision(price);
+};
+
+const deriveReentryClientOrderId = (payload = {}) => {
+  if (payload.reentryClientOrderId) {
+    return payload.reentryClientOrderId;
+  }
+  return gridReentrySlPolicy.buildGridReentryClientOrderId(
+    {
+      uid: payload.uid,
+      id: payload.pid,
+      symbol: payload.symbol,
+      bunbong: payload.timeframe,
+      triggerPrice: payload.triggerPrice,
+      regimeReceivedAt: payload.regimeReceivedAt || null,
+      signalTime: payload.signalTime || null,
+      updatedAt: payload.updatedAt || null,
+    },
+    payload.positionSide,
+    {
+      takeProfitClientOrderId: payload.sourceTakeProfitClientOrderId,
+      orderId: payload.sourceOrderId,
+      tradeId: payload.sourceTradeId,
+      tradeTime: payload.tradeTime,
+    }
+  );
+};
+
+const processGridReentryCreateIntent = async (intent, options = {}) => {
+  const env = options.env || process.env;
+  const payload = intent?.payload?.reentry || intent?.payload || {};
+  const lockRedisClient = Object.prototype.hasOwnProperty.call(options, "redisClient")
+    ? options.redisClient
+    : redisClient;
+  const redisGate = liveWriteSafetyGate.evaluateRedisLockUnavailable({
+    env,
+    liveScope: true,
+    strategyCategory: "grid",
+    scope: "ORDER_INTENT_WORKER",
+    lockKey: `order-intent-worker:grid-reentry:${intent.fifoKey || intent.id}`,
+  });
+
+  if (!liveWriteSafetyGate.isRedisClientReady(lockRedisClient) && !redisGate.allowed) {
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(redisGate.reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: REENTRY_QUEUE_STATE.BLOCKED_REDIS,
+      }),
+      errorCode: redisGate.reason,
+      errorMessage: "Redis lock unavailable; live grid re-entry worker write blocked.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: redisGate.reason };
+  }
+
+  const ownershipReadiness = await positionOwnership.getOwnershipReadiness().catch((error) => ({
+    enabled: false,
+    error: error?.message || String(error),
+  }));
+  const ownershipGate = liveWriteSafetyGate.evaluateOwnershipGuard({
+    env,
+    strategyCategory: "grid",
+    uid: intent.uid,
+    pid: intent.pid,
+    symbol: payload.symbol || null,
+    positionSide: payload.positionSide || null,
+    ownershipEnabled: ownershipReadiness.enabled === true,
+  });
+  if (!ownershipGate.allowed) {
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(ownershipGate.reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: REENTRY_QUEUE_STATE.BLOCKED_OWNERSHIP,
+      }),
+      errorCode: ownershipGate.reason,
+      errorMessage: `DB-backed PID ownership unavailable; live grid re-entry worker write blocked. status:${ownershipReadiness.status || "UNKNOWN"}`,
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: ownershipGate.reason };
+  }
+
+  const priceDecision = await getReentryPriceDecisionForIntent(payload, options).catch((error) => ({
+    usable: false,
+    source: "ERROR",
+    reason: error?.message || String(error),
+  }));
+  if (!priceDecision.usable) {
+    await updateGridReentryProjection({
+      payload,
+      state: REENTRY_QUEUE_STATE.BLOCKED_PRICE_STALE,
+      reason: priceDecision.reason || "PRICE_STALE",
+    }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult("REENTRY_PRICE_STALE", {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: REENTRY_QUEUE_STATE.BLOCKED_PRICE_STALE,
+        priceDecision,
+      }),
+      errorCode: REENTRY_QUEUE_STATE.BLOCKED_PRICE_STALE,
+      errorMessage: `Grid re-entry blocked by stale price:${priceDecision.reason || "UNKNOWN"}`,
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: REENTRY_QUEUE_STATE.BLOCKED_PRICE_STALE };
+  }
+
+  const reentryQty = Number(payload.reentryQty || payload.qty || 0);
+  const ownedQtyBasis = Number(payload.ownedQtyBasis || payload.closedQty || payload.fillQty || 0);
+  const activeCloseReservations = await loadActiveCloseReservationCount(payload);
+  if (!(reentryQty > 0) || !(ownedQtyBasis > 0) || activeCloseReservations > 0) {
+    const reason = activeCloseReservations > 0
+      ? "REENTRY_BLOCKED_CLOSE_RESERVATION_ACTIVE"
+      : "REENTRY_BLOCKED_OWNERSHIP_QTY_BASIS";
+    await updateGridReentryProjection({
+      payload,
+      state: REENTRY_QUEUE_STATE.BLOCKED_OWNERSHIP,
+      reason,
+    }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: REENTRY_QUEUE_STATE.BLOCKED_OWNERSHIP,
+        reentryQty,
+        ownedQtyBasis,
+        activeCloseReservations,
+      }),
+      errorCode: REENTRY_QUEUE_STATE.BLOCKED_OWNERSHIP,
+      errorMessage: `Grid re-entry blocked by ownership/reservation guard:${reason}`,
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason };
+  }
+
+  const clientOrderId = deriveReentryClientOrderId(payload);
+  if (options.dryRun === true || options.mock === true) {
+    const mockResult = options.mockReentryResult;
+    if (mockResult === false || mockResult?.ok === false) {
+      const reason = mockResult?.reason || "REENTRY_SUBMIT_FAILED";
+      await updateGridReentryProjection({
+        payload,
+        state: REENTRY_QUEUE_STATE.FAILED,
+        clientOrderId,
+        reason,
+      }).catch(() => {});
+      await orderIntentQueue.completeIntent({
+        id: intent.id,
+        status: orderIntentQueue.STATUS.FAILED,
+        result: {
+          ok: false,
+          mock: options.mock === true,
+          dryRun: options.dryRun === true,
+          intentType: intent.intentType,
+          fifoKey: intent.fifoKey,
+          projectionState: REENTRY_QUEUE_STATE.FAILED,
+          reason,
+          clientOrderId,
+        },
+        errorCode: REENTRY_QUEUE_STATE.FAILED,
+        errorMessage: `Grid re-entry failed:${reason}`,
+      });
+      return { processed: true, status: orderIntentQueue.STATUS.FAILED, reason: REENTRY_QUEUE_STATE.FAILED };
+    }
+
+    const result = {
+      ok: true,
+      mock: options.mock === true,
+      dryRun: options.dryRun === true,
+      intentType: intent.intentType,
+      fifoKey: intent.fifoKey,
+      projectionState: REENTRY_QUEUE_STATE.PENDING,
+      clientOrderId: mockResult?.clientOrderId || clientOrderId,
+      orderId: mockResult?.orderId || null,
+      reentryQty,
+      triggerPrice: payload.triggerPrice,
+      priceDecision,
+    };
+    await updateGridReentryProjection({
+      payload,
+      state: REENTRY_QUEUE_STATE.PENDING,
+      clientOrderId: result.clientOrderId,
+    }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.DONE,
+      result,
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.DONE, reason: REENTRY_QUEUE_STATE.PENDING };
+  }
+
+  await orderIntentQueue.completeIntent({
+    id: intent.id,
+    status: orderIntentQueue.STATUS.BLOCKED,
+    result: buildBlockResult("REENTRY_WORKER_LIVE_WRITE_DISABLED", {
+      intentType: intent.intentType,
+      fifoKey: intent.fifoKey,
+      projectionState: REENTRY_QUEUE_STATE.RUNNING,
+      note: "actual Binance re-entry dispatch is intentionally blocked outside live runtime validation",
+    }),
+    errorCode: "REENTRY_WORKER_LIVE_WRITE_DISABLED",
+    errorMessage: "Grid re-entry worker dispatch intentionally blocked for non-mock execution.",
+  });
+  return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: "REENTRY_WORKER_LIVE_WRITE_DISABLED" };
 };
 
 const processGridProtectionCreateIntent = async (intent, options = {}) => {
@@ -403,6 +694,10 @@ const processIntent = async (intent, options = {}) => {
     return await processGridProtectionCreateIntent(intent, options);
   }
 
+  if (intent.intentType === orderIntentQueue.INTENT_TYPE.GRID_REENTRY_CREATE) {
+    return await processGridReentryCreateIntent(intent, options);
+  }
+
   await orderIntentQueue.completeIntent({
     id: intent.id,
     status: orderIntentQueue.STATUS.FAILED,
@@ -471,7 +766,9 @@ module.exports = {
   processOneIntent,
   processIntent,
   processGridProtectionCreateIntent,
+  processGridReentryCreateIntent,
   PROTECTION_QUEUE_STATE,
+  REENTRY_QUEUE_STATE,
   startOrderIntentWorker,
   stopOrderIntentWorker,
   getOrderIntentWorkerHealth,

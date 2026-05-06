@@ -14,6 +14,7 @@ const STATUS = Object.freeze({
 const INTENT_TYPE = Object.freeze({
   GRID_LIVE_ARM: "GRID_LIVE_ARM",
   GRID_PROTECTION_CREATE: "GRID_PROTECTION_CREATE",
+  GRID_REENTRY_CREATE: "GRID_REENTRY_CREATE",
 });
 
 const DEFAULT_MAX_ATTEMPTS = 3;
@@ -214,6 +215,74 @@ const buildGridProtectionFifoKey = ({ payload = {} } = {}) => {
   ].join(":");
 };
 
+const normalizeReentryIntentPayload = (payload = {}) => ({
+  ...payload,
+  uid: Number(payload.uid || 0),
+  pid: Number(payload.pid || 0),
+  strategyCategory: "grid",
+  symbol: normalizeSymbol(payload.symbol),
+  timeframe: normalizeTimeframe(payload.timeframe || payload.bunbong),
+  positionSide: normalizePositionSide(payload.positionSide || payload.leg),
+  regimeId: payload.regimeId || payload.gridRowId || payload.pid || null,
+  triggerPrice: Number(payload.triggerPrice || 0),
+  reentryQty: Number(payload.reentryQty || payload.qty || 0),
+  ownedQtyBasis: Number(payload.ownedQtyBasis || payload.closedQty || payload.fillQty || 0),
+  sourceTakeProfitClientOrderId: payload.sourceTakeProfitClientOrderId || payload.sourceClientOrderId || null,
+  sourceOrderId: payload.sourceOrderId == null ? null : String(payload.sourceOrderId),
+  sourceTradeId: payload.sourceTradeId == null ? null : String(payload.sourceTradeId),
+  tradeTime: payload.tradeTime == null ? null : String(payload.tradeTime),
+  reentryClientOrderId: payload.reentryClientOrderId || null,
+});
+
+const buildGridReentryIntentPayloadHash = ({ payload = {} } = {}) => {
+  const normalized = normalizeReentryIntentPayload(payload);
+  return sha1(
+    safeJsonStringify({
+      action: INTENT_TYPE.GRID_REENTRY_CREATE,
+      uid: normalized.uid,
+      pid: normalized.pid,
+      symbol: normalized.symbol,
+      timeframe: normalized.timeframe,
+      positionSide: normalized.positionSide,
+      regimeId: normalized.regimeId,
+      triggerPrice: normalized.triggerPrice,
+      reentryQty: normalized.reentryQty,
+      ownedQtyBasis: normalized.ownedQtyBasis,
+      sourceTakeProfitClientOrderId: normalized.sourceTakeProfitClientOrderId,
+      sourceOrderId: normalized.sourceOrderId,
+      sourceTradeId: normalized.sourceTradeId,
+      tradeTime: normalized.tradeTime,
+    })
+  );
+};
+
+const buildGridReentryIntentKey = ({ payload = {} } = {}) => {
+  const normalized = normalizeReentryIntentPayload(payload);
+  const tradeIdentity = normalized.sourceTradeId
+    || normalized.sourceOrderId
+    || normalized.sourceTakeProfitClientOrderId
+    || buildGridReentryIntentPayloadHash({ payload: normalized });
+  return [
+    INTENT_TYPE.GRID_REENTRY_CREATE,
+    normalized.uid,
+    normalized.pid,
+    normalized.symbol,
+    normalized.positionSide,
+    tradeIdentity,
+  ].join(":");
+};
+
+const buildGridReentryFifoKey = ({ payload = {} } = {}) => {
+  const normalized = normalizeReentryIntentPayload(payload);
+  return [
+    normalized.uid,
+    "grid",
+    normalized.pid,
+    "regime",
+    normalized.regimeId || normalized.pid,
+  ].join(":");
+};
+
 const normalizeQueuedIntentRow = (row = null) => {
   if (!row) {
     return null;
@@ -388,6 +457,77 @@ const enqueueGridProtectionCreateIntent = async ({
   };
 };
 
+const enqueueGridReentryCreateIntent = async ({
+  payload = {},
+  routePath = "grid-runtime-tp-reentry",
+  sourceEventId = null,
+} = {}) => {
+  await ensureOrderIntentSchema();
+  const normalized = normalizeReentryIntentPayload(payload);
+  if (!normalized.uid || !normalized.pid || !normalized.symbol || !normalized.positionSide) {
+    throw new Error("GRID_REENTRY_INTENT_INVALID_OWNER");
+  }
+
+  const payloadHash = buildGridReentryIntentPayloadHash({ payload: normalized });
+  const intentKey = buildGridReentryIntentKey({ payload: normalized });
+  const fifoKey = buildGridReentryFifoKey({ payload: normalized });
+  const intentPayload = {
+    action: INTENT_TYPE.GRID_REENTRY_CREATE,
+    routePath,
+    sourceEventId,
+    reentry: normalized,
+  };
+
+  const [result] = await db.query(
+    `INSERT IGNORE INTO order_intent_queue
+      (
+        intentKey,
+        fifoKey,
+        uid,
+        pid,
+        strategyCategory,
+        intentType,
+        status,
+        priority,
+        attemptCount,
+        maxAttempts,
+        routePath,
+        sourceEventId,
+        payloadHash,
+        payloadJson
+      )
+     VALUES (?, ?, ?, ?, 'grid', ?, ?, 95, 0, ?, ?, ?, ?, ?)`,
+    [
+      intentKey,
+      fifoKey,
+      normalized.uid,
+      normalized.pid,
+      INTENT_TYPE.GRID_REENTRY_CREATE,
+      STATUS.PENDING,
+      DEFAULT_MAX_ATTEMPTS,
+      routePath,
+      sourceEventId,
+      payloadHash,
+      safeJsonStringify(intentPayload),
+    ]
+  );
+
+  const inserted = Number(result?.affectedRows || 0) === 1;
+  return {
+    requested: 1,
+    inserted: inserted ? 1 : 0,
+    duplicate: inserted ? 0 : 1,
+    intent: {
+      intentKey,
+      fifoKey,
+      uid: normalized.uid,
+      pid: normalized.pid,
+      status: inserted ? STATUS.PENDING : "DUPLICATE",
+      payloadHash,
+    },
+  };
+};
+
 const claimNextIntent = async ({ workerId = null } = {}) => {
   await ensureOrderIntentSchema();
   const claimWorkerId = String(workerId || `worker-${process.pid || "local"}`).slice(0, 80);
@@ -527,8 +667,12 @@ module.exports = {
   buildGridProtectionIntentPayloadHash,
   buildGridProtectionIntentKey,
   buildGridProtectionFifoKey,
+  buildGridReentryIntentPayloadHash,
+  buildGridReentryIntentKey,
+  buildGridReentryFifoKey,
   enqueueGridLiveArmIntents,
   enqueueGridProtectionCreateIntent,
+  enqueueGridReentryCreateIntent,
   claimNextIntent,
   completeIntent,
   recoverStaleRunningIntents,

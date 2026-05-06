@@ -2529,6 +2529,71 @@ const markGridReentryFailed = async ({
   };
 };
 
+const enqueueLiveReentryIntentAfterTakeProfit = async (row, parsed, reData) => {
+  const leg = parsed.leg;
+  const source = {
+    takeProfitClientOrderId: parsed.clientOrderId,
+    orderId: reData?.i || null,
+    tradeId: reData?.t || null,
+    tradeTime: reData?.T || null,
+  };
+  const requestedClientOrderId = gridReentrySlPolicy.buildGridReentryClientOrderId(row, leg, source);
+  const priceDecision = await loadFreshGridDecisionPrice(row.symbol)
+    .then((price) => gridReentrySlPolicy.getReentryPriceDecision(price))
+    .catch((error) => ({
+      usable: false,
+      source: "ERROR",
+      reason: error?.message || String(error),
+    }));
+  const triggerPrice = toNumber(row.triggerPrice);
+  const reentryQty = computeGridEntryQty(row, triggerPrice);
+  const closedQty = toNumber(reData?.l || reData?.z);
+  const summary = await orderIntentQueue.enqueueGridReentryCreateIntent({
+    routePath: "grid-runtime-tp-reentry",
+    payload: {
+      uid: row.uid,
+      pid: row.id,
+      gridRowId: row.id,
+      regimeId: row.id,
+      symbol: row.symbol,
+      timeframe: row.bunbong,
+      positionSide: leg,
+      triggerPrice,
+      reentryQty,
+      ownedQtyBasis: closedQty,
+      sourceTakeProfitClientOrderId: parsed.clientOrderId,
+      sourceOrderId: reData?.i || null,
+      sourceTradeId: reData?.t || null,
+      tradeTime: reData?.T || null,
+      reentryClientOrderId: requestedClientOrderId,
+      priceFreshnessEvidence: priceDecision,
+    },
+  });
+
+  await applyGridPatch("live_grid_strategy_list", row.id, {
+    ...getLegPatchForClosed(leg),
+    regimeStatus: gridReentrySlPolicy.GRID_REENTRY_STATE.INTENT_PENDING,
+    regimeEndReason: gridReentrySlPolicy.GRID_REENTRY_REASON.INTENT_PENDING,
+  });
+  await appendGridRuntimeLog(
+    row,
+    "gridReentryQueue",
+    summary.inserted ? "REENTRY_INTENT_ENQUEUED" : "REENTRY_INTENT_DUPLICATE",
+    `leg:${leg}, clientOrderId:${requestedClientOrderId}, trigger:${triggerPrice}, qty:${reentryQty}, priceUsable:${priceDecision.usable ? "Y" : "N"}, intent:${summary.intent?.intentKey || "NONE"}`,
+    leg
+  );
+
+  return {
+    ok: true,
+    pending: true,
+    clientOrderId: requestedClientOrderId,
+    state: gridReentrySlPolicy.GRID_REENTRY_STATE.INTENT_PENDING,
+    reason: gridReentrySlPolicy.GRID_REENTRY_REASON.INTENT_PENDING,
+    intentSummary: summary,
+    priceDecision,
+  };
+};
+
 const armLiveReentryAfterTakeProfit = async (row, parsed, reData) => {
   const leg = parsed.leg;
   const priceDecision = gridReentrySlPolicy.getReentryPriceDecision(
@@ -3997,15 +4062,15 @@ const handleLiveGridTakeProfitFill = async (parsed, reData) => {
 
   const shouldRearm = canArmEntriesForRow(row);
   if (shouldRearm) {
-    const reentry = await armLiveReentryAfterTakeProfit(row, parsed, reData);
+    const reentry = await enqueueLiveReentryIntentAfterTakeProfit(row, parsed, reData);
     await appendGridRuntimeLog(
       row,
       "gridLiveExit",
-      reentry.ok ? "TAKE_PROFIT_REENTRY" : reentry.reason,
-      `leg:${parsed.leg}, exitPrice:${toNumber(reData.ap || reData.L)}, reentry:${reentry.clientOrderId || "NONE"}, state:${reentry.state || "UNKNOWN"}`,
+      reentry.pending ? "TAKE_PROFIT_REENTRY_INTENT_PENDING" : reentry.reason,
+      `leg:${parsed.leg}, exitPrice:${toNumber(reData.ap || reData.L)}, reentry:${reentry.clientOrderId || "NONE"}, state:${reentry.state || "UNKNOWN"}, intent:${reentry.intentSummary?.intent?.intentKey || "NONE"}`,
       parsed.leg
     );
-    setOutcome(reentry.ok ? "TP_REARMED" : reentry.reason);
+    setOutcome(reentry.pending ? "TP_REENTRY_INTENT_PENDING" : reentry.reason);
     return true;
   }
 
