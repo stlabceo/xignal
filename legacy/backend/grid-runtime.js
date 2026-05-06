@@ -429,11 +429,31 @@ const previewGridWebhook = async (payload = {}) => {
   return combineGridWebhookResults(liveResult, testResult);
 };
 
-const processGridWebhook = async (payload = {}) => {
+const processGridWebhook = async (payload = {}, options = {}) => {
   const normalized = normalizeGridWebhookPayload(payload);
+  const includeLive = options.includeLive !== false;
+  const includeTest = options.includeTest !== false;
   const [liveResult, testResult] = await Promise.all([
-    armGridWebhookTargetsForMode("live", normalized),
-    armGridWebhookTargetsForMode("test", normalized),
+    includeLive
+      ? armGridWebhookTargetsForMode("live", normalized)
+      : {
+          matched: 0,
+          armed: 0,
+          ignoredActive: 0,
+          ignoredConflict: 0,
+          ignoredSignal: 0,
+          targetItems: [],
+        },
+    includeTest
+      ? armGridWebhookTargetsForMode("test", normalized)
+      : {
+          matched: 0,
+          armed: 0,
+          ignoredActive: 0,
+          ignoredConflict: 0,
+          ignoredSignal: 0,
+          targetItems: [],
+        },
   ]);
 
   return combineGridWebhookResults(liveResult, testResult);

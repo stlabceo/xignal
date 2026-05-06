@@ -14,6 +14,7 @@ const signalStrategyIdentity = require("./signal-strategy-identity");
 const adminOrderMonitor = require("./admin-order-monitor");
 const signalStaleTime = require("./signal-stale-time");
 const liveWriteSafetyGate = require("./live-write-safety-gate");
+const orderIntentWorker = require("./order-intent-worker");
 
 const coin = require("./coin");
 const dt = require("./data");
@@ -2171,6 +2172,9 @@ exports.startRuntime = async (options = {}) => {
             enableAccountPolling: true,
             enableSocket: true,
             enableCandleSchedules: true,
+        });
+        runtimeLoopHealth.orderIntentWorker = orderIntentWorker.startOrderIntentWorker({
+            ownerLabel,
         });
 
         if(!runMainTimer){

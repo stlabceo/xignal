@@ -130,6 +130,7 @@ const assertBlocked = (decision, reason) => {
   const readiness = liveWriteSafetyGate.buildReadinessSnapshot({
     env: LIVE_ENV,
     redisClient: { set: () => {}, isOpen: false, isReady: false },
+    orderIntentQueueEnabled: false,
   });
   assert.strictEqual(readiness.status, "BLOCKED");
   assert(readiness.blockers.some((item) => item.code === liveWriteSafetyGate.REASON.REDIS_LOCK_UNAVAILABLE));

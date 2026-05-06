@@ -11,13 +11,12 @@ const requestIp = require('request-ip');
 const seon = require('../seon');
 const dbcon = require("../dbcon");
 const gridRuntime = require("../grid-runtime");
-const gridEngine = require("../grid-engine");
 const coin = require("../coin");
 const accountReadiness = require("../account-readiness");
 const binanceWriteGuard = require("../binance-write-guard");
 const credentialSecrets = require("../credential-secrets");
 const signalStrategyIdentity = require("../signal-strategy-identity");
-const liveWriteSafetyGate = require("../live-write-safety-gate");
+const orderIntentQueue = require("../order-intent-queue");
 const { insertWebhookEventLog, insertWebhookEventTargetLogs } = require("../webhook-event-log");
 
 const { validateRegister, validateRegister1, validateRegister2, validateLogin } = require('./validation');
@@ -1376,86 +1375,41 @@ router.post('/api/grid/hook', async function(req, res){
     }
 
     const previewResult = await gridRuntime.previewGridWebhook(payload);
-    const preArmGate = liveWriteSafetyGate.evaluateGridRequestThreadWrite({
-      routePath: '/user/api/grid/hook',
-      liveArmedCount: previewResult?.live?.armed || 0,
-      strategyCategory: 'grid',
+    const liveArmPreviewCount = Number(previewResult?.live?.armed || 0);
+    const queueSummary = liveArmPreviewCount > 0
+      ? await orderIntentQueue.enqueueGridLiveArmIntents({
+          payload,
+          previewResult,
+          routePath: '/user/api/grid/hook',
+        })
+      : {
+          requested: 0,
+          inserted: 0,
+          duplicate: 0,
+          intents: [],
+        };
+    const result = await gridRuntime.processGridWebhook(payload, {
+      includeLive: liveArmPreviewCount <= 0,
+      includeTest: true,
     });
-    if(!preArmGate.allowed){
-      console.log('[LIVE_WRITE_SAFETY_GATE] grid request-thread arm blocked before state mutation', {
-        reason: preArmGate.reason,
-        routePath: '/user/api/grid/hook',
-        liveArmedCount: previewResult?.live?.armed || 0,
-      });
-      const blockedResponse = {
-        ok: false,
-        strategySignal: payload.strategySignal,
-        symbol: payload.symbol,
-        bunbong: payload.bunbong,
-        matched: previewResult.matched,
+    const combinedResult = {
+      ...result,
+      matched: Number(previewResult?.live?.matched || 0) + Number(result?.test?.matched || 0),
+      armed: Number(result?.test?.armed || 0),
+      ignoredActive: Number(previewResult?.live?.ignoredActive || 0) + Number(result?.test?.ignoredActive || 0),
+      ignoredConflict: Number(previewResult?.live?.ignoredConflict || 0) + Number(result?.test?.ignoredConflict || 0),
+      ignoredSignal: Number(previewResult?.live?.ignoredSignal || 0) + Number(result?.test?.ignoredSignal || 0),
+      live: {
+        ...(previewResult.live || {}),
         armed: 0,
-        blockedArmCount: previewResult.armed,
-        livePrimed: 0,
-        ignoredActive: previewResult.ignoredActive,
-        ignoredConflict: previewResult.ignoredConflict,
-        ignoredSignal: previewResult.ignoredSignal,
-        live: {
-          ...(previewResult.live || {}),
-          blockedArmCount: previewResult?.live?.armed || 0,
-          armed: 0,
-        },
-        test: previewResult.test,
-        safetyGate: {
-          status: 'BLOCKED',
-          reason: preArmGate.reason,
-          code: preArmGate.code,
-        },
-      };
-      const blockedEventId = await insertWebhookEventLog({
-        ...baseWebhookLog,
-        status: 'BLOCKED',
-        resultCode: preArmGate.reason,
-        matchedCount: previewResult.matched,
-        processedCount: 0,
-        ignoredCount: previewResult.ignoredActive + previewResult.ignoredSignal,
-        httpStatus: 200,
-        note: 'live grid request-thread arm blocked by safety gate before state mutation',
-        responseBody: blockedResponse,
-      });
-      await insertWebhookEventTargetLogs(
-        blockedEventId,
-        (previewResult?.targetItems || []).map((item) => ({
-          ...item,
-          resultCode: preArmGate.reason,
-          severity: item.strategyMode === 'live' ? 'high' : item.severity,
-          opsStatus: item.strategyMode === 'live' ? 'OPEN' : item.opsStatus,
-          note: item.strategyMode === 'live'
-            ? 'live grid write requires durable queue before arming'
-            : item.note,
-        }))
-      );
-      return res.send(blockedResponse);
-    }
-
-    const result = await gridRuntime.processGridWebhook(payload);
-    const gridPrimeGate = liveWriteSafetyGate.evaluateGridRequestThreadWrite({
-      routePath: '/user/api/grid/hook',
-      liveArmedCount: result?.live?.armed || 0,
-      strategyCategory: 'grid',
-    });
+        queued: queueSummary.inserted,
+        duplicateIntent: queueSummary.duplicate,
+      },
+    };
     let livePrimed = 0;
-    if(gridPrimeGate.allowed){
-      livePrimed = await gridEngine.primeLiveEntriesForTargetItems(result?.targetItems || []);
-    }else{
-      console.log('[LIVE_WRITE_SAFETY_GATE] grid request-thread prime blocked', {
-        reason: gridPrimeGate.reason,
-        routePath: '/user/api/grid/hook',
-        liveArmedCount: result?.live?.armed || 0,
-      });
-    }
 
   console.log(
-    `[grid-hook] signal=${payload.strategySignal} symbol=${payload.symbol} bunbong=${payload.bunbong} matched=${result.matched} armed=${result.armed} ignoredActive=${result.ignoredActive} livePrimed=${livePrimed}`
+    `[grid-hook] signal=${payload.strategySignal} symbol=${payload.symbol} bunbong=${payload.bunbong} matched=${combinedResult.matched} armed=${combinedResult.armed} ignoredActive=${combinedResult.ignoredActive} livePrimed=${livePrimed} liveQueued=${queueSummary.inserted}`
   );
 
   const responseBody = {
@@ -1463,35 +1417,70 @@ router.post('/api/grid/hook', async function(req, res){
     strategySignal: payload.strategySignal,
     symbol: payload.symbol,
     bunbong: payload.bunbong,
-    matched: result.matched,
-    armed: result.armed,
+    matched: combinedResult.matched,
+    armed: combinedResult.armed,
+    queued: queueSummary.inserted,
+    duplicateIntent: queueSummary.duplicate,
     livePrimed,
-    ignoredActive: result.ignoredActive,
-    ignoredConflict: result.ignoredConflict,
-    ignoredSignal: result.ignoredSignal,
-    live: result.live,
-    test: result.test,
-    safetyGate: gridPrimeGate.allowed
-      ? null
-      : {
-          status: 'BLOCKED',
-          reason: gridPrimeGate.reason,
-          code: gridPrimeGate.code,
-        },
+    ignoredActive: combinedResult.ignoredActive,
+    ignoredConflict: combinedResult.ignoredConflict,
+    ignoredSignal: combinedResult.ignoredSignal,
+    live: combinedResult.live,
+    test: combinedResult.test,
+    orderIntentQueue: queueSummary,
+    safetyGate: null,
   };
-  const outcome = buildGridWebhookOutcome(result);
+  const outcome = queueSummary.inserted > 0 || queueSummary.duplicate > 0
+    ? {
+        status: 'PROCESSED',
+        resultCode: 'GRID_LIVE_ARM_QUEUED',
+        matchedCount: combinedResult.matched,
+        processedCount: queueSummary.inserted,
+        ignoredCount: combinedResult.ignoredActive + combinedResult.ignoredSignal,
+        note: `liveQueued:${queueSummary.inserted}, duplicateIntent:${queueSummary.duplicate}`,
+      }
+    : buildGridWebhookOutcome(combinedResult);
   const webhookEventId = await insertWebhookEventLog({
     ...baseWebhookLog,
-    status: gridPrimeGate.allowed ? outcome.status : 'BLOCKED',
-    resultCode: gridPrimeGate.allowed ? outcome.resultCode : gridPrimeGate.reason,
+    status: outcome.status,
+    resultCode: outcome.resultCode,
     matchedCount: outcome.matchedCount,
     processedCount: outcome.processedCount,
     ignoredCount: outcome.ignoredCount,
     httpStatus: 200,
-    note: gridPrimeGate.allowed ? outcome.note : 'live grid request-thread write blocked by safety gate',
+    note: outcome.note,
     responseBody,
   });
-  await insertWebhookEventTargetLogs(webhookEventId, result?.targetItems || []);
+  const queuedIntentByPid = new Map(
+    (queueSummary.intents || []).map((intent) => [Number(intent.pid || 0), intent])
+  );
+  const liveTargetLogs = (previewResult?.targetItems || [])
+    .filter((item) => item.strategyMode === 'live')
+    .map((item) => {
+      const queuedIntent = queuedIntentByPid.get(Number(item.pid || 0));
+      if (!queuedIntent) {
+        return item;
+      }
+      return {
+        ...item,
+        resultCode: queuedIntent.status === 'DUPLICATE'
+          ? 'GRID_LIVE_ARM_INTENT_DUPLICATE'
+          : 'GRID_LIVE_ARM_QUEUED',
+        severity: 'medium',
+        note: queuedIntent.status === 'DUPLICATE'
+          ? 'duplicate durable order intent ignored'
+          : 'live grid arm queued for FIFO worker',
+        payloadJson: {
+          intentKey: queuedIntent.intentKey,
+          fifoKey: queuedIntent.fifoKey,
+          queueStatus: queuedIntent.status,
+        },
+      };
+    });
+  await insertWebhookEventTargetLogs(webhookEventId, [
+    ...liveTargetLogs,
+    ...(result?.targetItems || []),
+  ]);
 
   return res.send(responseBody);
   }catch(error){

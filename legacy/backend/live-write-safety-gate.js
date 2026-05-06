@@ -160,7 +160,7 @@ const isRedisClientReady = (redisClient) =>
   redisClient.isOpen !== false &&
   redisClient.isReady !== false;
 
-const buildReadinessSnapshot = ({ env = process.env, redisClient = null } = {}) => {
+const buildReadinessSnapshot = ({ env = process.env, redisClient = null, orderIntentQueueEnabled = true } = {}) => {
   const context = { env };
   const liveWriteSafetyEnforced = shouldEnforceLiveWriteSafety(context);
   const redisReady = isRedisClientReady(redisClient);
@@ -180,16 +180,19 @@ const buildReadinessSnapshot = ({ env = process.env, redisClient = null } = {}) 
       severity: "CRITICAL",
       action: "DB-backed UID/PID ownership guard must be implemented before live writes are allowed.",
     });
-    blockers.push({
-      code: REASON.QUEUE_REQUIRED_FOR_LIVE_GRID_WRITE,
-      severity: "CRITICAL",
-      action: "Durable order queue/worker must be implemented before live grid request-thread writes are allowed.",
-    });
+    if (orderIntentQueueEnabled === false) {
+      blockers.push({
+        code: REASON.QUEUE_REQUIRED_FOR_LIVE_GRID_WRITE,
+        severity: "CRITICAL",
+        action: "Durable order queue/worker must be implemented before live grid request-thread writes are allowed.",
+      });
+    }
   }
 
   return {
     liveWriteSafetyEnforced,
     redisReady,
+    orderIntentQueueEnabled: orderIntentQueueEnabled !== false,
     blockers,
     status: blockers.length > 0 ? "BLOCKED" : "OK",
   };
@@ -208,5 +211,6 @@ module.exports = {
   buildGuardError,
   isSafetyGateError,
   assertGateAllowed,
+  isRedisClientReady,
   buildReadinessSnapshot,
 };
