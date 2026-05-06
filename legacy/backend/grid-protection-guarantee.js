@@ -1,5 +1,7 @@
 "use strict";
 
+const gridPriceSource = require("./grid-price-source");
+
 const GRID_PROTECTION_STATE = Object.freeze({
   FULL: "GRID_PROTECTED",
   PARTIAL: "GRID_PARTIAL_PROTECTION",
@@ -103,28 +105,45 @@ const getProtectionImmediateTriggerRisk = ({
     };
   }
 
-  if (!price?.st) {
+  const markFreshness = gridPriceSource.getMarkFreshness(price);
+  const quoteFreshness = gridPriceSource.requireFreshGridQuote(price);
+  if (!markFreshness.usable && !quoteFreshness.usable) {
     return {
       blocked: true,
       code: PROTECTION_REJECTION_CODE.PRICE_SOURCE_STALE,
-      reason: "price source is stale",
+      reason: markFreshness.reason && markFreshness.reason !== "MARK_PRICE_MISSING"
+        ? markFreshness.reason
+        : quoteFreshness.reason || "price source is stale",
     };
   }
 
-  const bid = toNumber(price.bestBid);
-  const ask = toNumber(price.bestAsk);
   const normalizedLeg = String(leg || "").toUpperCase();
   const normalizedBound = String(boundType || "").toUpperCase();
   let immediate = false;
+  let bid = quoteFreshness.bid;
+  let ask = quoteFreshness.ask;
+  const markPrice = markFreshness.markPrice;
 
-  if (normalizedBound === "GTP") {
-    immediate = normalizedLeg === "LONG"
-      ? bid >= trigger
-      : ask <= trigger;
+  if (markFreshness.usable) {
+    if (normalizedBound === "GTP") {
+      immediate = normalizedLeg === "LONG"
+        ? markPrice >= trigger
+        : markPrice <= trigger;
+    } else {
+      immediate = normalizedLeg === "LONG"
+        ? markPrice <= trigger
+        : markPrice >= trigger;
+    }
   } else {
-    immediate = normalizedLeg === "LONG"
-      ? bid <= trigger
-      : ask >= trigger;
+    if (normalizedBound === "GTP") {
+      immediate = normalizedLeg === "LONG"
+        ? bid >= trigger
+        : ask <= trigger;
+    } else {
+      immediate = normalizedLeg === "LONG"
+        ? bid <= trigger
+        : ask >= trigger;
+    }
   }
 
   return {
@@ -133,6 +152,8 @@ const getProtectionImmediateTriggerRisk = ({
     reason: immediate ? "trigger would immediately execute" : null,
     bid,
     ask,
+    markPrice: markFreshness.usable ? markPrice : null,
+    source: markFreshness.usable ? gridPriceSource.GRID_PRICE_SOURCE.MARK_PRICE : gridPriceSource.GRID_PRICE_SOURCE.QUOTE_CACHE,
     trigger,
   };
 };

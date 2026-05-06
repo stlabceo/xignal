@@ -8,6 +8,8 @@ const pidPositionLedger = require("./pid-position-ledger");
 const redisClient = require("./util/redis.util");
 const gridPairAtomicity = require("./grid-pair-atomicity");
 const gridProtectionGuarantee = require("./grid-protection-guarantee");
+const gridPriceSource = require("./grid-price-source");
+const gridReentrySlPolicy = require("./grid-reentry-sl-policy");
 
 const MODE_TABLE = {
   LIVE: "live_grid_strategy_list",
@@ -99,6 +101,14 @@ const withGridRuntimeTraceScope = async (handler, parsed, reData, worker) => {
 };
 
 const getCoin = () => require("./coin");
+
+const loadFreshGridDecisionPrice = async (symbol, options = {}) => {
+  const coin = getCoin();
+  if (typeof coin.ensurePublicMarketPrice === "function") {
+    return await coin.ensurePublicMarketPrice(symbol, options);
+  }
+  return dt.getPrice(symbol);
+};
 
 const pruneRecentGridRuntimeEvents = () => {
   const now = Date.now();
@@ -570,6 +580,9 @@ const canArmEntriesForRow = (row) =>
   isGridControlEnabled(row)
   && row?.regimeStatus !== "ENDED"
   && !gridPairAtomicity.isPairArmDefectState(row)
+  && !gridProtectionGuarantee.isProtectionCriticalState(row)
+  && !gridReentrySlPolicy.isReentryCriticalState(row)
+  && !gridReentrySlPolicy.isSlCriticalState(row)
   && row?.regimeEndReason !== "BOX_BREAK"
   && row?.regimeEndReason !== "BOX_BREAK_WAITING";
 
@@ -1654,7 +1667,7 @@ const placeLiveExitOrdersForLeg = async (row, leg, qty, entryPrice, options = {}
   const coin = getCoin();
   const takeProfitPrice = computeLegTakeProfitPrice(row, leg, entryPrice);
   const stopPrice = computeLegStopPrice(row, leg);
-  const price = dt.getPrice(row.symbol);
+  const price = await loadFreshGridDecisionPrice(row.symbol, { includeMark: true });
   const takeProfitClientOrderId = gridProtectionGuarantee.deriveProtectionClientOrderId({
     entryClientOrderId: options.entryOrderId || row?.[`${getLegFieldPrefix(leg)}EntryOrderId`] || null,
     prefix: "GTP",
@@ -2327,6 +2340,264 @@ const resolveGridPairPlacementResult = async (row, leg, result, requestedClientO
     errorCode: result?.errorCode || null,
     errorMessage: result?.errorMessage || null,
     source: "FAILED",
+  };
+};
+
+const markGridReentryFailed = async ({
+  row,
+  leg,
+  reason,
+  message,
+  state = gridReentrySlPolicy.GRID_REENTRY_STATE.FAILED,
+  sourceClientOrderId = null,
+} = {}) => {
+  await applyGridPatch("live_grid_strategy_list", row.id, {
+    ...getLegPatchForClosed(leg),
+    regimeStatus: state,
+    regimeEndReason: reason,
+  });
+  await releaseGridLegPositionOwnership(row, leg).catch(() => {});
+  await appendGridRuntimeLog(
+    row,
+    "gridReentry",
+    reason,
+    message || `leg:${leg}, clientOrderId:${sourceClientOrderId || "NONE"}`,
+    leg
+  );
+  return {
+    ok: false,
+    state,
+    reason,
+    clientOrderId: sourceClientOrderId,
+  };
+};
+
+const armLiveReentryAfterTakeProfit = async (row, parsed, reData) => {
+  const leg = parsed.leg;
+  const priceDecision = gridReentrySlPolicy.getReentryPriceDecision(
+    await loadFreshGridDecisionPrice(row.symbol)
+  );
+  const source = {
+    takeProfitClientOrderId: parsed.clientOrderId,
+    orderId: reData?.i || null,
+    tradeId: reData?.t || null,
+    tradeTime: reData?.T || null,
+  };
+  const requestedClientOrderId = gridReentrySlPolicy.buildGridReentryClientOrderId(row, leg, source);
+
+  if (!priceDecision.usable) {
+    return await markGridReentryFailed({
+      row,
+      leg,
+      state: gridReentrySlPolicy.GRID_REENTRY_STATE.STALE_PRICE,
+      reason: gridReentrySlPolicy.GRID_REENTRY_REASON.PRICE_STALE,
+      sourceClientOrderId: requestedClientOrderId,
+      message: `leg:${leg}, clientOrderId:${requestedClientOrderId}, priceSource:${priceDecision.source}, reason:${priceDecision.reason}, quoteAgeMs:${Number.isFinite(priceDecision.quoteAgeMs) ? priceDecision.quoteAgeMs : "UNKNOWN"}`,
+    });
+  }
+
+  let ownershipReservation = null;
+  let reservedOrderId = null;
+  try {
+    ownershipReservation = await acquireGridLegPositionOwnership(row, leg, {
+      ownerState: "ENTRY_ARMED",
+      sourceClientOrderId: requestedClientOrderId,
+      note: "grid take-profit reentry arm",
+    });
+    if (!ownershipReservation?.ok) {
+      throw new Error(`REENTRY_OWNERSHIP_FAILED:${ownershipReservation?.reason || "UNKNOWN"}`);
+    }
+
+    reservedOrderId = await reserveLiveGridEntrySlot(row, leg);
+    if (!reservedOrderId) {
+      throw new Error("REENTRY_ENTRY_SLOT_BUSY");
+    }
+
+    const result = await placeLiveEntryOrderForLeg(row, leg, {
+      clientOrderId: requestedClientOrderId,
+    });
+    const placement = await resolveGridPairPlacementResult(
+      row,
+      leg,
+      result,
+      requestedClientOrderId
+    );
+
+    if (!placement.ok) {
+      await finalizeLiveGridEntrySlot(row, leg, reservedOrderId, null).catch(() => {});
+      return await markGridReentryFailed({
+        row,
+        leg,
+        reason: gridReentrySlPolicy.GRID_REENTRY_REASON.SUBMIT_FAILED,
+        sourceClientOrderId: requestedClientOrderId,
+        message: `leg:${leg}, clientOrderId:${requestedClientOrderId}, errorCode:${placement.errorCode || "UNKNOWN"}, message:${placement.errorMessage || "reentry submit failed"}`,
+      });
+    }
+
+    await finalizeLiveGridEntrySlot(row, leg, reservedOrderId, placement.clientOrderId);
+    await touchGridLegPositionOwnership(row, leg, {
+      ownerState: "ENTRY_ARMED",
+      sourceClientOrderId: placement.clientOrderId,
+      sourceOrderId: placement.orderId || null,
+      note: "grid take-profit reentry order placed",
+    });
+    await applyGridPatch("live_grid_strategy_list", row.id, {
+      ...getLegPatchForEntryArmed(leg, placement.clientOrderId),
+      regimeStatus: "ACTIVE",
+      regimeEndReason: null,
+    });
+    await appendGridRuntimeLog(
+      row,
+      "gridReentry",
+      "TP_REENTRY_ARMED",
+      `leg:${leg}, clientOrderId:${placement.clientOrderId}, source:${placement.source || "ACK"}, quoteAgeMs:${priceDecision.quoteAgeMs}`,
+      leg
+    );
+    return {
+      ok: true,
+      clientOrderId: placement.clientOrderId,
+      orderId: placement.orderId || null,
+      state: "ACTIVE",
+      reason: null,
+    };
+  } catch (error) {
+    if (reservedOrderId) {
+      await finalizeLiveGridEntrySlot(row, leg, reservedOrderId, null).catch(() => {});
+    }
+    if (ownershipReservation?.ok) {
+      await releaseGridLegPositionOwnership(row, leg).catch(() => {});
+    }
+    return await markGridReentryFailed({
+      row,
+      leg,
+      reason: gridReentrySlPolicy.GRID_REENTRY_REASON.SUBMIT_FAILED,
+      sourceClientOrderId: requestedClientOrderId,
+      message: `leg:${leg}, clientOrderId:${requestedClientOrderId}, message:${error?.message || error}`,
+    });
+  }
+};
+
+const getOppositeGridLeg = (leg) => String(leg || "").toUpperCase() === "LONG" ? "SHORT" : "LONG";
+
+const terminateLiveGridRegimeAfterStopFill = async ({
+  row,
+  stoppedLeg,
+  remainingStoppedQty = 0,
+  reData,
+  stoppedClientOrderId = null,
+} = {}) => {
+  const oppositeLeg = getOppositeGridLeg(stoppedLeg);
+  const cleanupOrderRefsBefore = [
+    row?.longEntryOrderId,
+    row?.shortEntryOrderId,
+    row?.longExitOrderId,
+    row?.shortExitOrderId,
+  ]
+    .filter(Boolean)
+    .filter((clientOrderId) => String(clientOrderId) !== String(stoppedClientOrderId || ""));
+  const canceledCount = await cancelAllGridOrders("LIVE", row, {
+    includeEntries: true,
+    includeExits: true,
+  });
+
+  if (remainingStoppedQty > 0) {
+    await applyGridPatch("live_grid_strategy_list", row.id, {
+      regimeStatus: gridReentrySlPolicy.GRID_SL_STATE.OPPOSITE_CRITICAL,
+      regimeEndReason: gridReentrySlPolicy.GRID_SL_REASON.TERMINATED,
+    });
+    const closed = await emergencyCloseLiveGridLeg(
+      row,
+      stoppedLeg,
+      remainingStoppedQty,
+      "STOP_PARTIAL_REMAINING_CLOSED",
+      `leg:${stoppedLeg}, remainingQty:${remainingStoppedQty}, stopExitPrice:${toNumber(reData.ap || reData.L)}`
+    );
+    return {
+      state: gridReentrySlPolicy.GRID_SL_STATE.OPPOSITE_CRITICAL,
+      reason: "STOP_PARTIAL_REMAINING",
+      canceledCount,
+      closed,
+    };
+  }
+
+  await pidPositionLedger.syncGridLegSnapshot(row.id, oppositeLeg);
+  const refreshed = (await loadGridItem("LIVE", row.id)) || row;
+  const oppositePrefix = getLegFieldPrefix(oppositeLeg);
+  const oppositeQty = toNumber(refreshed?.[`${oppositePrefix}Qty`]);
+  if (oppositeQty > 0) {
+    await applyGridPatch("live_grid_strategy_list", row.id, {
+      ...getLegPatchForClosed(stoppedLeg),
+      regimeStatus: gridReentrySlPolicy.GRID_SL_STATE.OPPOSITE_CRITICAL,
+      regimeEndReason: gridReentrySlPolicy.GRID_SL_REASON.OPPOSITE_CLOSE_REQUIRED,
+    });
+    await releaseGridLegPositionOwnership(row, stoppedLeg).catch(() => {});
+    const closed = await emergencyCloseLiveGridLeg(
+      refreshed,
+      oppositeLeg,
+      oppositeQty,
+      "SL_OPPOSITE_LEG_CLOSE_REQUIRED",
+      `stoppedLeg:${stoppedLeg}, oppositeLeg:${oppositeLeg}, oppositeQty:${oppositeQty}, reason:sl-terminates-regime`
+    );
+    await appendGridRuntimeLog(
+      row,
+      "gridLiveStop",
+      "SL_OPPOSITE_CLOSE_REQUIRED",
+      `stoppedLeg:${stoppedLeg}, oppositeLeg:${oppositeLeg}, oppositeQty:${oppositeQty}, closed:${closed ? "Y" : "N"}`,
+      oppositeLeg
+    );
+    return {
+      state: gridReentrySlPolicy.GRID_SL_STATE.OPPOSITE_CRITICAL,
+      reason: gridReentrySlPolicy.GRID_SL_REASON.OPPOSITE_CLOSE_REQUIRED,
+      canceledCount,
+      closed,
+    };
+  }
+
+  if (cleanupOrderRefsBefore.length > 0 && canceledCount <= 0) {
+    await applyGridPatch("live_grid_strategy_list", row.id, {
+      ...getLegPatchForClosed(stoppedLeg),
+      regimeStatus: gridReentrySlPolicy.GRID_SL_STATE.CLEANUP_PENDING,
+      regimeEndReason: gridReentrySlPolicy.GRID_SL_REASON.CLEANUP_PENDING,
+    });
+    await releaseGridLegPositionOwnership(row, stoppedLeg).catch(() => {});
+    await appendGridRuntimeLog(
+      row,
+      "gridLiveStop",
+      "SL_CLEANUP_PENDING",
+      `leg:${stoppedLeg}, refs:${cleanupOrderRefsBefore.join("+")}`,
+      stoppedLeg
+    );
+    return {
+      state: gridReentrySlPolicy.GRID_SL_STATE.CLEANUP_PENDING,
+      reason: gridReentrySlPolicy.GRID_SL_REASON.CLEANUP_PENDING,
+      canceledCount,
+      closed: true,
+    };
+  }
+
+  await applyGridPatch("live_grid_strategy_list", row.id, {
+    ...buildEndedRegimePatch(refreshed, gridReentrySlPolicy.GRID_SL_REASON.TERMINATED),
+    ...getLegPatchForClosed(stoppedLeg),
+  });
+  await releaseGridLegPositionOwnership(row, stoppedLeg).catch(() => {});
+  await appendGridRuntimeLog(
+    row,
+    "gridLiveStop",
+    gridReentrySlPolicy.GRID_SL_REASON.TERMINATED,
+    `leg:${stoppedLeg}, stopExitPrice:${toNumber(reData.ap || reData.L)}, canceled:${canceledCount}`,
+    stoppedLeg
+  );
+  const latest = (await loadGridItem("LIVE", row.id)) || refreshed;
+  await finalizeEndedGridRegimeIfIdle(
+    "LIVE",
+    latest,
+    gridReentrySlPolicy.GRID_SL_REASON.TERMINATED
+  );
+  return {
+    state: "ENDED",
+    reason: gridReentrySlPolicy.GRID_SL_REASON.TERMINATED,
+    canceledCount,
+    closed: true,
   };
 };
 
@@ -3029,7 +3300,8 @@ const handleTestLegStop = async (row, leg, price) => {
 
 const runTestCycleForItem = async (row) => {
   const price = dt.getPrice(row.symbol);
-  if (!price.st) {
+  const priceDecision = gridPriceSource.requireFreshGridQuote(price);
+  if (!priceDecision.usable) {
     return;
   }
 
@@ -3094,8 +3366,9 @@ const runTestCycleForItem = async (row) => {
 };
 
 const runLiveCycleForItem = async (row) => {
-  const price = dt.getPrice(row.symbol);
-  if (!price.st) {
+  const price = await loadFreshGridDecisionPrice(row.symbol);
+  const priceDecision = gridPriceSource.requireFreshGridQuote(price);
+  if (!priceDecision.usable) {
     return;
   }
 
@@ -3520,44 +3793,34 @@ const handleLiveGridTakeProfitFill = async (parsed, reData) => {
   }
 
   const shouldRearm = canArmEntriesForRow(row);
-  const entryOrder = shouldRearm ? await placeLiveEntryOrderForLeg(row, parsed.leg) : null;
-  await applyGridPatch(
-    "live_grid_strategy_list",
-    row.id,
-    shouldRearm
-      ? {
-          ...getLegPatchForEntryArmed(parsed.leg, entryOrder?.clientOrderId || null),
-          regimeStatus: "ACTIVE",
-          regimeEndReason: null,
-        }
-      : {
-          ...getLegPatchForClosed(parsed.leg),
-          regimeStatus: "ENDED",
-          regimeEndReason: row.regimeEndReason || "BOX_BREAK",
-        }
-  );
   if (shouldRearm) {
-    await touchGridLegPositionOwnership(row, parsed.leg, {
-      ownerState: "ENTRY_ARMED",
-      sourceClientOrderId: entryOrder?.clientOrderId || null,
-      sourceOrderId: entryOrder?.orderId || null,
-      note: "grid take-profit rearm",
-    });
-  } else {
-    await releaseGridLegPositionOwnership(row, parsed.leg);
+    const reentry = await armLiveReentryAfterTakeProfit(row, parsed, reData);
+    await appendGridRuntimeLog(
+      row,
+      "gridLiveExit",
+      reentry.ok ? "TAKE_PROFIT_REENTRY" : reentry.reason,
+      `leg:${parsed.leg}, exitPrice:${toNumber(reData.ap || reData.L)}, reentry:${reentry.clientOrderId || "NONE"}, state:${reentry.state || "UNKNOWN"}`,
+      parsed.leg
+    );
+    setOutcome(reentry.ok ? "TP_REARMED" : reentry.reason);
+    return true;
   }
 
+  await applyGridPatch("live_grid_strategy_list", row.id, {
+    ...getLegPatchForClosed(parsed.leg),
+    regimeStatus: "ENDED",
+    regimeEndReason: row.regimeEndReason || "BOX_BREAK",
+  });
+  await releaseGridLegPositionOwnership(row, parsed.leg);
   await appendGridRuntimeLog(
     row,
     "gridLiveExit",
     "TAKE_PROFIT",
-    `leg:${parsed.leg}, exitPrice:${toNumber(reData.ap || reData.L)}, reentry:${entryOrder?.clientOrderId || "NONE"}, rearm:${shouldRearm ? "Y" : "N"}`,
+    `leg:${parsed.leg}, exitPrice:${toNumber(reData.ap || reData.L)}, reentry:NONE, rearm:N`,
     parsed.leg
   );
-  if (!shouldRearm) {
-    await finalizeEndedGridRegimeIfIdle("LIVE", row, row.regimeEndReason || "BOX_BREAK");
-  }
-  setOutcome(shouldRearm ? "TP_REARMED" : "TP_FILLED");
+  await finalizeEndedGridRegimeIfIdle("LIVE", row, row.regimeEndReason || "BOX_BREAK");
+  setOutcome("TP_FILLED");
   return true;
   });
   });
@@ -3598,35 +3861,18 @@ const handleLiveGridStopFill = async (parsed, reData) => {
   const remainingQty = toNumber(snapshot?.openQty);
   await pidPositionLedger.syncGridLegSnapshot(row.id, parsed.leg);
 
-  await cancelAllGridOrders("LIVE", row, {
-    leg: parsed.leg,
-    includeEntries: false,
-    includeExits: true,
-  });
-  if (remainingQty > 0) {
-    setOutcome("STOP_PARTIAL_REMAINING");
-    return await emergencyCloseLiveGridLeg(
-      row,
-      parsed.leg,
-      remainingQty,
-      "STOP_PARTIAL_REMAINING_CLOSED",
-      `leg:${parsed.leg}, remainingQty:${remainingQty}, stopExitPrice:${toNumber(reData.ap || reData.L)}`
-    );
-  }
-  await applyGridPatch("live_grid_strategy_list", row.id, {
-    ...buildEndedRegimePatch(row, "BOX_BREAK"),
-    ...getLegPatchForClosed(parsed.leg),
-  });
-  await releaseGridLegPositionOwnership(row, parsed.leg);
-  await appendGridRuntimeLog(
+  const termination = await terminateLiveGridRegimeAfterStopFill({
     row,
-    "gridLiveStop",
-    "BOX_BREAK",
-    `leg:${parsed.leg}, stopExitPrice:${toNumber(reData.ap || reData.L)}`,
-    parsed.leg
+    stoppedLeg: parsed.leg,
+    remainingStoppedQty: remainingQty,
+    reData,
+    stoppedClientOrderId: parsed.clientOrderId,
+  });
+  setOutcome(
+    termination.reason === gridReentrySlPolicy.GRID_SL_REASON.TERMINATED
+      ? "STOP_REGIME_TERMINATED"
+      : termination.reason
   );
-  await finalizeEndedGridRegimeIfIdle("LIVE", row, "BOX_BREAK");
-  setOutcome("STOP_FILLED");
   return true;
   });
   });

@@ -180,7 +180,11 @@ const deriveGridRuntimeState = (item = {}, options = {}) => {
     regimeStatus === "PAIR_ONE_LEG_PROTECTED" ||
     regimeStatus === "PAIR_ONE_LEG_UNPROTECTED" ||
     regimeStatus === "GRID_PARTIAL_PROTECTION" ||
-    regimeStatus === "GRID_UNPROTECTED"
+    regimeStatus === "GRID_UNPROTECTED" ||
+    regimeStatus === "GRID_REENTRY_STALE" ||
+    regimeStatus === "GRID_REENTRY_FAILED" ||
+    regimeStatus === "GRID_SL_CLEANUP_PENDING" ||
+    regimeStatus === "GRID_SL_OPPOSITE_CRITICAL"
   ) {
     return "GRIDDING";
   }
@@ -196,6 +200,10 @@ const GRID_CRITICAL_REGIME_STATES = new Set([
   "PAIR_ONE_LEG_UNPROTECTED",
   "GRID_PARTIAL_PROTECTION",
   "GRID_UNPROTECTED",
+  "GRID_REENTRY_STALE",
+  "GRID_REENTRY_FAILED",
+  "GRID_SL_CLEANUP_PENDING",
+  "GRID_SL_OPPOSITE_CRITICAL",
 ]);
 
 const decorateSignalItemSync = (item = {}, options = {}) => {

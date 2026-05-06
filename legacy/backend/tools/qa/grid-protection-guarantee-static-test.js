@@ -62,7 +62,7 @@ assert.strictEqual(
     leg: "LONG",
     boundType: "GTP",
     triggerPrice: 100,
-    price: { st: true, bestBid: 101, bestAsk: 101.1 },
+    price: { st: true, bestBid: 101, bestAsk: 101.1, quoteTime: Date.now() },
   }).blocked,
   true,
   "LONG TP at/below current bid would immediately trigger"
@@ -72,7 +72,7 @@ assert.strictEqual(
     leg: "SHORT",
     boundType: "GSTOP",
     triggerPrice: 100,
-    price: { st: true, bestBid: 100.1, bestAsk: 100.2 },
+    price: { st: true, bestBid: 100.1, bestAsk: 100.2, quoteTime: Date.now() },
   }).blocked,
   true,
   "SHORT STOP at/below current ask would immediately trigger"
@@ -87,6 +87,34 @@ assert.strictEqual(
   protection.PROTECTION_REJECTION_CODE.PRICE_SOURCE_STALE,
   "stale price blocks protection placement instead of submitting blindly"
 );
+assert.strictEqual(
+  protection.getProtectionImmediateTriggerRisk({
+    leg: "LONG",
+    boundType: "GTP",
+    triggerPrice: 100,
+    price: { st: true, bestBid: 99, bestAsk: 99.1, quoteTime: Date.now() - 60000 },
+  }).code,
+  protection.PROTECTION_REJECTION_CODE.PRICE_SOURCE_STALE,
+  "stale quoteTime blocks protection placement even if bid/ask exists"
+);
+assert.deepStrictEqual(
+  {
+    blocked: protection.getProtectionImmediateTriggerRisk({
+      leg: "LONG",
+      boundType: "GTP",
+      triggerPrice: 100,
+      price: { st: true, bestBid: 99, bestAsk: 99.1, quoteTime: Date.now(), markPrice: 101, markTime: Date.now() },
+    }).blocked,
+    source: protection.getProtectionImmediateTriggerRisk({
+      leg: "LONG",
+      boundType: "GTP",
+      triggerPrice: 100,
+      price: { st: true, bestBid: 99, bestAsk: 99.1, quoteTime: Date.now(), markPrice: 101, markTime: Date.now() },
+    }).source,
+  },
+  { blocked: true, source: "MARK_PRICE" },
+  "MARK_PRICE workingType precheck uses fresh mark price when present"
+);
 
 const gridEngineSource = fs.readFileSync(path.resolve(__dirname, "../../grid-engine.js"), "utf8");
 const coinSource = fs.readFileSync(path.resolve(__dirname, "../../coin.js"), "utf8");
@@ -99,6 +127,7 @@ for (const snippet of [
   "PROTECTION_PARTIAL_CRITICAL",
   "PROTECTION_UNPROTECTED_CRITICAL",
   "gridProtectionGuarantee.getProtectionImmediateTriggerRisk",
+  "gridPriceSource.requireFreshGridQuote(price)",
   "gridProtectionGuarantee.isProtectionCriticalState(row)",
 ]) {
   assert.ok(gridEngineSource.includes(snippet), `grid-engine.js should include ${snippet}`);

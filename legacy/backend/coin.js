@@ -17,6 +17,7 @@ const binanceWriteGuard = require("./binance-write-guard");
 const binanceReadGuard = require("./binance-read-guard");
 const credentialSecrets = require("./credential-secrets");
 const binanceWriteTimeSync = require("./binance-write-time-sync");
+const gridPriceSource = require("./grid-price-source");
 let gridEngine = null;
 let policyEngine = null;
 const Binance = require('node-binance-api');
@@ -376,6 +377,8 @@ const ensurePriceSlot = (symbol) => {
             lastPrice: 0,
             lastQty: 0,
             lastTradeTime: 0,
+            markPrice: 0,
+            markTime: 0,
         };
     }
 
@@ -407,8 +410,32 @@ const hydratePriceSlotFromBookTicker = async (symbol) => {
             data.askPrice ||
             0,
         lastQty: slot.lastQty || 0,
+        markPrice: slot.markPrice || 0,
+        markTime: slot.markTime || 0,
         quoteTime: Date.now(),
         lastTradeTime: slot.lastTradeTime || 0,
+    };
+
+    return dt.getPrice(normalizedSymbol);
+}
+
+const hydratePriceSlotFromMarkPrice = async (symbol) => {
+    const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+    if(!normalizedSymbol){
+        return dt.getPrice(symbol);
+    }
+
+    const response = await axios.get(`${FUTURES_BASE_URL}/fapi/v1/premiumIndex`, {
+        params: { symbol: normalizedSymbol },
+        timeout: 5000,
+    });
+    const data = response?.data || {};
+    const slot = ensurePriceSlot(normalizedSymbol);
+    dt.price[normalizedSymbol] = {
+        ...slot,
+        symbol: normalizedSymbol,
+        markPrice: data.markPrice || slot.markPrice || 0,
+        markTime: data.time || Date.now(),
     };
 
     return dt.getPrice(normalizedSymbol);
@@ -11160,14 +11187,23 @@ exports.sendEnter = async (symbol = null, side = null, lv = null, userMargin = n
     }
 }
 
-exports.ensurePublicMarketPrice = async (symbol) => {
+exports.ensurePublicMarketPrice = async (symbol, options = {}) => {
     try{
-        const current = dt.getPrice(symbol);
-        if(current?.st){
+        let current = dt.getPrice(symbol);
+        const quoteFreshness = gridPriceSource.requireFreshGridQuote(current);
+        const markFreshness = gridPriceSource.getMarkFreshness(current);
+        const includeMark = options.includeMark === true;
+        if(quoteFreshness.usable && (!includeMark || markFreshness.usable)){
             return current;
         }
 
-        return await hydratePriceSlotFromBookTicker(symbol);
+        if(!quoteFreshness.usable){
+            current = await hydratePriceSlotFromBookTicker(symbol);
+        }
+        if(includeMark && !gridPriceSource.getMarkFreshness(current).usable){
+            current = await hydratePriceSlotFromMarkPrice(symbol);
+        }
+        return current;
     }catch(error){
         return dt.getPrice(symbol);
     }
