@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const db = require("./database/connect/config");
 const { parsePlatformClientOrderId } = require("./order-client-id");
+const positionOwnership = require("./position-ownership");
 
 const normalizeSymbol = (symbol) =>
   String(symbol || "")
@@ -887,6 +888,37 @@ const applyEntryFill = async ({
         };
       }
 
+      const ownershipResult = await positionOwnership.applyEntryFill(
+        {
+          uid,
+          pid,
+          strategyCategory: normalizedCategory,
+          symbol: normalizedSymbol,
+          positionSide: normalizedPositionSide,
+          sourceClientOrderId,
+          sourceOrderId,
+          fillQty: resolvedQty,
+          ownerState: "OPEN",
+          note: note || eventType,
+        },
+        { connection }
+      );
+      if (!ownershipResult.ok) {
+        logLedgerStateChange("OWNERSHIP_ENTRY_FILL_BLOCKED", {
+          uid,
+          pid,
+          strategyCategory: normalizedCategory,
+          symbol: normalizedSymbol,
+          positionSide: normalizedPositionSide,
+          sourceClientOrderId: normalizeSourceId(sourceClientOrderId),
+          sourceOrderId: normalizeSourceId(sourceOrderId),
+          sourceTradeId: normalizeTradeId(sourceTradeId),
+          eventType,
+          reason: ownershipResult.reason || "UNKNOWN",
+        });
+        throw new Error(`OWNERSHIP_ENTRY_FILL_BLOCKED:${ownershipResult.reason || "UNKNOWN"}`);
+      }
+
       const snapshot = await upsertSnapshot(
         connection,
         {
@@ -921,6 +953,7 @@ const applyEntryFill = async ({
         ok: true,
         duplicate: false,
         snapshot,
+        ownership: ownershipResult.owner,
       };
     }
   );
@@ -1056,6 +1089,42 @@ const applyExitFill = async ({
         }
       }
       const overfillTolerance = 1e-9;
+      const ownershipClose = await positionOwnership.resolveOwnedCloseQty(
+        {
+          uid,
+          pid,
+          strategyCategory: normalizedCategory,
+          symbol: normalizedSymbol,
+          positionSide: normalizedPositionSide,
+          requestedQty,
+          ignoreReserved: true,
+        },
+        { connection }
+      );
+      if (!ownershipClose.allowed) {
+        logLedgerStateChange("EXIT_FILL_WITHOUT_OWNERSHIP_BUCKET_BLOCKED", {
+          uid,
+          pid,
+          strategyCategory: normalizedCategory,
+          symbol: normalizedSymbol,
+          positionSide: normalizedPositionSide,
+          sourceClientOrderId: normalizeSourceId(sourceClientOrderId),
+          sourceOrderId: normalizeSourceId(sourceOrderId),
+          sourceTradeId: normalizeTradeId(sourceTradeId),
+          requestedQty,
+          eventType,
+          reason: ownershipClose.reason || "UNKNOWN",
+        });
+        return {
+          ok: false,
+          blocked: true,
+          reason: ownershipClose.reason || "OWNERSHIP_CLOSE_QTY_BLOCKED",
+          snapshot: current,
+          ownership: ownershipClose.owner || null,
+          appliedQty: 0,
+        };
+      }
+
       if (!(baseOpenQty > overfillTolerance)) {
         logLedgerStateChange("EXIT_FILL_WITHOUT_PID_OWNED_QTY_BLOCKED", {
           uid,
@@ -1119,7 +1188,32 @@ const applyExitFill = async ({
           });
         }
       }
-      const appliedQty = Math.min(requestedQty, baseOpenQty);
+      const appliedQty = Math.min(requestedQty, baseOpenQty, Number(ownershipClose.finalCloseQty || 0));
+      if (!(appliedQty > overfillTolerance)) {
+        logLedgerStateChange("EXIT_FILL_OWNERSHIP_APPLIED_QTY_ZERO_BLOCKED", {
+          uid,
+          pid,
+          strategyCategory: normalizedCategory,
+          symbol: normalizedSymbol,
+          positionSide: normalizedPositionSide,
+          sourceClientOrderId: normalizeSourceId(sourceClientOrderId),
+          sourceOrderId: normalizeSourceId(sourceOrderId),
+          sourceTradeId: normalizeTradeId(sourceTradeId),
+          requestedQty,
+          pidOwnedOpenQty: baseOpenQty,
+          ownershipAvailableCloseQty: Number(ownershipClose.availableCloseQty || 0),
+          eventType,
+          reason: ownershipClose.reason || "OWNERSHIP_CLOSE_QTY_ZERO",
+        });
+        return {
+          ok: false,
+          blocked: true,
+          reason: ownershipClose.reason || "OWNERSHIP_CLOSE_QTY_ZERO",
+          snapshot: current,
+          ownership: ownershipClose.owner || null,
+          appliedQty: 0,
+        };
+      }
       const appliedRatio = requestedQty > 0 ? Math.min(1, Math.max(0, appliedQty / requestedQty)) : 0;
       const appliedFee = resolvedFee * appliedRatio;
       const appliedPnl = resolvedPnl * appliedRatio;
@@ -1193,6 +1287,40 @@ const applyExitFill = async ({
         };
       }
 
+      const ownershipResult = await positionOwnership.applyExitFill(
+        {
+          uid,
+          pid,
+          strategyCategory: normalizedCategory,
+          symbol: normalizedSymbol,
+          positionSide: normalizedPositionSide,
+          sourceClientOrderId,
+          sourceOrderId,
+          fillQty: appliedQty,
+          requestedQty,
+          ownerState: nextOpenQty > 0 ? "PARTIAL_EXIT" : "CLOSED",
+          note: note || eventType,
+        },
+        { connection }
+      );
+      if (!ownershipResult.ok) {
+        logLedgerStateChange("OWNERSHIP_EXIT_FILL_BLOCKED", {
+          uid,
+          pid,
+          strategyCategory: normalizedCategory,
+          symbol: normalizedSymbol,
+          positionSide: normalizedPositionSide,
+          sourceClientOrderId: normalizeSourceId(sourceClientOrderId),
+          sourceOrderId: normalizeSourceId(sourceOrderId),
+          sourceTradeId: normalizeTradeId(sourceTradeId),
+          eventType,
+          requestedQty,
+          appliedQty,
+          reason: ownershipResult.reason || "UNKNOWN",
+        });
+        throw new Error(`OWNERSHIP_EXIT_FILL_BLOCKED:${ownershipResult.reason || "UNKNOWN"}`);
+      }
+
       const snapshot = await upsertSnapshot(
         connection,
         {
@@ -1244,6 +1372,7 @@ const applyExitFill = async ({
         duplicate: false,
         snapshot,
         appliedQty,
+        ownership: ownershipResult.owner,
       };
     }
   );

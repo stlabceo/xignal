@@ -2,6 +2,7 @@
 
 const orderIntentQueue = require("./order-intent-queue");
 const liveWriteSafetyGate = require("./live-write-safety-gate");
+const positionOwnership = require("./position-ownership");
 const redisClient = require("./util/redis.util");
 
 const DEFAULT_POLL_MS = 500;
@@ -48,12 +49,16 @@ const processGridLiveArmIntent = async (intent, options = {}) => {
     return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: redisGate.reason };
   }
 
+  const ownershipReadiness = await positionOwnership.getOwnershipReadiness().catch((error) => ({
+    enabled: false,
+    error: error?.message || String(error),
+  }));
   const ownershipGate = liveWriteSafetyGate.evaluateOwnershipGuard({
     env,
     strategyCategory: "grid",
     uid: intent.uid,
     pid: intent.pid,
-    ownershipEnabled: false,
+    ownershipEnabled: ownershipReadiness.enabled === true,
   });
 
   if (!ownershipGate.allowed) {
@@ -65,7 +70,7 @@ const processGridLiveArmIntent = async (intent, options = {}) => {
         fifoKey: intent.fifoKey,
       }),
       errorCode: ownershipGate.reason,
-      errorMessage: "DB-backed PID ownership disabled; live grid worker write blocked.",
+      errorMessage: `DB-backed PID ownership unavailable; live grid worker write blocked. status:${ownershipReadiness.status || "UNKNOWN"}`,
     });
     return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: ownershipGate.reason };
   }
@@ -90,7 +95,7 @@ const processGridLiveArmIntent = async (intent, options = {}) => {
     result: buildBlockResult(liveWriteSafetyGate.REASON.QUEUE_REQUIRED_FOR_LIVE_GRID_WRITE, {
       intentType: intent.intentType,
       fifoKey: intent.fifoKey,
-      note: "worker dispatch to Binance is intentionally disabled until DB-backed ownership is implemented",
+      note: "worker dispatch to Binance is intentionally disabled until durable protection/re-entry/cancel intents are covered",
     }),
     errorCode: liveWriteSafetyGate.REASON.QUEUE_REQUIRED_FOR_LIVE_GRID_WRITE,
     errorMessage: "Grid live arm worker dispatch intentionally blocked.",

@@ -129,7 +129,7 @@ const assertBinanceWriteAllowed = (context = {}) => {
   liveWriteSafetyGate.assertGateAllowed(
     liveWriteSafetyGate.evaluateOwnershipGuard({
       ...context,
-      ownershipEnabled: context.ownershipEnabled === true,
+      ownershipEnabled: context.ownershipEnabled !== false,
     }),
     context
   );

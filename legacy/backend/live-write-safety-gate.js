@@ -160,7 +160,12 @@ const isRedisClientReady = (redisClient) =>
   redisClient.isOpen !== false &&
   redisClient.isReady !== false;
 
-const buildReadinessSnapshot = ({ env = process.env, redisClient = null, orderIntentQueueEnabled = true } = {}) => {
+const buildReadinessSnapshot = ({
+  env = process.env,
+  redisClient = null,
+  orderIntentQueueEnabled = true,
+  ownershipEnabled = false,
+} = {}) => {
   const context = { env };
   const liveWriteSafetyEnforced = shouldEnforceLiveWriteSafety(context);
   const redisReady = isRedisClientReady(redisClient);
@@ -174,12 +179,15 @@ const buildReadinessSnapshot = ({ env = process.env, redisClient = null, orderIn
     });
   }
 
-  if (liveWriteSafetyEnforced) {
+  if (liveWriteSafetyEnforced && ownershipEnabled !== true) {
     blockers.push({
       code: REASON.OWNERSHIP_DISABLED,
       severity: "CRITICAL",
       action: "DB-backed UID/PID ownership guard must be implemented before live writes are allowed.",
     });
+  }
+
+  if (liveWriteSafetyEnforced) {
     if (orderIntentQueueEnabled === false) {
       blockers.push({
         code: REASON.QUEUE_REQUIRED_FOR_LIVE_GRID_WRITE,
@@ -192,6 +200,7 @@ const buildReadinessSnapshot = ({ env = process.env, redisClient = null, orderIn
   return {
     liveWriteSafetyEnforced,
     redisReady,
+    ownershipEnabled: ownershipEnabled === true,
     orderIntentQueueEnabled: orderIntentQueueEnabled !== false,
     blockers,
     status: blockers.length > 0 ? "BLOCKED" : "OK",

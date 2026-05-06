@@ -68,6 +68,18 @@ const assertBlocked = (decision, reason) => {
 })();
 
 (() => {
+  const decision = liveWriteSafetyGate.evaluateOwnershipGuard({
+    env: LIVE_ENV,
+    strategyCategory: "signal",
+    pid: 7,
+    symbol: "XRPUSDT",
+    positionSide: "LONG",
+    ownershipEnabled: true,
+  });
+  assert.strictEqual(decision.allowed, true);
+})();
+
+(() => {
   const decision = liveWriteSafetyGate.evaluateGridRequestThreadWrite({
     env: LIVE_ENV,
     liveArmedCount: 1,
@@ -88,38 +100,38 @@ const assertBlocked = (decision, reason) => {
 })();
 
 (() => {
-  assert.throws(
-    () =>
-      binanceWriteGuard.assertBinanceWriteAllowed({
-        env: LIVE_ENV,
-        uid: 156,
-        pid: 7,
-        strategyCategory: "signal",
-        action: "WRITE_CREATE_ORDER",
-        symbol: "XRPUSDT",
-        positionSide: "LONG",
-      }),
-    (error) =>
-      error.code === "LIVE_WRITE_SAFETY_GATE_BLOCKED" &&
-      error.safetyReason === liveWriteSafetyGate.REASON.OWNERSHIP_DISABLED
+  assert.doesNotThrow(() =>
+    binanceWriteGuard.assertBinanceWriteAllowed({
+      env: LIVE_ENV,
+      uid: 156,
+      pid: 7,
+      strategyCategory: "signal",
+      action: "WRITE_CREATE_ORDER",
+      symbol: "XRPUSDT",
+      positionSide: "LONG",
+      ownershipEnabled: true,
+    })
   );
 })();
 
 (async () => {
+  const qaUid = 900820;
+  const db = require("../../database/connect/config");
+  await db.query("DELETE FROM live_position_bucket_owner WHERE uid = ?", [qaUid]);
   const reservation = await positionOwnership.acquirePositionBucketOwner({
     env: LIVE_ENV,
-    uid: 156,
+    uid: qaUid,
     symbol: "PUMPUSDT",
     positionSide: "LONG",
     ownerPid: 9,
     ownerStrategyCategory: "grid",
   });
-  assert.strictEqual(reservation.ok, false);
-  assert.strictEqual(reservation.reason, liveWriteSafetyGate.REASON.OWNERSHIP_DISABLED);
+  assert.strictEqual(reservation.ok, true);
+  assert.strictEqual(reservation.legacyDisabled, false);
 
   const replayReservation = await positionOwnership.acquirePositionBucketOwner({
     env: READONLY_ENV,
-    uid: 156,
+    uid: qaUid,
     symbol: "PUMPUSDT",
     positionSide: "LONG",
     ownerPid: 9,
@@ -131,12 +143,15 @@ const assertBlocked = (decision, reason) => {
     env: LIVE_ENV,
     redisClient: { set: () => {}, isOpen: false, isReady: false },
     orderIntentQueueEnabled: false,
+    ownershipEnabled: true,
   });
   assert.strictEqual(readiness.status, "BLOCKED");
   assert(readiness.blockers.some((item) => item.code === liveWriteSafetyGate.REASON.REDIS_LOCK_UNAVAILABLE));
-  assert(readiness.blockers.some((item) => item.code === liveWriteSafetyGate.REASON.OWNERSHIP_DISABLED));
+  assert(!readiness.blockers.some((item) => item.code === liveWriteSafetyGate.REASON.OWNERSHIP_DISABLED));
   assert(readiness.blockers.some((item) => item.code === liveWriteSafetyGate.REASON.QUEUE_REQUIRED_FOR_LIVE_GRID_WRITE));
 
+  await db.query("DELETE FROM live_position_bucket_owner WHERE uid = ?", [qaUid]);
+  await db.end();
   console.log("live-write-safety-gate-static-test PASS");
 })().catch((error) => {
   console.error(error);

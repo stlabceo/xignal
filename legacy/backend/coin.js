@@ -5735,17 +5735,32 @@ const resolvePidOwnedCloseQtyGuard = async ({
 }) => {
     const normalizedCategory = String(strategyCategory || '').trim().toLowerCase();
     const normalizedPositionSide = String(positionSide || '').trim().toUpperCase();
-    const pidOwnedQty = Number(await pidPositionLedger.getOpenQty({
+    const ownershipClose = await positionOwnership.resolveOwnedCloseQty({
         uid,
         pid,
         strategyCategory: normalizedCategory,
+        symbol,
         positionSide: normalizedPositionSide,
-    }) || 0);
+        requestedQty,
+    });
+    const pidOwnedQty = Number(ownershipClose?.pidOwnedQty || 0);
     const requestedCloseQty = Number(requestedQty || 0);
     const resolvedExchangeAggregateQty = Number(exchangeAggregateQty);
     const hasExchangeAggregateQty = Number.isFinite(resolvedExchangeAggregateQty) && resolvedExchangeAggregateQty >= 0;
+    const openOwners = await positionOwnership.listOpenPositionBucketOwners({
+        uid,
+        symbol,
+        positionSide: normalizedPositionSide,
+    });
+    const ownerSummaries = (openOwners || []).map((owner) => ({
+        pid: Number(owner?.ownerPid || 0),
+        strategyCategory: String(owner?.ownerStrategyCategory || '').trim().toLowerCase(),
+        openQty: Number(owner?.ownedQty || 0),
+        reservedCloseQty: Number(owner?.reservedCloseQty || 0),
+        status: owner?.status || null,
+    }));
 
-    if(!(pidOwnedQty > 0)){
+    if(!ownershipClose.allowed){
         logOrderRuntimeTrace('PID_CLOSE_QTY_GUARD_BLOCKED', {
             uid,
             pid,
@@ -5753,40 +5768,32 @@ const resolvePidOwnedCloseQtyGuard = async ({
             symbol,
             positionSide: normalizedPositionSide,
             clientOrderId,
-            reason: reason || 'pid-owned-zero',
+            reason: reason || ownershipClose.reason || 'ownership-close-blocked',
             pidOwnedQty,
             requestedCloseQty,
+            reservedCloseQty: Number(ownershipClose?.reservedCloseQty || 0),
+            availableCloseQty: Number(ownershipClose?.availableCloseQty || 0),
             exchangeAggregateQty: hasExchangeAggregateQty ? resolvedExchangeAggregateQty : null,
+            owners: ownerSummaries,
         });
         return {
             allowed: false,
-            reason: 'PID_OWNED_QTY_ZERO',
+            reason: ownershipClose.reason || 'OWNERSHIP_CLOSE_QTY_BLOCKED',
             pidOwnedQty,
             requestedCloseQty,
+            reservedCloseQty: Number(ownershipClose?.reservedCloseQty || 0),
+            availableCloseQty: Number(ownershipClose?.availableCloseQty || 0),
             exchangeAggregateQty: hasExchangeAggregateQty ? resolvedExchangeAggregateQty : null,
             finalCloseQty: 0,
+            owners: ownerSummaries,
         };
     }
 
-    const [ownerRows] = await db.query(
-        `SELECT pid, strategyCategory, openQty
-           FROM live_pid_position_snapshot
-          WHERE uid = ?
-            AND symbol = ?
-            AND positionSide = ?
-            AND ABS(openQty) > 0.000000001`,
-        [uid, symbol, normalizedPositionSide]
-    );
-    const openOwners = (ownerRows || []).map((owner) => ({
-        pid: Number(owner?.pid || 0),
-        strategyCategory: String(owner?.strategyCategory || '').trim().toLowerCase(),
-        openQty: Number(owner?.openQty || 0),
-    }));
-    const targetOwnerPresent = openOwners.some((owner) =>
+    const targetOwnerPresent = ownerSummaries.some((owner) =>
         Number(owner?.pid || 0) === Number(pid || 0)
         && String(owner?.strategyCategory || '') === normalizedCategory
     );
-    if(openOwners.length > 0 && !targetOwnerPresent){
+    if(ownerSummaries.length > 0 && !targetOwnerPresent){
         logOrderRuntimeTrace('PID_CLOSE_QTY_GUARD_BLOCKED', {
             uid,
             pid,
@@ -5798,16 +5805,16 @@ const resolvePidOwnedCloseQtyGuard = async ({
             pidOwnedQty,
             requestedCloseQty,
             exchangeAggregateQty: hasExchangeAggregateQty ? resolvedExchangeAggregateQty : null,
-            owners: openOwners,
+            owners: ownerSummaries,
         });
         return {
             allowed: false,
-            reason: 'PID_OWNER_NOT_IN_SYMBOL_SIDE_SNAPSHOT',
+            reason: 'PID_OWNER_NOT_IN_OWNERSHIP_BUCKET',
             pidOwnedQty,
             requestedCloseQty,
             exchangeAggregateQty: hasExchangeAggregateQty ? resolvedExchangeAggregateQty : null,
             finalCloseQty: 0,
-            owners: openOwners,
+            owners: ownerSummaries,
         };
     }
 
@@ -5846,8 +5853,7 @@ const resolvePidOwnedCloseQtyGuard = async ({
         };
     }
 
-    const targetQty = requestedCloseQty > 0 ? requestedCloseQty : pidOwnedQty;
-    const finalCloseQty = Math.min(targetQty, pidOwnedQty);
+    const finalCloseQty = Number(ownershipClose.finalCloseQty || 0);
     logOrderRuntimeTrace('PID_CLOSE_QTY_GUARD', {
         uid,
         pid,
@@ -5857,12 +5863,14 @@ const resolvePidOwnedCloseQtyGuard = async ({
         clientOrderId,
         reason: reason || 'close-qty-guard',
         pidOwnedQty,
+        reservedCloseQty: Number(ownershipClose.reservedCloseQty || 0),
+        availableCloseQty: Number(ownershipClose.availableCloseQty || 0),
         requestedCloseQty,
         exchangeAggregateQty: hasExchangeAggregateQty ? resolvedExchangeAggregateQty : null,
         finalCloseQty,
         ownerClear: true,
-        ownerCountForSymbolSide: openOwners.length,
-        otherOwners: openOwners.filter((owner) =>
+        ownerCountForSymbolSide: ownerSummaries.length,
+        otherOwners: ownerSummaries.filter((owner) =>
             Number(owner?.pid || 0) !== Number(pid || 0)
             || String(owner?.strategyCategory || '') !== normalizedCategory
         ),
@@ -5872,12 +5880,14 @@ const resolvePidOwnedCloseQtyGuard = async ({
         allowed: finalCloseQty > 0,
         reason: finalCloseQty > 0 ? 'OK' : 'FINAL_CLOSE_QTY_ZERO',
         pidOwnedQty,
+        reservedCloseQty: Number(ownershipClose.reservedCloseQty || 0),
+        availableCloseQty: Number(ownershipClose.availableCloseQty || 0),
         requestedCloseQty,
         exchangeAggregateQty: hasExchangeAggregateQty ? resolvedExchangeAggregateQty : null,
         finalCloseQty,
         ownerClear: true,
-        ownerCountForSymbolSide: openOwners.length,
-        owners: openOwners,
+        ownerCountForSymbolSide: ownerSummaries.length,
+        owners: ownerSummaries,
     };
 }
 
@@ -5974,6 +5984,30 @@ exports.closeGridLegMarketOrder = async ({
 
     const side = leg === 'LONG' ? 'SELL' : 'BUY';
     const clientOrderId = `GMANUAL_${leg === 'LONG' ? 'L' : 'S'}_${uid}_${pid}_${Date.now().toString().slice(-8)}`;
+    const ownershipCloseReservation = await positionOwnership.reserveCloseQty({
+        uid,
+        pid,
+        strategyCategory: 'grid',
+        symbol,
+        positionSide: leg,
+        qty: normalizedQty,
+        sourceClientOrderId: clientOrderId,
+        ownerState: 'CLOSE_RESERVED',
+        note: 'grid-manual-close-dispatch',
+    });
+    if(!ownershipCloseReservation.ok){
+        logOrderRuntimeTrace('GRID_MANUAL_CLOSE_OWNERSHIP_RESERVATION_BLOCKED', {
+            uid,
+            pid,
+            strategyCategory: 'grid',
+            symbol,
+            positionSide: leg,
+            requestedQty,
+            normalizedQty,
+            reason: ownershipCloseReservation.reason || 'UNKNOWN',
+        });
+        return null;
+    }
     await insertBinanceRuntimeEventLog({
         uid,
         pid,
@@ -5995,24 +6029,38 @@ exports.closeGridLegMarketOrder = async ({
             finalCloseQty: closeQty,
         },
     });
-    const order = await submitFuturesOrder(
-        {
+    let order = null;
+    try{
+        order = await submitFuturesOrder(
+            {
+                uid,
+                pid,
+                strategyCategory: 'grid',
+                action: 'WRITE_CLOSE_MARKET',
+                caller: 'coin.closeGridLegMarketOrder',
+                clientOrderId,
+            },
+            'MARKET',
+            side,
+            symbol,
+            normalizedQty,
+            false,
+            {
+                positionSide: leg,
+                newClientOrderId: clientOrderId,
+            }
+        );
+    }catch(error){
+        await positionOwnership.releaseCloseReservation({
             uid,
             pid,
             strategyCategory: 'grid',
-            action: 'WRITE_CLOSE_MARKET',
-            caller: 'coin.closeGridLegMarketOrder',
-        },
-        'MARKET',
-        side,
-        symbol,
-        normalizedQty,
-        false,
-        {
+            symbol,
             positionSide: leg,
-            newClientOrderId: clientOrderId,
-        }
-    );
+            qty: ownershipCloseReservation.reservedQty || normalizedQty,
+        });
+        throw error;
+    }
 
     await insertBinanceRuntimeEventLog({
         uid,
@@ -10551,6 +10599,7 @@ exports.sendForcing = async (type = null, symbol = null, side = null, userQty = 
     let submittedCloseOrderId = null;
     let positionSide = null;
     let closeQty = 0;
+    let signalOwnershipReservedQty = 0;
 
     try{
         const itemInfo = await loadLivePlaySnapshot(pid);
@@ -10604,6 +10653,27 @@ exports.sendForcing = async (type = null, symbol = null, side = null, userQty = 
             exports.msgAdd('sendForcing', String(mismatchData.errCode), mismatchData.errMsg, uid, pid, r_tid, symbol, side);
             return mismatchData;
         }
+        const signalCloseReservation = await positionOwnership.reserveCloseQty({
+            uid,
+            pid,
+            strategyCategory: 'signal',
+            symbol,
+            positionSide,
+            qty: closeQty,
+            sourceClientOrderId: clientOrderId,
+            ownerState: 'CLOSE_RESERVED',
+            note: `signal-close:${type || 'UNKNOWN'}`,
+        });
+        signalOwnershipReservedQty = Number(signalCloseReservation?.reservedQty || 0);
+        if(!signalCloseReservation.ok || !(signalOwnershipReservedQty > 0)){
+            const mismatchData = buildStateMismatchResponse(
+                -90005,
+                `signal close ownership reservation blocked before close order:${pid}, reason:${signalCloseReservation?.reason || 'UNKNOWN'}`
+            );
+            exports.msgAdd('sendForcing', String(mismatchData.errCode), mismatchData.errMsg, uid, pid, r_tid, symbol, side);
+            return mismatchData;
+        }
+        closeQty = signalOwnershipReservedQty;
 
         exports.msgAdd(
             'sendForcingDispatch',
@@ -10807,6 +10877,18 @@ exports.sendForcing = async (type = null, symbol = null, side = null, userQty = 
         }
 
         console.log(`ERR :: sendForcing : ${sendData.errMsg}`);
+        if(signalOwnershipReservedQty > 0){
+            logOrderRuntimeTrace('SIGNAL_CLOSE_OWNERSHIP_RESERVATION_HELD_AFTER_ERROR', {
+                uid,
+                pid,
+                strategyCategory: 'signal',
+                symbol,
+                positionSide,
+                clientOrderId,
+                reservedQty: signalOwnershipReservedQty,
+                reason: sendData.errAction || 'UNKNOWN',
+            });
+        }
         exports.msgAdd(
             'sendForcing',
             String(sendData.errCode),

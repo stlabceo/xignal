@@ -1709,7 +1709,50 @@ const placeLiveExitOrdersForLeg = async (row, leg, qty, entryPrice, options = {}
     missingProtection: [],
     protectionState: null,
     protectionReason: null,
+    protectionQty: 0,
   };
+
+  const ownershipQty = await positionOwnership.resolveOwnedCloseQty({
+    uid: row.uid,
+    pid: row.id,
+    strategyCategory: "grid",
+    symbol: row.symbol,
+    positionSide: leg,
+    requestedQty: qty,
+  });
+  const protectionQty = Number(ownershipQty?.finalCloseQty || 0);
+  result.protectionQty = protectionQty;
+  if (!ownershipQty.allowed || !(protectionQty > 0)) {
+    result.takeProfitErrorCode = ownershipQty.reason || "OWNERSHIP_CLOSE_QTY_BLOCKED";
+    result.stopErrorCode = ownershipQty.reason || "OWNERSHIP_CLOSE_QTY_BLOCKED";
+    result.takeProfitErrorMessage = `grid protection blocked by PID ownership:${ownershipQty.reason || "UNKNOWN"}`;
+    result.stopErrorMessage = `grid protection blocked by PID ownership:${ownershipQty.reason || "UNKNOWN"}`;
+    await appendGridRuntimeLog(
+      row,
+      "gridProtect",
+      "PROTECTION_OWNERSHIP_QTY_BLOCKED",
+      `leg:${leg}, requestedQty:${qty}, ownedQty:${ownershipQty.pidOwnedQty || 0}, availableQty:${ownershipQty.availableCloseQty || 0}, reason:${ownershipQty.reason || "UNKNOWN"}`,
+      leg
+    );
+    const outcome = gridProtectionGuarantee.classifyProtectionOutcome({
+      takeProfit: {
+        clientOrderId: null,
+        errorCode: result.takeProfitErrorCode,
+        errorMessage: result.takeProfitErrorMessage,
+      },
+      stop: {
+        clientOrderId: null,
+        errorCode: result.stopErrorCode,
+        errorMessage: result.stopErrorMessage,
+      },
+      oneLegEmergency: options.oneLegEmergency === true,
+    });
+    result.missingProtection = outcome.missing;
+    result.protectionState = outcome.state;
+    result.protectionReason = outcome.reason;
+    result.protectionOutcome = outcome;
+    return result;
+  }
 
   if (takeProfitPrice > 0) {
     try {
@@ -1731,7 +1774,7 @@ const placeLiveExitOrdersForLeg = async (row, leg, qty, entryPrice, options = {}
             pid: row.id,
             symbol: row.symbol,
             leg,
-            qty,
+            qty: protectionQty,
             triggerPrice: takeProfitPrice,
             clientOrderId: takeProfitClientOrderId,
           });
@@ -1747,7 +1790,7 @@ const placeLiveExitOrdersForLeg = async (row, leg, qty, entryPrice, options = {}
         row,
         "gridLiveOpen",
         "TAKE_PROFIT_ORDER_ERROR",
-        `leg:${leg}, qty:${qty}, entryPrice:${entryPrice}, targetPrice:${takeProfitPrice}, message:${error?.message || error}`,
+        `leg:${leg}, qty:${protectionQty}, requestedQty:${qty}, entryPrice:${entryPrice}, targetPrice:${takeProfitPrice}, message:${error?.message || error}`,
         leg
       );
     }
@@ -1756,7 +1799,7 @@ const placeLiveExitOrdersForLeg = async (row, leg, qty, entryPrice, options = {}
         row,
         "gridLiveOpen",
         "TAKE_PROFIT_ORDER_MISSING",
-        `leg:${leg}, qty:${qty}, entryPrice:${entryPrice}, targetPrice:${takeProfitPrice}`,
+        `leg:${leg}, qty:${protectionQty}, requestedQty:${qty}, entryPrice:${entryPrice}, targetPrice:${takeProfitPrice}`,
         leg
       );
     }
@@ -1782,7 +1825,7 @@ const placeLiveExitOrdersForLeg = async (row, leg, qty, entryPrice, options = {}
             pid: row.id,
             symbol: row.symbol,
             leg,
-            qty,
+            qty: protectionQty,
             triggerPrice: stopPrice,
             clientOrderId: stopClientOrderId,
           });
@@ -1798,7 +1841,7 @@ const placeLiveExitOrdersForLeg = async (row, leg, qty, entryPrice, options = {}
         row,
         "gridLiveOpen",
         "STOP_ORDER_ERROR",
-        `leg:${leg}, qty:${qty}, entryPrice:${entryPrice}, stopPrice:${stopPrice}, message:${error?.message || error}`,
+        `leg:${leg}, qty:${protectionQty}, requestedQty:${qty}, entryPrice:${entryPrice}, stopPrice:${stopPrice}, message:${error?.message || error}`,
         leg
       );
     }
@@ -1807,7 +1850,7 @@ const placeLiveExitOrdersForLeg = async (row, leg, qty, entryPrice, options = {}
         row,
         "gridLiveOpen",
         "STOP_ORDER_MISSING",
-        `leg:${leg}, qty:${qty}, entryPrice:${entryPrice}, stopPrice:${stopPrice}`,
+        `leg:${leg}, qty:${protectionQty}, requestedQty:${qty}, entryPrice:${entryPrice}, stopPrice:${stopPrice}`,
         leg
       );
     }
@@ -1925,7 +1968,8 @@ const protectGridOpenLegOrClose = async ({
     entryOrderId,
     oneLegEmergency,
   });
-  await syncGridExitReservationsForLeg(row, leg, exits, qty);
+  const protectedQty = Number(exits.protectionQty || qty);
+  await syncGridExitReservationsForLeg(row, leg, exits, protectedQty);
   const outcome = exits.protectionOutcome || gridProtectionGuarantee.classifyProtectionOutcome({
     takeProfit: { clientOrderId: exits.takeProfitOrderId },
     stop: { clientOrderId: exits.stopOrderId },
@@ -1939,7 +1983,7 @@ const protectGridOpenLegOrClose = async ({
         leg,
         entryOrderId,
         entryPrice,
-        qty,
+        qty: protectedQty,
         exits,
         regimeStatus: oneLegEmergency
           ? gridProtectionGuarantee.GRID_PROTECTION_STATE.ONE_LEG_PROTECTED
@@ -1993,7 +2037,7 @@ const syncGridExitReservationsForLeg = async (row, leg, exits, qty) => {
       clientOrderId: exits.takeProfitOrderId,
       sourceOrderId: exits.takeProfitSourceOrderId || null,
       reservationKind: "GRID_TP",
-      reservedQty: qty,
+      reservedQty: Number(exits?.protectionQty || qty),
       note: `grid leg:${leg} take-profit`,
     });
   }
@@ -2003,7 +2047,7 @@ const syncGridExitReservationsForLeg = async (row, leg, exits, qty) => {
       clientOrderId: exits.stopOrderId,
       sourceOrderId: exits.stopSourceOrderId || null,
       reservationKind: "GRID_STOP",
-      reservedQty: qty,
+      reservedQty: Number(exits?.protectionQty || qty),
       note: `grid leg:${leg} stop-loss`,
     });
   }

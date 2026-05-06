@@ -149,20 +149,20 @@ const loadRowsForUid = async (uid) => {
   assert.strictEqual(redisResult.status, orderIntentQueue.STATUS.BLOCKED);
   assert.strictEqual(redisResult.reason, liveWriteSafetyGate.REASON.REDIS_LOCK_UNAVAILABLE);
 
-  const ownershipUid = uid + 2;
-  await orderIntentQueue.deleteQaIntentsByUid(ownershipUid);
+  const dispatchBlockedUid = uid + 2;
+  await orderIntentQueue.deleteQaIntentsByUid(dispatchBlockedUid);
   await orderIntentQueue.enqueueGridLiveArmIntents({
     payload: buildPayload({ symbol: "SOLUSDT", triggerPrice: 1.35 }),
-    previewResult: buildPreview({ uid: ownershipUid, pid: 7003, symbol: "SOLUSDT", triggerPrice: 1.35 }),
+    previewResult: buildPreview({ uid: dispatchBlockedUid, pid: 7003, symbol: "SOLUSDT", triggerPrice: 1.35 }),
     routePath: "qa-order-intent-test",
   });
-  const ownershipResult = await orderIntentWorker.processOneIntent({
-    workerId: "qa-worker-ownership",
+  const dispatchBlockedResult = await orderIntentWorker.processOneIntent({
+    workerId: "qa-worker-dispatch-blocked",
     env: LIVE_ENV,
     redisClient: { set: () => {}, isOpen: true, isReady: true },
   });
-  assert.strictEqual(ownershipResult.status, orderIntentQueue.STATUS.BLOCKED);
-  assert.strictEqual(ownershipResult.reason, liveWriteSafetyGate.REASON.OWNERSHIP_DISABLED);
+  assert.strictEqual(dispatchBlockedResult.status, orderIntentQueue.STATUS.BLOCKED);
+  assert.strictEqual(dispatchBlockedResult.reason, liveWriteSafetyGate.REASON.QUEUE_REQUIRED_FOR_LIVE_GRID_WRITE);
 
   const dryRunUid = uid + 3;
   await orderIntentQueue.deleteQaIntentsByUid(dryRunUid);
@@ -190,13 +190,14 @@ const loadRowsForUid = async (uid) => {
     env: LIVE_ENV,
     redisClient: { set: () => {}, isOpen: true, isReady: true },
     orderIntentQueueEnabled: true,
+    ownershipEnabled: true,
   });
-  assert(readiness.blockers.some((item) => item.code === liveWriteSafetyGate.REASON.OWNERSHIP_DISABLED));
+  assert(!readiness.blockers.some((item) => item.code === liveWriteSafetyGate.REASON.OWNERSHIP_DISABLED));
   assert(!readiness.blockers.some((item) => item.code === liveWriteSafetyGate.REASON.QUEUE_REQUIRED_FOR_LIVE_GRID_WRITE));
 
   await orderIntentQueue.deleteQaIntentsByUid(uid);
   await orderIntentQueue.deleteQaIntentsByUid(redisUid);
-  await orderIntentQueue.deleteQaIntentsByUid(ownershipUid);
+  await orderIntentQueue.deleteQaIntentsByUid(dispatchBlockedUid);
   await orderIntentQueue.deleteQaIntentsByUid(dryRunUid);
   await db.end();
   console.log("order-intent-queue-static-test PASS");

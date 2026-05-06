@@ -3,6 +3,7 @@
 const db = require("./database/connect/config");
 const redisClient = require("./util/redis.util");
 const liveWriteSafetyGate = require("./live-write-safety-gate");
+const positionOwnership = require("./position-ownership");
 
 const toNumber = (value) => {
   const numeric = Number(value);
@@ -289,9 +290,15 @@ const getAccountReadiness = async (uid, { runtimeHealth = null } = {}) => {
   const positionMode = derivePositionMode(runtimeHealth || {});
   const writeDisabled = truthy(process.env.QA_DISABLE_BINANCE_WRITES);
   const liveWriteEnabled = truthy(process.env.BINANCE_LIVE_WRITES_ENABLED);
+  const ownershipReadiness = await positionOwnership.getOwnershipReadiness().catch((error) => ({
+    enabled: false,
+    status: "BLOCKED",
+    error: error?.message || String(error),
+  }));
   const liveWriteSafety = liveWriteSafetyGate.buildReadinessSnapshot({
     env: process.env,
     redisClient,
+    ownershipEnabled: ownershipReadiness.enabled === true,
   });
   const runtimeExcluded = Boolean(runtimeHealth?.excluded);
 
@@ -390,6 +397,7 @@ const getAccountReadiness = async (uid, { runtimeHealth = null } = {}) => {
     canTradeFutures,
     userStream,
     liveWriteSafety,
+    ownershipReadiness,
     positionMode,
     positionModeLabel:
       positionMode === "HEDGE" ? "헤지 모드" : positionMode === "ONE_WAY" ? "원웨이 모드" : "검증 불가",

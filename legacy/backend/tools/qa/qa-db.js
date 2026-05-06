@@ -480,6 +480,13 @@ const cleanupArtifacts = async ({
             AND pid IN (${signalArtifactPlaceholders})`,
         [uid, ...signalArtifactIds]
       );
+      await db.query(
+        `DELETE FROM live_position_bucket_owner
+          WHERE uid = ?
+            AND ownerStrategyCategory = 'signal'
+            AND ownerPid IN (${signalArtifactPlaceholders})`,
+        [uid, ...signalArtifactIds]
+      );
     }
 
     if (gridArtifactIds.length > 0) {
@@ -502,6 +509,13 @@ const cleanupArtifacts = async ({
           WHERE uid = ?
             AND strategyCategory = 'grid'
             AND pid IN (${gridArtifactPlaceholders})`,
+        [uid, ...gridArtifactIds]
+      );
+      await db.query(
+        `DELETE FROM live_position_bucket_owner
+          WHERE uid = ?
+            AND ownerStrategyCategory = 'grid'
+            AND ownerPid IN (${gridArtifactPlaceholders})`,
         [uid, ...gridArtifactIds]
       );
     }
@@ -741,6 +755,7 @@ const countArtifactRowsForPids = async ({ uid, pids = [] } = {}) => {
       live_grid_strategy_list: 0,
       live_play_list: 0,
       live_pid_exit_reservation: 0,
+      live_position_bucket_owner: 0,
       msg_list: 0,
     };
   }
@@ -753,6 +768,7 @@ const countArtifactRowsForPids = async ({ uid, pids = [] } = {}) => {
     gridCount,
     signalCount,
     reservationCount,
+    ownershipCount,
     msgCount,
   ] = await Promise.all([
     scalar(
@@ -792,6 +808,13 @@ const countArtifactRowsForPids = async ({ uid, pids = [] } = {}) => {
     ),
     scalar(
       `SELECT COUNT(*) AS cnt
+         FROM live_position_bucket_owner
+        WHERE uid = ?
+          AND ownerPid IN (${placeholders})`,
+      params
+    ),
+    scalar(
+      `SELECT COUNT(*) AS cnt
          FROM msg_list
         WHERE uid = ?
           AND pid IN (${placeholders})`,
@@ -805,6 +828,7 @@ const countArtifactRowsForPids = async ({ uid, pids = [] } = {}) => {
     live_grid_strategy_list: Number(gridCount || 0),
     live_play_list: Number(signalCount || 0),
     live_pid_exit_reservation: Number(reservationCount || 0),
+    live_position_bucket_owner: Number(ownershipCount || 0),
     msg_list: Number(msgCount || 0),
   };
 };
