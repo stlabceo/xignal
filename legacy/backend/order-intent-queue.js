@@ -21,6 +21,12 @@ const INTENT_TYPE = Object.freeze({
   GRID_CONTROLLED_CLOSE: "GRID_CONTROLLED_CLOSE",
   GRID_REGIME_CLEANUP_CANCEL: "GRID_REGIME_CLEANUP_CANCEL",
   SIGNAL_MARKET_ENTRY: "SIGNAL_MARKET_ENTRY",
+  SIGNAL_PROTECTION_CREATE: "SIGNAL_PROTECTION_CREATE",
+  SIGNAL_SPLIT_TP_CREATE: "SIGNAL_SPLIT_TP_CREATE",
+  SIGNAL_PROTECTION_CANCEL: "SIGNAL_PROTECTION_CANCEL",
+  SIGNAL_FORCED_CLOSE: "SIGNAL_FORCED_CLOSE",
+  SIGNAL_STOP_TIME_EXIT: "SIGNAL_STOP_TIME_EXIT",
+  SIGNAL_CLEANUP_FINALIZE: "SIGNAL_CLEANUP_FINALIZE",
 });
 
 const DEFAULT_MAX_ATTEMPTS = 3;
@@ -232,6 +238,255 @@ const buildSignalMarketEntryFifoKey = ({ payload = {} } = {}) => {
     normalized.uid,
     "signal",
     normalized.pid,
+  ].join(":");
+};
+
+const normalizeSignalProtectionIntentPayload = (payload = {}) => {
+  const side = normalizeSignalSide(payload.side || payload.signalSide || payload.rSignalType);
+  const boundType = String(payload.boundType || payload.protectionType || "PROFIT_STOP").trim().toUpperCase();
+  return {
+    ...payload,
+    uid: Number(payload.uid || 0),
+    pid: Number(payload.pid || payload.id || 0),
+    strategyCategory: "signal",
+    symbol: normalizeSymbol(payload.symbol),
+    side,
+    positionSide: normalizePositionSide(payload.positionSide || signalPositionSideFromSide(side)),
+    entryOrderId: payload.entryOrderId == null ? null : String(payload.entryOrderId),
+    entryClientOrderId: payload.entryClientOrderId == null ? null : String(payload.entryClientOrderId),
+    sourceOrderId: payload.sourceOrderId == null ? null : String(payload.sourceOrderId),
+    sourceTradeId: payload.sourceTradeId == null ? null : String(payload.sourceTradeId),
+    tradeTime: payload.tradeTime == null ? null : String(payload.tradeTime),
+    qty: Number(payload.qty || payload.ownedQty || payload.ownedQtyBasis || 0),
+    ownedQty: Number(payload.ownedQty || payload.ownedQtyBasis || payload.qty || 0),
+    entryPrice: Number(payload.entryPrice || payload.exactPrice || 0),
+    takeProfitPrice: Number(payload.takeProfitPrice || payload.profitPrice || 0),
+    stopPrice: Number(payload.stopPrice || 0),
+    splitStageQty: Number(payload.splitStageQty || 0),
+    splitStageIndex: Number(payload.splitStageIndex || 0),
+    boundType,
+    reason: String(payload.reason || payload.sourceReason || "SIGNAL_PROTECTION").trim().toUpperCase(),
+  };
+};
+
+const resolveSignalProtectionIntentType = (payload = {}) => {
+  const normalizedType = String(payload.intentType || "").trim().toUpperCase();
+  if (
+    normalizedType === INTENT_TYPE.SIGNAL_PROTECTION_CREATE ||
+    normalizedType === INTENT_TYPE.SIGNAL_SPLIT_TP_CREATE
+  ) {
+    return normalizedType;
+  }
+  const boundType = String(payload.boundType || payload.protectionType || "").trim().toUpperCase();
+  return boundType === "SPLITTP" ? INTENT_TYPE.SIGNAL_SPLIT_TP_CREATE : INTENT_TYPE.SIGNAL_PROTECTION_CREATE;
+};
+
+const buildSignalProtectionIntentPayloadHash = ({ payload = {} } = {}) => {
+  const normalized = normalizeSignalProtectionIntentPayload(payload);
+  return sha1(
+    safeJsonStringify({
+      action: resolveSignalProtectionIntentType(normalized),
+      uid: normalized.uid,
+      pid: normalized.pid,
+      symbol: normalized.symbol,
+      side: normalized.side,
+      positionSide: normalized.positionSide,
+      entryOrderId: normalized.entryOrderId,
+      sourceOrderId: normalized.sourceOrderId,
+      sourceTradeId: normalized.sourceTradeId,
+      qty: normalized.qty,
+      ownedQty: normalized.ownedQty,
+      takeProfitPrice: normalized.takeProfitPrice,
+      stopPrice: normalized.stopPrice,
+      splitStageQty: normalized.splitStageQty,
+      splitStageIndex: normalized.splitStageIndex,
+      boundType: normalized.boundType,
+    })
+  );
+};
+
+const buildSignalProtectionIntentKey = ({ payload = {} } = {}) => {
+  const normalized = normalizeSignalProtectionIntentPayload(payload);
+  const identity = normalized.sourceTradeId
+    || normalized.sourceOrderId
+    || normalized.entryOrderId
+    || buildSignalProtectionIntentPayloadHash({ payload: normalized });
+  return [
+    resolveSignalProtectionIntentType(normalized),
+    normalized.uid,
+    normalized.pid,
+    normalized.symbol,
+    normalized.positionSide,
+    normalized.boundType,
+    normalized.splitStageIndex,
+    identity,
+  ].join(":");
+};
+
+const buildSignalFifoKey = ({ payload = {} } = {}) => {
+  const uid = Number(payload.uid || 0);
+  const pid = Number(payload.pid || payload.id || 0);
+  return [uid, "signal", pid].join(":");
+};
+
+const normalizeSignalCancelIntentPayload = (payload = {}) => ({
+  ...payload,
+  uid: Number(payload.uid || 0),
+  pid: Number(payload.pid || payload.id || 0),
+  strategyCategory: "signal",
+  symbol: normalizeSymbol(payload.symbol),
+  positionSide: normalizePositionSide(payload.positionSide || payload.leg),
+  targetType: String(payload.targetType || "PROTECTION").trim().toUpperCase(),
+  targetOrderId: payload.targetOrderId == null ? null : String(payload.targetOrderId),
+  targetClientOrderId: payload.targetClientOrderId || payload.clientOrderId || null,
+  excludeType: payload.excludeType == null ? null : String(payload.excludeType).trim().toUpperCase(),
+  reason: String(payload.reason || payload.sourceReason || "SIGNAL_PROTECTION_CANCEL").trim().toUpperCase(),
+  sourceReason: String(payload.sourceReason || payload.reason || "SIGNAL_PROTECTION_CANCEL").trim().toUpperCase(),
+});
+
+const resolveSignalCancelIntentType = (payload = {}) => {
+  const normalizedType = String(payload.intentType || "").trim().toUpperCase();
+  if (
+    normalizedType === INTENT_TYPE.SIGNAL_PROTECTION_CANCEL ||
+    normalizedType === INTENT_TYPE.SIGNAL_CLEANUP_FINALIZE
+  ) {
+    return normalizedType;
+  }
+  const reason = String(payload.reason || payload.sourceReason || "").trim().toUpperCase();
+  return reason.includes("CLEANUP") || reason.includes("FINALIZE")
+    ? INTENT_TYPE.SIGNAL_CLEANUP_FINALIZE
+    : INTENT_TYPE.SIGNAL_PROTECTION_CANCEL;
+};
+
+const buildSignalCancelIntentPayloadHash = ({ payload = {} } = {}) => {
+  const normalized = normalizeSignalCancelIntentPayload(payload);
+  return sha1(
+    safeJsonStringify({
+      action: resolveSignalCancelIntentType(normalized),
+      uid: normalized.uid,
+      pid: normalized.pid,
+      symbol: normalized.symbol,
+      positionSide: normalized.positionSide,
+      targetType: normalized.targetType,
+      targetOrderId: normalized.targetOrderId,
+      targetClientOrderId: normalized.targetClientOrderId,
+      excludeType: normalized.excludeType,
+      reason: normalized.reason,
+    })
+  );
+};
+
+const buildSignalCancelIntentKey = ({ payload = {} } = {}) => {
+  const normalized = normalizeSignalCancelIntentPayload(payload);
+  const targetIdentity = normalized.targetClientOrderId
+    || normalized.targetOrderId
+    || `${normalized.targetType}:${normalized.excludeType || "ALL"}:${normalized.reason}`;
+  return [
+    resolveSignalCancelIntentType(normalized),
+    normalized.uid,
+    normalized.pid,
+    normalized.symbol,
+    normalized.positionSide || "ALL",
+    targetIdentity,
+  ].join(":");
+};
+
+const buildSignalCloseClientOrderId = (payload = {}) => {
+  if (payload.closeClientOrderId) {
+    return payload.closeClientOrderId;
+  }
+  const sideCode = normalizePositionSide(payload.positionSide || payload.leg) === "SHORT" ? "S" : "L";
+  const reason = String(payload.reason || payload.closeType || "FORCED_CLOSE").trim().toUpperCase();
+  const source = payload.sourceEventId || payload.sourceOrderId || payload.sourceTradeId || payload.sourceClientOrderId || payload.rTid || null;
+  const seed = sha1(
+    safeJsonStringify({
+      uid: Number(payload.uid || 0),
+      pid: Number(payload.pid || payload.id || 0),
+      symbol: normalizeSymbol(payload.symbol),
+      positionSide: normalizePositionSide(payload.positionSide || payload.leg),
+      reason,
+      source,
+    })
+  );
+  const suffix = String(parseInt(seed.slice(0, 10), 16) % 100000000).padStart(8, "0");
+  return `${reason}_${sideCode}_${Number(payload.uid || 0)}_${Number(payload.pid || 0)}_${suffix}`;
+};
+
+const normalizeSignalCloseIntentPayload = (payload = {}) => {
+  const side = normalizeSignalSide(payload.side || payload.signalSide || payload.rSignalType);
+  const normalized = {
+    ...payload,
+    uid: Number(payload.uid || 0),
+    pid: Number(payload.pid || payload.id || 0),
+    strategyCategory: "signal",
+    symbol: normalizeSymbol(payload.symbol),
+    side,
+    positionSide: normalizePositionSide(payload.positionSide || signalPositionSideFromSide(side)),
+    qty: Number(payload.qty || payload.ownedQtyBasis || payload.ownedQty || 0),
+    ownedQtyBasis: Number(payload.ownedQtyBasis || payload.qty || payload.ownedQty || 0),
+    reason: String(payload.reason || payload.closeType || "FORCED_CLOSE").trim().toUpperCase(),
+    sourceEventId: payload.sourceEventId == null ? null : String(payload.sourceEventId),
+    sourceOrderId: payload.sourceOrderId == null ? null : String(payload.sourceOrderId),
+    sourceTradeId: payload.sourceTradeId == null ? null : String(payload.sourceTradeId),
+    sourceClientOrderId: payload.sourceClientOrderId || null,
+    rTid: payload.rTid == null ? null : String(payload.rTid),
+    closeClientOrderId: payload.closeClientOrderId || null,
+  };
+  normalized.closeClientOrderId = normalized.closeClientOrderId || buildSignalCloseClientOrderId(normalized);
+  return normalized;
+};
+
+const resolveSignalCloseIntentType = (payload = {}) => {
+  const normalizedType = String(payload.intentType || "").trim().toUpperCase();
+  if (
+    normalizedType === INTENT_TYPE.SIGNAL_FORCED_CLOSE ||
+    normalizedType === INTENT_TYPE.SIGNAL_STOP_TIME_EXIT ||
+    normalizedType === INTENT_TYPE.SIGNAL_CLEANUP_FINALIZE
+  ) {
+    return normalizedType;
+  }
+  const reason = String(payload.reason || payload.closeType || "").trim().toUpperCase();
+  if (reason.includes("TIME") || reason.includes("STOP_TIME")) {
+    return INTENT_TYPE.SIGNAL_STOP_TIME_EXIT;
+  }
+  if (reason.includes("CLEANUP") || reason.includes("FINALIZE")) {
+    return INTENT_TYPE.SIGNAL_CLEANUP_FINALIZE;
+  }
+  return INTENT_TYPE.SIGNAL_FORCED_CLOSE;
+};
+
+const buildSignalCloseIntentPayloadHash = ({ payload = {} } = {}) => {
+  const normalized = normalizeSignalCloseIntentPayload(payload);
+  return sha1(
+    safeJsonStringify({
+      action: resolveSignalCloseIntentType(normalized),
+      uid: normalized.uid,
+      pid: normalized.pid,
+      symbol: normalized.symbol,
+      side: normalized.side,
+      positionSide: normalized.positionSide,
+      qty: normalized.qty,
+      ownedQtyBasis: normalized.ownedQtyBasis,
+      reason: normalized.reason,
+      sourceEventId: normalized.sourceEventId,
+      sourceOrderId: normalized.sourceOrderId,
+      sourceTradeId: normalized.sourceTradeId,
+      sourceClientOrderId: normalized.sourceClientOrderId,
+      rTid: normalized.rTid,
+      closeClientOrderId: normalized.closeClientOrderId,
+    })
+  );
+};
+
+const buildSignalCloseIntentKey = ({ payload = {} } = {}) => {
+  const normalized = normalizeSignalCloseIntentPayload(payload);
+  return [
+    resolveSignalCloseIntentType(normalized),
+    normalized.uid,
+    normalized.pid,
+    normalized.symbol,
+    normalized.positionSide,
+    normalized.closeClientOrderId || buildSignalCloseIntentPayloadHash({ payload: normalized }),
   ].join(":");
 };
 
@@ -734,6 +989,238 @@ const enqueueSignalMarketEntryIntent = async ({
   };
 };
 
+const enqueueSignalProtectionIntent = async ({
+  payload = {},
+  intentType = null,
+  routePath = "signal-runtime-protection",
+  sourceEventId = null,
+} = {}) => {
+  await ensureOrderIntentSchema();
+  const normalized = normalizeSignalProtectionIntentPayload({
+    ...payload,
+    intentType: intentType || payload.intentType,
+  });
+  if (!normalized.uid || !normalized.pid || !normalized.symbol || !normalized.positionSide) {
+    throw new Error("SIGNAL_PROTECTION_INTENT_INVALID_OWNER");
+  }
+
+  const resolvedIntentType = resolveSignalProtectionIntentType(normalized);
+  const payloadHash = buildSignalProtectionIntentPayloadHash({ payload: normalized });
+  const intentKey = buildSignalProtectionIntentKey({ payload: normalized });
+  const fifoKey = buildSignalFifoKey({ payload: normalized });
+  const intentPayload = {
+    action: resolvedIntentType,
+    routePath,
+    sourceEventId,
+    protection: normalized,
+  };
+
+  const [result] = await db.query(
+    `INSERT IGNORE INTO order_intent_queue
+      (
+        intentKey,
+        fifoKey,
+        uid,
+        pid,
+        strategyCategory,
+        intentType,
+        status,
+        priority,
+        attemptCount,
+        maxAttempts,
+        routePath,
+        sourceEventId,
+        payloadHash,
+        payloadJson
+      )
+     VALUES (?, ?, ?, ?, 'signal', ?, ?, 82, 0, ?, ?, ?, ?, ?)`,
+    [
+      intentKey,
+      fifoKey,
+      normalized.uid,
+      normalized.pid,
+      resolvedIntentType,
+      STATUS.PENDING,
+      DEFAULT_MAX_ATTEMPTS,
+      routePath,
+      sourceEventId,
+      payloadHash,
+      safeJsonStringify(intentPayload),
+    ]
+  );
+
+  const inserted = Number(result?.affectedRows || 0) === 1;
+  return {
+    requested: 1,
+    inserted: inserted ? 1 : 0,
+    duplicate: inserted ? 0 : 1,
+    intent: {
+      intentKey,
+      fifoKey,
+      uid: normalized.uid,
+      pid: normalized.pid,
+      status: inserted ? STATUS.PENDING : "DUPLICATE",
+      payloadHash,
+      intentType: resolvedIntentType,
+    },
+  };
+};
+
+const enqueueSignalCancelIntent = async ({
+  payload = {},
+  intentType = null,
+  routePath = "signal-runtime-cancel",
+  sourceEventId = null,
+} = {}) => {
+  await ensureOrderIntentSchema();
+  const normalized = normalizeSignalCancelIntentPayload({
+    ...payload,
+    intentType: intentType || payload.intentType,
+  });
+  if (!normalized.uid || !normalized.pid || !normalized.symbol) {
+    throw new Error("SIGNAL_CANCEL_INTENT_INVALID_OWNER");
+  }
+
+  const resolvedIntentType = resolveSignalCancelIntentType(normalized);
+  const payloadHash = buildSignalCancelIntentPayloadHash({ payload: normalized });
+  const intentKey = buildSignalCancelIntentKey({ payload: normalized });
+  const fifoKey = buildSignalFifoKey({ payload: normalized });
+  const intentPayload = {
+    action: resolvedIntentType,
+    routePath,
+    sourceEventId,
+    cancel: normalized,
+  };
+
+  const [result] = await db.query(
+    `INSERT IGNORE INTO order_intent_queue
+      (
+        intentKey,
+        fifoKey,
+        uid,
+        pid,
+        strategyCategory,
+        intentType,
+        status,
+        priority,
+        attemptCount,
+        maxAttempts,
+        routePath,
+        sourceEventId,
+        payloadHash,
+        payloadJson
+      )
+     VALUES (?, ?, ?, ?, 'signal', ?, ?, 72, 0, ?, ?, ?, ?, ?)`,
+    [
+      intentKey,
+      fifoKey,
+      normalized.uid,
+      normalized.pid,
+      resolvedIntentType,
+      STATUS.PENDING,
+      DEFAULT_MAX_ATTEMPTS,
+      routePath,
+      sourceEventId,
+      payloadHash,
+      safeJsonStringify(intentPayload),
+    ]
+  );
+
+  const inserted = Number(result?.affectedRows || 0) === 1;
+  return {
+    requested: 1,
+    inserted: inserted ? 1 : 0,
+    duplicate: inserted ? 0 : 1,
+    intent: {
+      intentKey,
+      fifoKey,
+      uid: normalized.uid,
+      pid: normalized.pid,
+      status: inserted ? STATUS.PENDING : "DUPLICATE",
+      payloadHash,
+      intentType: resolvedIntentType,
+    },
+  };
+};
+
+const enqueueSignalCloseIntent = async ({
+  payload = {},
+  intentType = null,
+  routePath = "signal-runtime-close",
+  sourceEventId = null,
+} = {}) => {
+  await ensureOrderIntentSchema();
+  const normalized = normalizeSignalCloseIntentPayload({
+    ...payload,
+    intentType: intentType || payload.intentType,
+  });
+  if (!normalized.uid || !normalized.pid || !normalized.symbol || !normalized.positionSide) {
+    throw new Error("SIGNAL_CLOSE_INTENT_INVALID_OWNER");
+  }
+
+  const resolvedIntentType = resolveSignalCloseIntentType(normalized);
+  const payloadHash = buildSignalCloseIntentPayloadHash({ payload: normalized });
+  const intentKey = buildSignalCloseIntentKey({ payload: normalized });
+  const fifoKey = buildSignalFifoKey({ payload: normalized });
+  const intentPayload = {
+    action: resolvedIntentType,
+    routePath,
+    sourceEventId,
+    close: normalized,
+  };
+
+  const [result] = await db.query(
+    `INSERT IGNORE INTO order_intent_queue
+      (
+        intentKey,
+        fifoKey,
+        uid,
+        pid,
+        strategyCategory,
+        intentType,
+        status,
+        priority,
+        attemptCount,
+        maxAttempts,
+        routePath,
+        sourceEventId,
+        payloadHash,
+        payloadJson
+      )
+     VALUES (?, ?, ?, ?, 'signal', ?, ?, 76, 0, ?, ?, ?, ?, ?)`,
+    [
+      intentKey,
+      fifoKey,
+      normalized.uid,
+      normalized.pid,
+      resolvedIntentType,
+      STATUS.PENDING,
+      DEFAULT_MAX_ATTEMPTS,
+      routePath,
+      sourceEventId,
+      payloadHash,
+      safeJsonStringify(intentPayload),
+    ]
+  );
+
+  const inserted = Number(result?.affectedRows || 0) === 1;
+  return {
+    requested: 1,
+    inserted: inserted ? 1 : 0,
+    duplicate: inserted ? 0 : 1,
+    intent: {
+      intentKey,
+      fifoKey,
+      uid: normalized.uid,
+      pid: normalized.pid,
+      status: inserted ? STATUS.PENDING : "DUPLICATE",
+      payloadHash,
+      intentType: resolvedIntentType,
+      closeClientOrderId: normalized.closeClientOrderId,
+    },
+  };
+};
+
 const enqueueGridProtectionCreateIntent = async ({
   payload = {},
   routePath = "grid-runtime-entry-fill",
@@ -1172,6 +1659,16 @@ module.exports = {
   buildSignalMarketEntryIntentPayloadHash,
   buildSignalMarketEntryIntentKey,
   buildSignalMarketEntryFifoKey,
+  normalizeSignalProtectionIntentPayload,
+  buildSignalProtectionIntentPayloadHash,
+  buildSignalProtectionIntentKey,
+  normalizeSignalCancelIntentPayload,
+  buildSignalCancelIntentPayloadHash,
+  buildSignalCancelIntentKey,
+  normalizeSignalCloseIntentPayload,
+  buildSignalCloseClientOrderId,
+  buildSignalCloseIntentPayloadHash,
+  buildSignalCloseIntentKey,
   buildGridProtectionIntentPayloadHash,
   buildGridProtectionIntentKey,
   buildGridProtectionFifoKey,
@@ -1187,6 +1684,9 @@ module.exports = {
   buildGridCloseFifoKey,
   enqueueGridLiveArmIntents,
   enqueueSignalMarketEntryIntent,
+  enqueueSignalProtectionIntent,
+  enqueueSignalCancelIntent,
+  enqueueSignalCloseIntent,
   enqueueGridProtectionCreateIntent,
   enqueueGridReentryCreateIntent,
   enqueueGridCancelIntent,

@@ -18,6 +18,7 @@ const binanceReadGuard = require("./binance-read-guard");
 const credentialSecrets = require("./credential-secrets");
 const binanceWriteTimeSync = require("./binance-write-time-sync");
 const gridPriceSource = require("./grid-price-source");
+const orderIntentQueue = require("./order-intent-queue");
 let gridEngine = null;
 let policyEngine = null;
 const Binance = require('node-binance-api');
@@ -52,6 +53,8 @@ const accountRiskSnapshotCache = {};
 const futuresTimeSyncState = binanceWriteTimeSync.createFuturesTimeSyncState();
 const DEBUG_RUNTIME_TRACE = process.env.DEBUG_TIME_EXPIRY === '1' || process.env.DEBUG_RUNTIME_TRACE === '1';
 const isQaReplayMode = binanceWriteGuard.isQaReplayMode;
+const isLegacySignalDirectWriteOverride = (options = {}) =>
+    options.useDurableSignalQueue === false && process.env.ALLOW_LEGACY_SIGNAL_DIRECT_WRITE === '1';
 
 let io = null;
 const FUTURES_BASE_URL = 'https://fapi.binance.com';
@@ -6107,7 +6110,33 @@ exports.closeGridLegMarketOrder = async ({
     };
 }
 
-const cancelBoundExitOrders = async (uid, symbol, pid, excludeType = null) => {
+const cancelBoundExitOrders = async (uid, symbol, pid, excludeType = null, options = {}) => {
+    if(!isLegacySignalDirectWriteOverride(options)){
+        const summary = await orderIntentQueue.enqueueSignalCancelIntent({
+            intentType: orderIntentQueue.INTENT_TYPE.SIGNAL_PROTECTION_CANCEL,
+            routePath: 'signal-runtime-bound-cancel',
+            payload: {
+                uid,
+                pid,
+                symbol,
+                targetType: 'PROTECTION',
+                excludeType,
+                reason: 'SIGNAL_PROTECTION_CANCEL',
+            },
+        });
+        exports.msgAdd(
+            'signalCancelQueue',
+            summary.inserted ? 'SIGNAL_CANCEL_INTENT_PENDING' : 'SIGNAL_CANCEL_INTENT_DUPLICATE',
+            `pid:${pid}, symbol:${symbol}, excludeType:${excludeType || 'NONE'}, duplicate:${summary.duplicate || 0}`,
+            uid,
+            pid,
+            null,
+            symbol,
+            null
+        );
+        return summary.inserted ? 1 : 0;
+    }
+
     const openOrders = await listOpenBoundExitOrders(uid, symbol, pid);
     if(openOrders.length === 0){
         return 0;
@@ -8115,7 +8144,7 @@ const placeBoundExitOrder = async ({
     }
 }
 
-const syncLiveBoundExitOrders = async ({ uid, pid, symbol, entryOrderId = null, entryPrice = 0, qty = 0 }) => {
+const syncLiveBoundExitOrders = async ({ uid, pid, symbol, entryOrderId = null, entryPrice = 0, qty = 0, useDurableSignalQueue = true }) => {
     if(!uid || !pid || !symbol){
         return false;
     }
@@ -8308,6 +8337,45 @@ const syncLiveBoundExitOrders = async ({ uid, pid, symbol, entryOrderId = null, 
                 'syncLiveBoundExitOrd',
                 'BOUND_LOCAL_IDEMPOTENT_OK',
                 `pid:${pid}, symbol:${symbol}, entryTid:${entryTid}, boundTargets:${expectedBoundTargets.length}`,
+                uid,
+                pid,
+                entryTid,
+                symbol,
+                resolvedSignalType || null
+            );
+            return true;
+        }
+
+        if(!isLegacySignalDirectWriteOverride({ useDurableSignalQueue })){
+            const isSplitTp = nextBoundType === 'SPLITTP';
+            const summary = await orderIntentQueue.enqueueSignalProtectionIntent({
+                intentType: isSplitTp
+                    ? orderIntentQueue.INTENT_TYPE.SIGNAL_SPLIT_TP_CREATE
+                    : orderIntentQueue.INTENT_TYPE.SIGNAL_PROTECTION_CREATE,
+                routePath: 'signal-runtime-bound-protection',
+                sourceEventId: entryTid || null,
+                payload: {
+                    uid,
+                    pid,
+                    symbol,
+                    side: resolvedSignalType,
+                    positionSide,
+                    entryOrderId: entryTid,
+                    entryPrice: exactPrice,
+                    qty: resolvedQty,
+                    ownedQty: resolvedQty,
+                    takeProfitPrice: profitPrice,
+                    stopPrice,
+                    splitStageQty,
+                    splitStageIndex: Number(splitContext?.stageIndex || 0),
+                    boundType: nextBoundType,
+                    reason: isSplitTp ? 'SIGNAL_SPLIT_TP_CREATE' : 'SIGNAL_PROTECTION_CREATE',
+                },
+            });
+            exports.msgAdd(
+                'signalProtectionQueue',
+                summary.inserted ? 'SIGNAL_PROTECTION_INTENT_PENDING' : 'SIGNAL_PROTECTION_INTENT_DUPLICATE',
+                `pid:${pid}, symbol:${symbol}, entryTid:${entryTid}, boundType:${nextBoundType}, duplicate:${summary.duplicate || 0}`,
                 uid,
                 pid,
                 entryTid,
@@ -9880,12 +9948,20 @@ const cancelOrder = async (symbol, type, leftId, rigthId) => {
     throw new Error('LEGACY_CANCEL_WRITE_DISABLED');
 }
 const cancelOrderAll2 = async (uid, symbol, leftId = null, rigthId = null) => {
-    if(leftId){
-        await cancelFuturesOrder({ uid, action: 'WRITE_CANCEL_ORDER', symbol, orderId: leftId, caller: 'coin.cancelOrderAll2.left' }, symbol, leftId).catch((err)=>{});
+    const targets = [leftId, rigthId].filter(Boolean);
+    for(const target of targets){
+        exports.msgAdd(
+            'signalCancelQueue',
+            'SIGNAL_CANCEL_DIRECT_DISABLED',
+            `legacy cancelOrderAll2 direct cancel blocked; target:${target}`,
+            uid,
+            null,
+            target,
+            symbol,
+            null
+        );
     }
-    if(rigthId){
-        await cancelFuturesOrder({ uid, action: 'WRITE_CANCEL_ORDER', symbol, orderId: rigthId, caller: 'coin.cancelOrderAll2.right' }, symbol, rigthId).catch((err)=>{});
-    }
+    return 0;
 }
 
 const cancelOrderAll = async (symbol, leftId = null, rigthId = null) => {
@@ -10577,7 +10653,7 @@ exports.getUserPrice = async () => {
 //     }
 // }
 
-exports.sendForcing = async (type = null, symbol = null, side = null, userQty = null, uid = null, pid = null, r_tid = null, limitST = 'N') => {
+exports.sendForcing = async (type = null, symbol = null, side = null, userQty = null, uid = null, pid = null, r_tid = null, limitST = 'N', options = {}) => {
     // type :: MANUAL / TIME / REVERSE (legacy FORCING still accepted for compatibility)
 
     const sendData = {
@@ -10585,6 +10661,70 @@ exports.sendForcing = async (type = null, symbol = null, side = null, userQty = 
         errCode: null,
         errMsg: null,
         errAction: null,
+    }
+
+    if(!isLegacySignalDirectWriteOverride(options)){
+        try{
+            const normalizedType = String(type || 'FORCED_CLOSE').trim().toUpperCase();
+            const intentType = normalizedType.includes('TIME')
+                ? orderIntentQueue.INTENT_TYPE.SIGNAL_STOP_TIME_EXIT
+                : orderIntentQueue.INTENT_TYPE.SIGNAL_FORCED_CLOSE;
+            const positionSide = getSignalPositionSide(side);
+            const closeClientOrderId = orderIntentQueue.buildSignalCloseClientOrderId({
+                uid,
+                pid,
+                symbol,
+                side,
+                positionSide,
+                qty: Number(userQty || 0),
+                reason: normalizedType,
+                rTid: r_tid,
+            });
+            const summary = await orderIntentQueue.enqueueSignalCloseIntent({
+                intentType,
+                routePath: 'signal-runtime-close',
+                sourceEventId: r_tid || null,
+                payload: {
+                    uid,
+                    pid,
+                    symbol,
+                    side,
+                    positionSide,
+                    qty: Number(userQty || 0),
+                    ownedQtyBasis: Number(userQty || 0),
+                    reason: normalizedType,
+                    rTid: r_tid,
+                    limitST,
+                    closeClientOrderId,
+                },
+            });
+            exports.msgAdd(
+                'signalCloseQueue',
+                summary.inserted ? 'SIGNAL_CLOSE_INTENT_PENDING' : 'SIGNAL_CLOSE_INTENT_DUPLICATE',
+                `pid:${pid}, symbol:${symbol}, type:${normalizedType}, clientOrderId:${summary.intent?.closeClientOrderId || closeClientOrderId}, duplicate:${summary.duplicate || 0}`,
+                uid,
+                pid,
+                r_tid,
+                symbol,
+                side
+            );
+            return {
+                ...sendData,
+                queued: true,
+                queueStatus: summary.inserted ? 'PENDING' : 'DUPLICATE',
+                errAction: 'queued',
+                errMsg: summary.inserted ? 'signal close intent queued' : 'signal close intent duplicate',
+                intentSummary: summary,
+            };
+        }catch(queueError){
+            return {
+                ...sendData,
+                queued: false,
+                errCode: 'SIGNAL_CLOSE_QUEUE_ERROR',
+                errMsg: queueError?.message || String(queueError),
+                errAction: 'queue-error',
+            };
+        }
     }
 
     if(!(await ensureBinanceApiClient(uid))){

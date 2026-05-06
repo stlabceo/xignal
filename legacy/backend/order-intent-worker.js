@@ -82,6 +82,34 @@ const SIGNAL_ENTRY_QUEUE_STATE = Object.freeze({
   STALE: "SIGNAL_ENTRY_STALE",
 });
 
+const SIGNAL_PROTECTION_QUEUE_STATE = Object.freeze({
+  PENDING: "SIGNAL_PROTECTION_INTENT_PENDING",
+  RUNNING: "SIGNAL_PROTECTION_RUNNING",
+  PROTECTED: "SIGNAL_PROTECTION_PROTECTED",
+  PARTIAL: "SIGNAL_PROTECTION_PARTIAL",
+  FAILED: "SIGNAL_PROTECTION_FAILED",
+  BLOCKED_OWNERSHIP: "SIGNAL_PROTECTION_BLOCKED_OWNERSHIP",
+  BLOCKED_REDIS: "SIGNAL_PROTECTION_BLOCKED_REDIS",
+});
+
+const SIGNAL_CANCEL_QUEUE_STATE = Object.freeze({
+  PENDING: "SIGNAL_CANCEL_INTENT_PENDING",
+  RUNNING: "SIGNAL_CANCEL_RUNNING",
+  VERIFY_PENDING: "SIGNAL_CANCEL_VERIFY_PENDING",
+  FAILED_ACTIVE_ORDER_REMAINS: "SIGNAL_CANCEL_FAILED_ACTIVE_ORDER_REMAINS",
+  VERIFIED_GONE: "SIGNAL_CANCEL_VERIFIED_GONE",
+  BLOCKED_REDIS: "SIGNAL_CANCEL_BLOCKED_REDIS",
+});
+
+const SIGNAL_CLOSE_QUEUE_STATE = Object.freeze({
+  PENDING: "SIGNAL_CLOSE_INTENT_PENDING",
+  RUNNING: "SIGNAL_CLOSE_RUNNING",
+  FAILED: "SIGNAL_CLOSE_FAILED",
+  BLOCKED_OWNERSHIP: "SIGNAL_CLOSE_BLOCKED_OWNERSHIP",
+  RESERVED_DUPLICATE: "SIGNAL_CLOSE_RESERVED_DUPLICATE",
+  BLOCKED_REDIS: "SIGNAL_CLOSE_BLOCKED_REDIS",
+});
+
 const getLegPrefix = (leg) => (String(leg || "").toUpperCase() === "SHORT" ? "short" : "long");
 
 const blockIntentByActualDispatchGate = async ({
@@ -499,6 +527,518 @@ const processSignalMarketEntryIntent = async (intent, options = {}) => {
     defaultProjectionState: SIGNAL_ENTRY_QUEUE_STATE.BLOCKED_DISPATCH_GATE,
     defaultReason: "SIGNAL_ENTRY_ACTUAL_DISPATCH_GATE_PASSED_HANDLER_NOT_ENABLED",
     errorMessage: "Signal market entry worker actual dispatch blocked by final gate.",
+  });
+};
+
+const updateSignalQueueProjection = async ({ payload = {}, state, reason = null } = {}) => ({
+  state,
+  reason,
+  uid: Number(payload.uid || 0),
+  pid: Number(payload.pid || payload.id || 0),
+  symbol: payload.symbol || null,
+  positionSide: payload.positionSide || null,
+});
+
+const deriveSignalProtectionClientOrderId = ({ payload = {}, boundType = "PROFIT" } = {}) => {
+  const normalizedBoundType = String(boundType || "PROFIT").trim().toUpperCase();
+  const entryIdentity = payload.entryOrderId || payload.entryClientOrderId || payload.sourceOrderId || payload.sourceTradeId || "BOUND";
+  return `${normalizedBoundType}_${Number(payload.uid || 0)}_${Number(payload.pid || 0)}_${entryIdentity}`;
+};
+
+const normalizeSignalProtectionMockOrder = ({ payload, kind, mockOrder }) => {
+  if (mockOrder === false) {
+    return { errorCode: "MOCK_SIGNAL_PROTECTION_REJECTED", errorMessage: `${kind} rejected by mock` };
+  }
+  if (mockOrder && typeof mockOrder === "object") {
+    return mockOrder;
+  }
+  const boundType = kind === "TP"
+    ? (String(payload.boundType || "").toUpperCase() === "SPLITTP" ? "SPLITTP" : "PROFIT")
+    : "STOP";
+  const clientOrderId = deriveSignalProtectionClientOrderId({ payload, boundType });
+  return {
+    clientOrderId,
+    orderId: `MOCK_${clientOrderId}`,
+  };
+};
+
+const buildSignalProtectionResultState = (outcome) => {
+  if (outcome.protected) {
+    return SIGNAL_PROTECTION_QUEUE_STATE.PROTECTED;
+  }
+  return outcome.partial ? SIGNAL_PROTECTION_QUEUE_STATE.PARTIAL : SIGNAL_PROTECTION_QUEUE_STATE.FAILED;
+};
+
+const syncSignalProtectionReservationsForIntent = async ({ payload = {}, result = {}, qty = 0 } = {}) => {
+  const reservations = [];
+  if (result.takeProfit?.clientOrderId) {
+    reservations.push({
+      clientOrderId: result.takeProfit.clientOrderId,
+      sourceOrderId: result.takeProfit.sourceOrderId || result.takeProfit.orderId || null,
+      actualOrderId: result.takeProfit.orderId || null,
+      reservationKind: String(payload.boundType || "").toUpperCase() === "SPLITTP" ? "BOUND_SPLIT_TP" : "BOUND_PROFIT",
+      reservedQty: String(payload.boundType || "").toUpperCase() === "SPLITTP"
+        ? Number(payload.splitStageQty || qty || 0)
+        : qty,
+      note: "signal protection intent take-profit",
+    });
+  }
+  if (result.stop?.clientOrderId) {
+    reservations.push({
+      clientOrderId: result.stop.clientOrderId,
+      sourceOrderId: result.stop.sourceOrderId || result.stop.orderId || null,
+      actualOrderId: result.stop.orderId || null,
+      reservationKind: "BOUND_STOP",
+      reservedQty: qty,
+      note: "signal protection intent stop-loss",
+    });
+  }
+
+  return await pidPositionLedger.replaceExitReservations({
+    uid: payload.uid,
+    pid: payload.pid,
+    strategyCategory: "signal",
+    symbol: payload.symbol,
+    positionSide: payload.positionSide,
+    reservations,
+  });
+};
+
+const processSignalProtectionIntent = async (intent, options = {}) => {
+  const env = options.env || process.env;
+  const payload = intent?.payload?.protection || intent?.payload || {};
+  const lockRedisClient = Object.prototype.hasOwnProperty.call(options, "redisClient")
+    ? options.redisClient
+    : redisClient;
+  const redisGate = liveWriteSafetyGate.evaluateRedisLockUnavailable({
+    env,
+    liveScope: true,
+    strategyCategory: "signal",
+    scope: "ORDER_INTENT_WORKER",
+    lockKey: `order-intent-worker:signal-protection:${intent.fifoKey || intent.id}`,
+  });
+
+  if (!liveWriteSafetyGate.isRedisClientReady(lockRedisClient) && !redisGate.allowed) {
+    await updateSignalQueueProjection({ payload, state: SIGNAL_PROTECTION_QUEUE_STATE.BLOCKED_REDIS, reason: redisGate.reason }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(redisGate.reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: SIGNAL_PROTECTION_QUEUE_STATE.BLOCKED_REDIS,
+      }),
+      errorCode: redisGate.reason,
+      errorMessage: "Redis lock unavailable; live signal protection worker write blocked.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: redisGate.reason };
+  }
+
+  const ownershipReadiness = options.ownershipReadiness || await positionOwnership.getOwnershipReadiness().catch((error) => ({
+    enabled: false,
+    error: error?.message || String(error),
+  }));
+  const ownershipGate = liveWriteSafetyGate.evaluateOwnershipGuard({
+    env,
+    strategyCategory: "signal",
+    uid: intent.uid,
+    pid: intent.pid,
+    symbol: payload.symbol || null,
+    positionSide: payload.positionSide || null,
+    ownershipEnabled: ownershipReadiness.enabled === true,
+  });
+  if (!ownershipGate.allowed) {
+    await updateSignalQueueProjection({ payload, state: SIGNAL_PROTECTION_QUEUE_STATE.BLOCKED_OWNERSHIP, reason: ownershipGate.reason }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(ownershipGate.reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: SIGNAL_PROTECTION_QUEUE_STATE.BLOCKED_OWNERSHIP,
+      }),
+      errorCode: ownershipGate.reason,
+      errorMessage: `DB-backed PID ownership unavailable; live signal protection worker write blocked. status:${ownershipReadiness.status || "UNKNOWN"}`,
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: ownershipGate.reason };
+  }
+
+  const ownershipQty = await positionOwnership.resolveOwnedCloseQty({
+    uid: intent.uid,
+    pid: intent.pid,
+    strategyCategory: "signal",
+    symbol: payload.symbol,
+    positionSide: payload.positionSide,
+    requestedQty: payload.ownedQty || payload.qty,
+  });
+  if (!ownershipQty.allowed || !(Number(ownershipQty.finalCloseQty || 0) > 0)) {
+    const reason = ownershipQty.reason || "OWNERSHIP_BLOCKED";
+    await updateSignalQueueProjection({ payload, state: SIGNAL_PROTECTION_QUEUE_STATE.BLOCKED_OWNERSHIP, reason }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: SIGNAL_PROTECTION_QUEUE_STATE.BLOCKED_OWNERSHIP,
+        ownership: ownershipQty,
+      }),
+      errorCode: reason,
+      errorMessage: "Signal protection worker blocked by PID-owned qty guard.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason };
+  }
+
+  if (options.dryRun === true || options.mock === true) {
+    const mock = options.mockSignalProtectionResult || options.mockProtectionResult || {};
+    const takeProfit = normalizeSignalProtectionMockOrder({
+      payload,
+      kind: "TP",
+      mockOrder: Object.prototype.hasOwnProperty.call(mock, "takeProfit") ? mock.takeProfit : undefined,
+    });
+    const stop = normalizeSignalProtectionMockOrder({
+      payload,
+      kind: "STOP",
+      mockOrder: Object.prototype.hasOwnProperty.call(mock, "stop") ? mock.stop : undefined,
+    });
+    const outcome = gridProtectionGuarantee.classifyProtectionOutcome({ takeProfit, stop });
+    const projectionState = buildSignalProtectionResultState(outcome);
+    const result = {
+      ok: outcome.protected,
+      dryRun: options.dryRun === true,
+      mock: options.mock === true,
+      intentType: intent.intentType,
+      fifoKey: intent.fifoKey,
+      projectionState,
+      protectionState: outcome.state,
+      protectionReason: outcome.reason,
+      missingProtection: outcome.missing,
+      protectionQty: ownershipQty.finalCloseQty,
+      takeProfit,
+      stop,
+    };
+    await syncSignalProtectionReservationsForIntent({ payload, result, qty: ownershipQty.finalCloseQty }).catch(() => {});
+    await updateSignalQueueProjection({ payload, state: projectionState, reason: outcome.reason }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: outcome.protected ? orderIntentQueue.STATUS.DONE : orderIntentQueue.STATUS.BLOCKED,
+      result,
+      errorCode: outcome.protected ? null : outcome.reason,
+      errorMessage: outcome.protected ? null : `Signal protection critical:${outcome.reason}`,
+    });
+    return {
+      processed: true,
+      status: outcome.protected ? orderIntentQueue.STATUS.DONE : orderIntentQueue.STATUS.BLOCKED,
+      reason: outcome.protected ? SIGNAL_PROTECTION_QUEUE_STATE.PROTECTED : outcome.reason,
+      projectionState,
+    };
+  }
+
+  return await blockIntentByActualDispatchGate({
+    intent,
+    payload,
+    options,
+    projectionUpdater: updateSignalQueueProjection,
+    defaultProjectionState: SIGNAL_PROTECTION_QUEUE_STATE.RUNNING,
+    defaultReason: "SIGNAL_PROTECTION_ACTUAL_DISPATCH_GATE_PASSED_HANDLER_NOT_ENABLED",
+    errorMessage: "Signal protection worker actual dispatch blocked by final gate.",
+  });
+};
+
+const processSignalCancelIntent = async (intent, options = {}) => {
+  const env = options.env || process.env;
+  const payload = intent?.payload?.cancel || intent?.payload || {};
+  const lockRedisClient = Object.prototype.hasOwnProperty.call(options, "redisClient")
+    ? options.redisClient
+    : redisClient;
+  const redisGate = liveWriteSafetyGate.evaluateRedisLockUnavailable({
+    env,
+    liveScope: true,
+    strategyCategory: "signal",
+    scope: "ORDER_INTENT_WORKER",
+    lockKey: `order-intent-worker:signal-cancel:${intent.fifoKey || intent.id}`,
+  });
+
+  if (!liveWriteSafetyGate.isRedisClientReady(lockRedisClient) && !redisGate.allowed) {
+    await updateSignalQueueProjection({ payload, state: SIGNAL_CANCEL_QUEUE_STATE.BLOCKED_REDIS, reason: redisGate.reason }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(redisGate.reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: SIGNAL_CANCEL_QUEUE_STATE.BLOCKED_REDIS,
+      }),
+      errorCode: redisGate.reason,
+      errorMessage: "Redis lock unavailable; live signal cancel worker write blocked.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: redisGate.reason };
+  }
+
+  const ownershipReadiness = options.ownershipReadiness || await positionOwnership.getOwnershipReadiness().catch((error) => ({
+    enabled: false,
+    error: error?.message || String(error),
+  }));
+  const ownershipGate = liveWriteSafetyGate.evaluateOwnershipGuard({
+    env,
+    strategyCategory: "signal",
+    uid: intent.uid,
+    pid: intent.pid,
+    symbol: payload.symbol || null,
+    positionSide: payload.positionSide || null,
+    ownershipEnabled: ownershipReadiness.enabled === true,
+  });
+  if (!ownershipGate.allowed) {
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(ownershipGate.reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: SIGNAL_CANCEL_QUEUE_STATE.VERIFY_PENDING,
+      }),
+      errorCode: ownershipGate.reason,
+      errorMessage: "DB-backed PID ownership unavailable; live signal cancel worker write blocked.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: ownershipGate.reason };
+  }
+
+  if (options.dryRun === true || options.mock === true) {
+    const mock = options.mockSignalCancelResult || options.mockCancelResult || {};
+    const target = {
+      targetOrderId: payload.targetOrderId || null,
+      targetClientOrderId: payload.targetClientOrderId || null,
+    };
+    let cancelResponse = { ok: mock.ok !== false, notFound: mock.notFound === true };
+    let readResult = { openOrders: [] };
+    let verifyError = null;
+    let staleRead = mock.staleRead === true;
+    if (mock.timeout === true || mock.verifyPending === true) {
+      readResult = null;
+    } else if (mock.httpStatus === 429 || mock.httpStatus === 418) {
+      verifyError = { response: { status: mock.httpStatus, headers: mock.retryAfter ? { "retry-after": mock.retryAfter } : {} } };
+    } else if (mock.openOrderStillPresent === true || mock.ok === false) {
+      readResult = {
+        openOrders: [
+          {
+            orderId: payload.targetOrderId || "MOCK_SIGNAL_ACTIVE_ORDER",
+            clientOrderId: payload.targetClientOrderId || "MOCK_SIGNAL_ACTIVE_CLIENT_ORDER",
+            status: "NEW",
+          },
+        ],
+      };
+      cancelResponse = { ...cancelResponse, ok: false };
+    }
+    const verification = cancelVerificationPolicy.classifyCancelVerification({
+      cancelResponse,
+      readResult,
+      target,
+      error: verifyError,
+      attemptCount: mock.timeout || mock.verifyPending ? 2 : 1,
+      maxAttempts: 2,
+      staleRead,
+    });
+    const status = verification.ok && verification.terminal
+      ? orderIntentQueue.STATUS.DONE
+      : orderIntentQueue.STATUS.BLOCKED;
+    const projectionState = verification.state === cancelVerificationPolicy.CANCEL_VERIFY_STATE.VERIFIED_GONE
+      ? SIGNAL_CANCEL_QUEUE_STATE.VERIFIED_GONE
+      : verification.state === cancelVerificationPolicy.CANCEL_VERIFY_STATE.FAILED_ACTIVE_ORDER_REMAINS
+        ? SIGNAL_CANCEL_QUEUE_STATE.FAILED_ACTIVE_ORDER_REMAINS
+        : SIGNAL_CANCEL_QUEUE_STATE.VERIFY_PENDING;
+    const reason = mock.reason || verification.reason;
+    await updateSignalQueueProjection({ payload, state: projectionState, reason }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status,
+      result: {
+        ok: status === orderIntentQueue.STATUS.DONE,
+        dryRun: options.dryRun === true,
+        mock: options.mock === true,
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState,
+        reason,
+        verification,
+        targetType: payload.targetType || null,
+        targetClientOrderId: payload.targetClientOrderId || null,
+      },
+      errorCode: status === orderIntentQueue.STATUS.DONE ? null : reason,
+      errorMessage: status === orderIntentQueue.STATUS.DONE ? null : `Signal cancel not verified:${reason}`,
+    });
+    return { processed: true, status, reason, projectionState };
+  }
+
+  return await blockIntentByActualDispatchGate({
+    intent,
+    payload,
+    options,
+    projectionUpdater: updateSignalQueueProjection,
+    defaultProjectionState: SIGNAL_CANCEL_QUEUE_STATE.RUNNING,
+    defaultReason: "SIGNAL_CANCEL_ACTUAL_DISPATCH_GATE_PASSED_HANDLER_NOT_ENABLED",
+    errorMessage: "Signal cancel worker actual dispatch blocked by final gate.",
+  });
+};
+
+const processSignalCloseIntent = async (intent, options = {}) => {
+  const env = options.env || process.env;
+  const payload = intent?.payload?.close || intent?.payload || {};
+  const lockRedisClient = Object.prototype.hasOwnProperty.call(options, "redisClient")
+    ? options.redisClient
+    : redisClient;
+  const redisGate = liveWriteSafetyGate.evaluateRedisLockUnavailable({
+    env,
+    liveScope: true,
+    strategyCategory: "signal",
+    scope: "ORDER_INTENT_WORKER",
+    lockKey: `order-intent-worker:signal-close:${intent.fifoKey || intent.id}`,
+  });
+
+  if (!liveWriteSafetyGate.isRedisClientReady(lockRedisClient) && !redisGate.allowed) {
+    await updateSignalQueueProjection({ payload, state: SIGNAL_CLOSE_QUEUE_STATE.BLOCKED_REDIS, reason: redisGate.reason }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(redisGate.reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: SIGNAL_CLOSE_QUEUE_STATE.BLOCKED_REDIS,
+      }),
+      errorCode: redisGate.reason,
+      errorMessage: "Redis lock unavailable; live signal close worker write blocked.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: redisGate.reason };
+  }
+
+  const ownershipReadiness = options.ownershipReadiness || await positionOwnership.getOwnershipReadiness().catch((error) => ({
+    enabled: false,
+    error: error?.message || String(error),
+  }));
+  const ownershipGate = liveWriteSafetyGate.evaluateOwnershipGuard({
+    env,
+    strategyCategory: "signal",
+    uid: intent.uid,
+    pid: intent.pid,
+    symbol: payload.symbol || null,
+    positionSide: payload.positionSide || null,
+    ownershipEnabled: ownershipReadiness.enabled === true,
+  });
+  if (!ownershipGate.allowed) {
+    await updateSignalQueueProjection({ payload, state: SIGNAL_CLOSE_QUEUE_STATE.BLOCKED_OWNERSHIP, reason: ownershipGate.reason }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(ownershipGate.reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: SIGNAL_CLOSE_QUEUE_STATE.BLOCKED_OWNERSHIP,
+      }),
+      errorCode: ownershipGate.reason,
+      errorMessage: `DB-backed PID ownership unavailable; live signal close worker write blocked. status:${ownershipReadiness.status || "UNKNOWN"}`,
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: ownershipGate.reason };
+  }
+
+  const requestedQty = Number(payload.qty || payload.ownedQtyBasis || 0);
+  const ownershipQty = await positionOwnership.resolveOwnedCloseQty({
+    uid: intent.uid,
+    pid: intent.pid,
+    strategyCategory: "signal",
+    symbol: payload.symbol,
+    positionSide: payload.positionSide,
+    requestedQty,
+  });
+  const closeQty = Number(ownershipQty.finalCloseQty || 0);
+  if (!ownershipQty.allowed || !(closeQty > 0)) {
+    const projectionState = ownershipQty.reason === "OWNERSHIP_CLOSE_QTY_RESERVED"
+      ? SIGNAL_CLOSE_QUEUE_STATE.RESERVED_DUPLICATE
+      : SIGNAL_CLOSE_QUEUE_STATE.BLOCKED_OWNERSHIP;
+    await updateSignalQueueProjection({ payload, state: projectionState, reason: ownershipQty.reason || "OWNERSHIP_BLOCKED" }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(ownershipQty.reason || "OWNERSHIP_BLOCKED", {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState,
+        ownership: ownershipQty,
+      }),
+      errorCode: ownershipQty.reason || "OWNERSHIP_BLOCKED",
+      errorMessage: "Signal close worker blocked by PID-owned qty guard.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: ownershipQty.reason || "OWNERSHIP_BLOCKED" };
+  }
+
+  if (ownershipQty.overRequested || requestedQty > closeQty + 1e-9) {
+    await updateSignalQueueProjection({ payload, state: SIGNAL_CLOSE_QUEUE_STATE.BLOCKED_OWNERSHIP, reason: "SIGNAL_CLOSE_OVER_OWNED_QTY_BLOCKED" }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult("SIGNAL_CLOSE_OVER_OWNED_QTY_BLOCKED", {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: SIGNAL_CLOSE_QUEUE_STATE.BLOCKED_OWNERSHIP,
+        requestedQty,
+        closeQty,
+        ownership: ownershipQty,
+      }),
+      errorCode: "SIGNAL_CLOSE_OVER_OWNED_QTY_BLOCKED",
+      errorMessage: "Signal close requested qty exceeds PID-owned available qty.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: "SIGNAL_CLOSE_OVER_OWNED_QTY_BLOCKED" };
+  }
+
+  if (options.dryRun === true || options.mock === true) {
+    const mock = options.mockSignalCloseResult || options.mockCloseResult || {};
+    if (mock.ok === false) {
+      const reason = mock.reason || "SIGNAL_CLOSE_SUBMIT_FAILED";
+      await updateSignalQueueProjection({ payload, state: SIGNAL_CLOSE_QUEUE_STATE.FAILED, reason }).catch(() => {});
+      await orderIntentQueue.completeIntent({
+        id: intent.id,
+        status: orderIntentQueue.STATUS.FAILED,
+        result: {
+          ok: false,
+          dryRun: options.dryRun === true,
+          mock: options.mock === true,
+          intentType: intent.intentType,
+          fifoKey: intent.fifoKey,
+          projectionState: SIGNAL_CLOSE_QUEUE_STATE.FAILED,
+          closeClientOrderId: payload.closeClientOrderId || null,
+          reason,
+        },
+        errorCode: SIGNAL_CLOSE_QUEUE_STATE.FAILED,
+        errorMessage: `Signal close failed:${reason}`,
+      });
+      return { processed: true, status: orderIntentQueue.STATUS.FAILED, reason };
+    }
+
+    await updateSignalQueueProjection({ payload, state: SIGNAL_CLOSE_QUEUE_STATE.RUNNING, reason: payload.reason || "SIGNAL_CLOSE_RUNNING" }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.DONE,
+      result: {
+        ok: true,
+        dryRun: options.dryRun === true,
+        mock: options.mock === true,
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: SIGNAL_CLOSE_QUEUE_STATE.RUNNING,
+        closeClientOrderId: payload.closeClientOrderId || null,
+        closeQty,
+        ownership: ownershipQty,
+      },
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.DONE, reason: SIGNAL_CLOSE_QUEUE_STATE.RUNNING };
+  }
+
+  return await blockIntentByActualDispatchGate({
+    intent,
+    payload,
+    options,
+    projectionUpdater: updateSignalQueueProjection,
+    defaultProjectionState: SIGNAL_CLOSE_QUEUE_STATE.RUNNING,
+    defaultReason: "SIGNAL_CLOSE_ACTUAL_DISPATCH_GATE_PASSED_HANDLER_NOT_ENABLED",
+    errorMessage: "Signal close worker actual dispatch blocked by final gate.",
   });
 };
 
@@ -1269,6 +1809,27 @@ const processIntent = async (intent, options = {}) => {
     return await processSignalMarketEntryIntent(intent, options);
   }
 
+  if (
+    intent.intentType === orderIntentQueue.INTENT_TYPE.SIGNAL_PROTECTION_CREATE ||
+    intent.intentType === orderIntentQueue.INTENT_TYPE.SIGNAL_SPLIT_TP_CREATE
+  ) {
+    return await processSignalProtectionIntent(intent, options);
+  }
+
+  if (
+    intent.intentType === orderIntentQueue.INTENT_TYPE.SIGNAL_PROTECTION_CANCEL ||
+    intent.intentType === orderIntentQueue.INTENT_TYPE.SIGNAL_CLEANUP_FINALIZE
+  ) {
+    return await processSignalCancelIntent(intent, options);
+  }
+
+  if (
+    intent.intentType === orderIntentQueue.INTENT_TYPE.SIGNAL_FORCED_CLOSE ||
+    intent.intentType === orderIntentQueue.INTENT_TYPE.SIGNAL_STOP_TIME_EXIT
+  ) {
+    return await processSignalCloseIntent(intent, options);
+  }
+
   if (intent.intentType === orderIntentQueue.INTENT_TYPE.GRID_PROTECTION_CREATE) {
     return await processGridProtectionCreateIntent(intent, options);
   }
@@ -1360,6 +1921,9 @@ module.exports = {
   processOneIntent,
   processIntent,
   processSignalMarketEntryIntent,
+  processSignalProtectionIntent,
+  processSignalCancelIntent,
+  processSignalCloseIntent,
   processGridProtectionCreateIntent,
   processGridReentryCreateIntent,
   processGridCancelIntent,
@@ -1369,6 +1933,9 @@ module.exports = {
   CANCEL_QUEUE_STATE,
   CLOSE_QUEUE_STATE,
   SIGNAL_ENTRY_QUEUE_STATE,
+  SIGNAL_PROTECTION_QUEUE_STATE,
+  SIGNAL_CANCEL_QUEUE_STATE,
+  SIGNAL_CLOSE_QUEUE_STATE,
   startOrderIntentWorker,
   stopOrderIntentWorker,
   getOrderIntentWorkerHealth,
