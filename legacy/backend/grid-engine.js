@@ -3264,6 +3264,50 @@ const armMissingLiveEntries = async (row) => {
   return changed;
 };
 
+const enqueueLiveGridArmIntentForRuntimeRow = async (row) => {
+  if (!row?.uid || !row?.id || !row?.symbol) {
+    return false;
+  }
+
+  const payload = {
+    strategySignal: row.strategySignal || "SQZ+GRID",
+    symbol: row.symbol,
+    bunbong: row.bunbong || row.timeframe || null,
+    supportPrice: row.supportPrice,
+    resistancePrice: row.resistancePrice,
+    triggerPrice: row.triggerPrice,
+    signalTime: row.regimeReceivedAt || row.signalTime || row.updatedAt || null,
+  };
+  const previewResult = {
+    targetItems: [
+      {
+        uid: row.uid,
+        pid: row.id,
+        strategyCategory: "grid",
+        strategyMode: "live",
+        strategyName: row.a_name || null,
+        strategySignal: row.strategySignal || payload.strategySignal,
+        symbol: row.symbol,
+        bunbong: row.bunbong || row.timeframe || null,
+        resultCode: "GRID_ARM_PREVIEW",
+        regimeStatus: row.regimeStatus || null,
+      },
+    ],
+  };
+  const summary = await orderIntentQueue.enqueueGridLiveArmIntents({
+    payload,
+    previewResult,
+    routePath: "grid-runtime-live-cycle",
+  });
+  await appendGridRuntimeLog(
+    row,
+    "gridArmQueue",
+    summary.inserted ? "GRID_ARM_INTENT_ENQUEUED" : "GRID_ARM_INTENT_DUPLICATE",
+    `intent:${summary.intents?.[0]?.intentKey || "NONE"}, duplicate:${summary.duplicate || 0}`
+  );
+  return summary.inserted > 0 || summary.duplicate > 0;
+};
+
 const protectExistingOneLegEmergency = async (row) => {
   let handled = false;
   for (const leg of GRID_ENTRY_PAIR_LEGS) {
@@ -3704,7 +3748,10 @@ const runLiveCycleForItem = async (row) => {
       return false;
     }
 
-    return await armMissingLiveEntries(refreshed);
+    if (!canArmEntriesForRow(refreshed)) {
+      return false;
+    }
+    return await enqueueLiveGridArmIntentForRuntimeRow(refreshed);
   });
 };
 

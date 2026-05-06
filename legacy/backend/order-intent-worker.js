@@ -8,6 +8,8 @@ const db = require("./database/connect/config");
 const gridProtectionGuarantee = require("./grid-protection-guarantee");
 const pidPositionLedger = require("./pid-position-ledger");
 const gridReentrySlPolicy = require("./grid-reentry-sl-policy");
+const orderIntentDispatchGate = require("./order-intent-dispatch-gate");
+const cancelVerificationPolicy = require("./cancel-verification-policy");
 
 const DEFAULT_POLL_MS = 500;
 const DEFAULT_STALE_SECONDS = 90;
@@ -52,6 +54,8 @@ const CANCEL_QUEUE_STATE = Object.freeze({
   VERIFY_PENDING: "CANCEL_VERIFY_PENDING",
   FAILED_ACTIVE_ORDER_REMAINS: "CANCEL_FAILED_ACTIVE_ORDER_REMAINS",
   VERIFIED_GONE: "CANCEL_VERIFIED_GONE",
+  BLOCKED_429: "CANCEL_BLOCKED_429",
+  BLOCKED_418: "CANCEL_BLOCKED_418",
   BLOCKED_REDIS: "CANCEL_BLOCKED_REDIS",
 });
 
@@ -67,6 +71,61 @@ const CLOSE_QUEUE_STATE = Object.freeze({
 });
 
 const getLegPrefix = (leg) => (String(leg || "").toUpperCase() === "SHORT" ? "short" : "long");
+
+const blockIntentByActualDispatchGate = async ({
+  intent,
+  payload = {},
+  options = {},
+  projectionUpdater = null,
+  projectionState = null,
+  defaultProjectionState = null,
+  defaultReason = "ORDER_INTENT_ACTUAL_DISPATCH_BLOCKED",
+  errorMessage = "Order intent actual dispatch blocked by final worker gate.",
+} = {}) => {
+  const gate = await orderIntentDispatchGate.evaluateWorkerActualDispatchGate({
+    intent,
+    env: options.env || process.env,
+    redisClient: Object.prototype.hasOwnProperty.call(options, "redisClient")
+      ? options.redisClient
+      : redisClient,
+    mock: options.mock === true,
+    dryRun: options.dryRun === true,
+    isReplay: options.isReplay === true,
+    isDataReplay: options.isDataReplay === true,
+    isSmoke: options.isSmoke === true,
+    dbFingerprint: options.dbFingerprint,
+    dbEvaluation: options.dbEvaluation,
+    ownershipReadiness: options.ownershipReadiness,
+    queueReady: options.queueReady,
+    redisReady: options.redisReady,
+    readGuardSnapshot: options.readGuardSnapshot,
+    timeSyncReady: options.timeSyncReady,
+  });
+
+  const reason = gate.allowed ? defaultReason : gate.reason;
+  const state = projectionState || defaultProjectionState || reason;
+  if (typeof projectionUpdater === "function") {
+    await projectionUpdater({ payload, state, reason }).catch(() => {});
+  }
+  await orderIntentQueue.completeIntent({
+    id: intent.id,
+    status: orderIntentQueue.STATUS.BLOCKED,
+    result: buildBlockResult(reason, {
+      intentType: intent.intentType,
+      fifoKey: intent.fifoKey,
+      projectionState: state,
+      actualDispatchGate: gate,
+    }),
+    errorCode: reason,
+    errorMessage,
+  });
+  return {
+    processed: true,
+    status: orderIntentQueue.STATUS.BLOCKED,
+    reason,
+    actualDispatchGate: gate,
+  };
+};
 
 const loadFreshGridDecisionPriceForWorker = async (symbol, options = {}) => {
   const coin = require("./coin");
@@ -288,23 +347,44 @@ const processGridCancelIntent = async (intent, options = {}) => {
 
   if (options.dryRun === true || options.mock === true) {
     const mock = options.mockCancelResult || {};
-    let status = orderIntentQueue.STATUS.DONE;
-    let projectionState = CANCEL_QUEUE_STATE.VERIFIED_GONE;
-    let reason = "CANCEL_VERIFIED_GONE";
-
+    const target = {
+      targetOrderId: payload.targetOrderId || null,
+      targetClientOrderId: payload.targetClientOrderId || null,
+    };
+    let cancelResponse = { ok: mock.ok !== false, notFound: mock.notFound === true };
+    let readResult = { openOrders: [] };
+    let verifyError = null;
+    let staleRead = mock.staleRead === true;
     if (mock.timeout === true || mock.verifyPending === true) {
-      status = orderIntentQueue.STATUS.BLOCKED;
-      projectionState = CANCEL_QUEUE_STATE.VERIFY_PENDING;
-      reason = "CANCEL_VERIFY_PENDING";
-    } else if (mock.notFound === true && mock.openOrderStillPresent === true) {
-      status = orderIntentQueue.STATUS.BLOCKED;
-      projectionState = CANCEL_QUEUE_STATE.FAILED_ACTIVE_ORDER_REMAINS;
-      reason = "CANCEL_404_ACTIVE_ORDER_REMAINS";
-    } else if (mock.ok === false) {
-      status = orderIntentQueue.STATUS.BLOCKED;
-      projectionState = CANCEL_QUEUE_STATE.FAILED_ACTIVE_ORDER_REMAINS;
-      reason = mock.reason || "CANCEL_FAILED_ACTIVE_ORDER_REMAINS";
+      readResult = null;
+    } else if (mock.httpStatus === 429 || mock.httpStatus === 418) {
+      verifyError = { response: { status: mock.httpStatus, headers: mock.retryAfter ? { "retry-after": mock.retryAfter } : {} } };
+    } else if (mock.openOrderStillPresent === true || mock.ok === false) {
+      readResult = {
+        openOrders: [
+          {
+            orderId: payload.targetOrderId || "MOCK_ACTIVE_ORDER",
+            clientOrderId: payload.targetClientOrderId || "MOCK_ACTIVE_CLIENT_ORDER",
+            status: "NEW",
+          },
+        ],
+      };
+      cancelResponse = { ...cancelResponse, ok: false };
     }
+    const verification = cancelVerificationPolicy.classifyCancelVerification({
+      cancelResponse,
+      readResult,
+      target,
+      error: verifyError,
+      attemptCount: mock.timeout || mock.verifyPending ? 2 : 1,
+      maxAttempts: 2,
+      staleRead,
+    });
+    const status = verification.ok && verification.terminal
+      ? orderIntentQueue.STATUS.DONE
+      : orderIntentQueue.STATUS.BLOCKED;
+    const projectionState = verification.state;
+    const reason = mock.reason || verification.reason;
 
     await updateGridCancelProjection({ payload, state: projectionState, reason }).catch(() => {});
     await orderIntentQueue.completeIntent({
@@ -318,6 +398,7 @@ const processGridCancelIntent = async (intent, options = {}) => {
         fifoKey: intent.fifoKey,
         projectionState,
         reason,
+        verification,
         targetType: payload.targetType || null,
         targetClientOrderId: payload.targetClientOrderId || null,
       },
@@ -327,24 +408,15 @@ const processGridCancelIntent = async (intent, options = {}) => {
     return { processed: true, status, reason, projectionState };
   }
 
-  await updateGridCancelProjection({
+  return await blockIntentByActualDispatchGate({
+    intent,
     payload,
-    state: CANCEL_QUEUE_STATE.RUNNING,
-    reason: "CANCEL_WORKER_LIVE_WRITE_DISABLED",
-  }).catch(() => {});
-  await orderIntentQueue.completeIntent({
-    id: intent.id,
-    status: orderIntentQueue.STATUS.BLOCKED,
-    result: buildBlockResult("CANCEL_WORKER_LIVE_WRITE_DISABLED", {
-      intentType: intent.intentType,
-      fifoKey: intent.fifoKey,
-      projectionState: CANCEL_QUEUE_STATE.RUNNING,
-      note: "actual Binance cancel dispatch is intentionally blocked outside live runtime validation",
-    }),
-    errorCode: "CANCEL_WORKER_LIVE_WRITE_DISABLED",
-    errorMessage: "Grid cancel worker dispatch intentionally blocked for non-mock execution.",
+    options,
+    projectionUpdater: updateGridCancelProjection,
+    defaultProjectionState: CANCEL_QUEUE_STATE.RUNNING,
+    defaultReason: "CANCEL_ACTUAL_DISPATCH_GATE_PASSED_HANDLER_NOT_ENABLED",
+    errorMessage: "Grid cancel worker actual dispatch blocked by final gate.",
   });
-  return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: "CANCEL_WORKER_LIVE_WRITE_DISABLED" };
 };
 
 const processGridCloseIntent = async (intent, options = {}) => {
@@ -514,24 +586,15 @@ const processGridCloseIntent = async (intent, options = {}) => {
     return { processed: true, status: orderIntentQueue.STATUS.DONE, reason: CLOSE_QUEUE_STATE.RUNNING };
   }
 
-  await updateGridCloseProjection({
+  return await blockIntentByActualDispatchGate({
+    intent,
     payload,
-    state: CLOSE_QUEUE_STATE.RUNNING,
-    reason: "CLOSE_WORKER_LIVE_WRITE_DISABLED",
-  }).catch(() => {});
-  await orderIntentQueue.completeIntent({
-    id: intent.id,
-    status: orderIntentQueue.STATUS.BLOCKED,
-    result: buildBlockResult("CLOSE_WORKER_LIVE_WRITE_DISABLED", {
-      intentType: intent.intentType,
-      fifoKey: intent.fifoKey,
-      projectionState: CLOSE_QUEUE_STATE.RUNNING,
-      note: "actual Binance close dispatch is intentionally blocked outside live runtime validation",
-    }),
-    errorCode: "CLOSE_WORKER_LIVE_WRITE_DISABLED",
-    errorMessage: "Grid close worker dispatch intentionally blocked for non-mock execution.",
+    options,
+    projectionUpdater: updateGridCloseProjection,
+    defaultProjectionState: CLOSE_QUEUE_STATE.RUNNING,
+    defaultReason: "CLOSE_ACTUAL_DISPATCH_GATE_PASSED_HANDLER_NOT_ENABLED",
+    errorMessage: "Grid close worker actual dispatch blocked by final gate.",
   });
-  return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: "CLOSE_WORKER_LIVE_WRITE_DISABLED" };
 };
 
 const loadActiveCloseReservationCount = async (payload = {}) => {
@@ -758,19 +821,15 @@ const processGridReentryCreateIntent = async (intent, options = {}) => {
     return { processed: true, status: orderIntentQueue.STATUS.DONE, reason: REENTRY_QUEUE_STATE.PENDING };
   }
 
-  await orderIntentQueue.completeIntent({
-    id: intent.id,
-    status: orderIntentQueue.STATUS.BLOCKED,
-    result: buildBlockResult("REENTRY_WORKER_LIVE_WRITE_DISABLED", {
-      intentType: intent.intentType,
-      fifoKey: intent.fifoKey,
-      projectionState: REENTRY_QUEUE_STATE.RUNNING,
-      note: "actual Binance re-entry dispatch is intentionally blocked outside live runtime validation",
-    }),
-    errorCode: "REENTRY_WORKER_LIVE_WRITE_DISABLED",
-    errorMessage: "Grid re-entry worker dispatch intentionally blocked for non-mock execution.",
+  return await blockIntentByActualDispatchGate({
+    intent,
+    payload,
+    options,
+    projectionUpdater: updateGridReentryProjection,
+    defaultProjectionState: REENTRY_QUEUE_STATE.RUNNING,
+    defaultReason: "REENTRY_ACTUAL_DISPATCH_GATE_PASSED_HANDLER_NOT_ENABLED",
+    errorMessage: "Grid re-entry worker actual dispatch blocked by final gate.",
   });
-  return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: "REENTRY_WORKER_LIVE_WRITE_DISABLED" };
 };
 
 const processGridProtectionCreateIntent = async (intent, options = {}) => {
@@ -913,23 +972,20 @@ const processGridProtectionCreateIntent = async (intent, options = {}) => {
     };
   }
 
-  await orderIntentQueue.completeIntent({
-    id: intent.id,
-    status: orderIntentQueue.STATUS.BLOCKED,
-    result: buildBlockResult("PROTECTION_WORKER_LIVE_WRITE_DISABLED", {
-      intentType: intent.intentType,
-      fifoKey: intent.fifoKey,
-      projectionState: PROTECTION_QUEUE_STATE.RUNNING,
-      note: "actual Binance protection dispatch is intentionally blocked outside live runtime validation",
-    }),
-    errorCode: "PROTECTION_WORKER_LIVE_WRITE_DISABLED",
-    errorMessage: "Grid protection worker dispatch intentionally blocked for non-mock execution.",
+  return await blockIntentByActualDispatchGate({
+    intent,
+    payload,
+    options,
+    projectionUpdater: async ({ payload: projectionPayload, state, reason }) =>
+      updateGridProtectionProjection({
+        payload: projectionPayload,
+        state,
+        outcome: { protected: false, partial: false, reason },
+      }),
+    defaultProjectionState: PROTECTION_QUEUE_STATE.RUNNING,
+    defaultReason: "PROTECTION_ACTUAL_DISPATCH_GATE_PASSED_HANDLER_NOT_ENABLED",
+    errorMessage: "Grid protection worker actual dispatch blocked by final gate.",
   });
-  return {
-    processed: true,
-    status: orderIntentQueue.STATUS.BLOCKED,
-    reason: "PROTECTION_WORKER_LIVE_WRITE_DISABLED",
-  };
 };
 
 const processGridLiveArmIntent = async (intent, options = {}) => {
@@ -999,22 +1055,14 @@ const processGridLiveArmIntent = async (intent, options = {}) => {
     return { processed: true, status: orderIntentQueue.STATUS.DONE, reason: "DRY_RUN" };
   }
 
-  await orderIntentQueue.completeIntent({
-    id: intent.id,
-    status: orderIntentQueue.STATUS.BLOCKED,
-    result: buildBlockResult(liveWriteSafetyGate.REASON.QUEUE_REQUIRED_FOR_LIVE_GRID_WRITE, {
-      intentType: intent.intentType,
-      fifoKey: intent.fifoKey,
-      note: "worker dispatch to Binance is intentionally disabled until durable protection/re-entry/cancel intents are covered",
-    }),
-    errorCode: liveWriteSafetyGate.REASON.QUEUE_REQUIRED_FOR_LIVE_GRID_WRITE,
-    errorMessage: "Grid live arm worker dispatch intentionally blocked.",
+  return await blockIntentByActualDispatchGate({
+    intent,
+    payload: intent?.payload || {},
+    options,
+    defaultProjectionState: "GRID_LIVE_ARM_RUNNING",
+    defaultReason: "GRID_LIVE_ARM_ACTUAL_DISPATCH_GATE_PASSED_HANDLER_NOT_ENABLED",
+    errorMessage: "Grid live arm worker actual dispatch blocked by final gate.",
   });
-  return {
-    processed: true,
-    status: orderIntentQueue.STATUS.BLOCKED,
-    reason: liveWriteSafetyGate.REASON.QUEUE_REQUIRED_FOR_LIVE_GRID_WRITE,
-  };
 };
 
 const processIntent = async (intent, options = {}) => {

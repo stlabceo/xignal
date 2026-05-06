@@ -162,7 +162,7 @@ const loadRowsForUid = async (uid) => {
     redisClient: { set: () => {}, isOpen: true, isReady: true },
   });
   assert.strictEqual(dispatchBlockedResult.status, orderIntentQueue.STATUS.BLOCKED);
-  assert.strictEqual(dispatchBlockedResult.reason, liveWriteSafetyGate.REASON.QUEUE_REQUIRED_FOR_LIVE_GRID_WRITE);
+  assert.strictEqual(dispatchBlockedResult.reason, "ORDER_INTENT_ACTUAL_DISPATCH_DISABLED");
 
   const dryRunUid = uid + 3;
   await orderIntentQueue.deleteQaIntentsByUid(dryRunUid);
