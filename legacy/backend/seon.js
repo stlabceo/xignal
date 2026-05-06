@@ -12,6 +12,7 @@ const pidPositionLedger = require("./pid-position-ledger");
 const strategyControlState = require("./strategy-control-state");
 const signalStrategyIdentity = require("./signal-strategy-identity");
 const adminOrderMonitor = require("./admin-order-monitor");
+const signalStaleTime = require("./signal-stale-time");
 
 const coin = require("./coin");
 const dt = require("./data");
@@ -828,36 +829,11 @@ const getRunnableSignalPlayList = async (mode = 'LIVE') => {
     return Array.isArray(rows) ? rows : [];
 };
 
-const getSignalEntryPendingStaleInfo = (play, now = dayjs.utc()) => {
-    if(String(play?.status || '').trim().toUpperCase() !== 'EXACT_WAIT'){
-        return {
-            stale: false,
-            ageSeconds: 0,
-            signalTime: null,
-            reason: null,
-        };
-    }
-
-    const signalTime = parseDatabaseUtcTime(play?.r_signalTime);
-    if(!signalTime){
-        return {
-            stale: true,
-            ageSeconds: null,
-            signalTime: null,
-            reason: 'missing-signal-time',
-        };
-    }
-
-    const ageSeconds = now.diff(signalTime, 'second', true);
-    return {
-        stale: ageSeconds >= SIGNAL_ENTRY_PENDING_STALE_SECONDS,
-        ageSeconds,
-        signalTime,
-        reason: ageSeconds >= SIGNAL_ENTRY_PENDING_STALE_SECONDS
-            ? 'dispatch-timeout'
-            : null,
-    };
-};
+const getSignalEntryPendingStaleInfo = (play, now = dayjs.utc()) =>
+    signalStaleTime.getSignalEntryPendingStaleInfo(play, {
+        now,
+        staleSeconds: SIGNAL_ENTRY_PENDING_STALE_SECONDS,
+    });
 
 const updateTestPlayStatusIfCurrent = async (playId, expectedStatus, nextStatus) => {
     if(!playId || !expectedStatus || !nextStatus){
