@@ -296,6 +296,139 @@ const armGridWebhookTargetsForMode = async (mode, payload) => {
   return result;
 };
 
+const previewGridWebhookTargetsForMode = async (mode, payload) => {
+  const tableName = getGridWebhookTableName(mode);
+  if (!tableName) {
+    return {
+      matched: 0,
+      armed: 0,
+      ignoredActive: 0,
+      ignoredConflict: 0,
+      ignoredSignal: 0,
+      targetItems: [],
+    };
+  }
+
+  const [rows] = await db.query(
+      `SELECT
+        id,
+        uid,
+        a_name,
+        strategySignal,
+        symbol,
+        bunbong,
+        enabled,
+        regimeStatus,
+        regimeEndReason,
+        longLegStatus,
+        shortLegStatus,
+        longEntryOrderId,
+        shortEntryOrderId,
+        longExitOrderId,
+        shortExitOrderId,
+        longStopOrderId,
+        shortStopOrderId,
+        longQty,
+        shortQty
+      FROM ${tableName}
+      WHERE enabled = 'Y'
+        AND symbol = ?
+        AND bunbong = ?
+      ORDER BY id ASC`,
+    [payload.symbol, payload.bunbong]
+  );
+
+  const strategySignalKey = normalizeGridSignalKey(payload.strategySignal);
+  const result = {
+    matched: 0,
+    armed: 0,
+    ignoredActive: 0,
+    ignoredConflict: 0,
+    ignoredSignal: 0,
+    targetItems: [],
+  };
+
+  for (const row of rows || []) {
+    const rowSignalKey = normalizeGridSignalKey(row.strategySignal);
+    if (rowSignalKey !== strategySignalKey) {
+      result.ignoredSignal += 1;
+      result.targetItems.push(
+        buildGridWebhookTargetItem({
+          row,
+          mode,
+          resultCode: "GRID_SIGNAL_MISMATCH",
+          note: `strategySignal:${row.strategySignal || "-"}`,
+        })
+      );
+      continue;
+    }
+
+    result.matched += 1;
+    const rowRegimeStatus = String(row.regimeStatus || "").trim().toUpperCase();
+    if (rowRegimeStatus && rowRegimeStatus !== "WAITING_WEBHOOK") {
+      result.ignoredActive += 1;
+      result.targetItems.push(
+        buildGridWebhookTargetItem({
+          row,
+          mode,
+          resultCode: "GRID_ACTIVE_IGNORED",
+          note: `regimeStatus:${row.regimeStatus || "-"}`,
+        })
+      );
+      continue;
+    }
+
+    result.armed += 1;
+    result.targetItems.push(
+      buildGridWebhookTargetItem({
+        row,
+        mode,
+        resultCode: "GRID_ARM_PREVIEW",
+        note: "grid-regime-arm-preview",
+        nextRegimeStatus: "ACTIVE",
+      })
+    );
+  }
+
+  return result;
+};
+
+const combineGridWebhookResults = (liveResult, testResult) => ({
+  matched: Number(liveResult.matched || 0) + Number(testResult.matched || 0),
+  armed: Number(liveResult.armed || 0) + Number(testResult.armed || 0),
+  ignoredActive:
+    Number(liveResult.ignoredActive || 0) + Number(testResult.ignoredActive || 0),
+  ignoredConflict:
+    Number(liveResult.ignoredConflict || 0) + Number(testResult.ignoredConflict || 0),
+  ignoredSignal:
+    Number(liveResult.ignoredSignal || 0) + Number(testResult.ignoredSignal || 0),
+  live: {
+    matched: Number(liveResult.matched || 0),
+    armed: Number(liveResult.armed || 0),
+    ignoredActive: Number(liveResult.ignoredActive || 0),
+    ignoredConflict: Number(liveResult.ignoredConflict || 0),
+    ignoredSignal: Number(liveResult.ignoredSignal || 0),
+  },
+  test: {
+    matched: Number(testResult.matched || 0),
+    armed: Number(testResult.armed || 0),
+    ignoredActive: Number(testResult.ignoredActive || 0),
+    ignoredConflict: Number(testResult.ignoredConflict || 0),
+    ignoredSignal: Number(testResult.ignoredSignal || 0),
+  },
+  targetItems: [...(liveResult.targetItems || []), ...(testResult.targetItems || [])],
+});
+
+const previewGridWebhook = async (payload = {}) => {
+  const normalized = normalizeGridWebhookPayload(payload);
+  const [liveResult, testResult] = await Promise.all([
+    previewGridWebhookTargetsForMode("live", normalized),
+    previewGridWebhookTargetsForMode("test", normalized),
+  ]);
+
+  return combineGridWebhookResults(liveResult, testResult);
+};
+
 const processGridWebhook = async (payload = {}) => {
   const normalized = normalizeGridWebhookPayload(payload);
   const [liveResult, testResult] = await Promise.all([
@@ -303,31 +436,7 @@ const processGridWebhook = async (payload = {}) => {
     armGridWebhookTargetsForMode("test", normalized),
   ]);
 
-  return {
-    matched: Number(liveResult.matched || 0) + Number(testResult.matched || 0),
-    armed: Number(liveResult.armed || 0) + Number(testResult.armed || 0),
-    ignoredActive:
-      Number(liveResult.ignoredActive || 0) + Number(testResult.ignoredActive || 0),
-    ignoredConflict:
-      Number(liveResult.ignoredConflict || 0) + Number(testResult.ignoredConflict || 0),
-    ignoredSignal:
-      Number(liveResult.ignoredSignal || 0) + Number(testResult.ignoredSignal || 0),
-    live: {
-      matched: Number(liveResult.matched || 0),
-      armed: Number(liveResult.armed || 0),
-      ignoredActive: Number(liveResult.ignoredActive || 0),
-      ignoredConflict: Number(liveResult.ignoredConflict || 0),
-      ignoredSignal: Number(liveResult.ignoredSignal || 0),
-    },
-    test: {
-      matched: Number(testResult.matched || 0),
-      armed: Number(testResult.armed || 0),
-      ignoredActive: Number(testResult.ignoredActive || 0),
-      ignoredConflict: Number(testResult.ignoredConflict || 0),
-      ignoredSignal: Number(testResult.ignoredSignal || 0),
-    },
-    targetItems: [...(liveResult.targetItems || []), ...(testResult.targetItems || [])],
-  };
+  return combineGridWebhookResults(liveResult, testResult);
 };
 
 const getGridControlState = (item = {}) =>
@@ -472,6 +581,7 @@ module.exports = {
   decorateGridRuntimeFields,
   normalizeGridWebhookPayload,
   validateGridWebhookPayload,
+  previewGridWebhook,
   processGridWebhook,
   isGridRegimeActive,
   buildGridWebhookUpdateParams,

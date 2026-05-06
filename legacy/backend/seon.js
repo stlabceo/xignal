@@ -13,6 +13,7 @@ const strategyControlState = require("./strategy-control-state");
 const signalStrategyIdentity = require("./signal-strategy-identity");
 const adminOrderMonitor = require("./admin-order-monitor");
 const signalStaleTime = require("./signal-stale-time");
+const liveWriteSafetyGate = require("./live-write-safety-gate");
 
 const coin = require("./coin");
 const dt = require("./data");
@@ -365,6 +366,23 @@ const withPlayRuntimeLock = async (scope, playId, handler) => {
 
     const redisLockKey = `play:lock:${lockKey}`;
     const redisReserved = await reserveRedisPlayLock(redisLockKey, lockToken);
+    const redisGate = liveWriteSafetyGate.evaluateRedisLockReservation({
+        redisReserved,
+        lockKey: redisLockKey,
+        scope,
+        strategyCategory: 'signal',
+        liveScope: String(scope || '').startsWith('live-'),
+    });
+    if(!redisGate.allowed){
+        playRuntimeLocks.delete(lockKey);
+        console.log('[LIVE_WRITE_SAFETY_GATE] signal runtime lock blocked', {
+            reason: redisGate.reason,
+            scope,
+            playId,
+            lockKey: redisLockKey,
+        });
+        return false;
+    }
     if(redisReserved === false){
         playRuntimeLocks.delete(lockKey);
         return false;

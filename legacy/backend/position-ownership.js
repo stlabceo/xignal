@@ -25,13 +25,38 @@ const normalizeStrategyCategory = (strategyCategory) =>
     .trim()
     .toLowerCase();
 
-const acquirePositionBucketOwner = async () => ({
-  ok: true,
-  conflict: false,
-  created: false,
-  owner: null,
-  legacyDisabled: true,
-});
+const liveWriteSafetyGate = require("./live-write-safety-gate");
+
+const OWNERSHIP_LEGACY_DISABLED = true;
+
+const acquirePositionBucketOwner = async (context = {}) => {
+  const gate = liveWriteSafetyGate.evaluateOwnershipGuard({
+    ...context,
+    strategyCategory: context.ownerStrategyCategory || context.strategyCategory || null,
+    pid: context.ownerPid || context.pid || null,
+    ownershipEnabled: !OWNERSHIP_LEGACY_DISABLED,
+  });
+
+  if (!gate.allowed) {
+    return {
+      ok: false,
+      conflict: false,
+      created: false,
+      owner: null,
+      reason: gate.reason,
+      safetyGate: gate,
+      legacyDisabled: OWNERSHIP_LEGACY_DISABLED,
+    };
+  }
+
+  return {
+    ok: true,
+    conflict: false,
+    created: false,
+    owner: null,
+    legacyDisabled: OWNERSHIP_LEGACY_DISABLED,
+  };
+};
 
 const touchPositionBucketOwner = async () => true;
 
@@ -50,4 +75,5 @@ module.exports = {
   releasePositionBucketOwner,
   releaseAllPositionBucketOwnersByPid,
   loadPositionBucketOwner,
+  OWNERSHIP_LEGACY_DISABLED,
 };

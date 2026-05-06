@@ -10,6 +10,7 @@ const gridPairAtomicity = require("./grid-pair-atomicity");
 const gridProtectionGuarantee = require("./grid-protection-guarantee");
 const gridPriceSource = require("./grid-price-source");
 const gridReentrySlPolicy = require("./grid-reentry-sl-policy");
+const liveWriteSafetyGate = require("./live-write-safety-gate");
 
 const MODE_TABLE = {
   LIVE: "live_grid_strategy_list",
@@ -273,6 +274,22 @@ const withGridRuntimeLock = async (
     activeGridRuntimeLocks.add(key);
     const redisLockKey = `grid:lock:${key}`;
     const redisReserved = await reserveRedisGridLock(redisLockKey, lockToken);
+    const redisGate = liveWriteSafetyGate.evaluateRedisLockReservation({
+      redisReserved,
+      lockKey: redisLockKey,
+      scope: key,
+      strategyCategory: "grid",
+      liveScope: String(key || "").startsWith("LIVE:"),
+    });
+    if (!redisGate.allowed) {
+      activeGridRuntimeLocks.delete(key);
+      console.log("[LIVE_WRITE_SAFETY_GATE] grid runtime lock blocked", {
+        reason: redisGate.reason,
+        scope: key,
+        lockKey: redisLockKey,
+      });
+      return false;
+    }
     if (redisReserved === false) {
       activeGridRuntimeLocks.delete(key);
       if (!waitForUnlock || Date.now() - startedAt >= waitMs) {

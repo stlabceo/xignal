@@ -17,6 +17,7 @@ const accountReadiness = require("../account-readiness");
 const binanceWriteGuard = require("../binance-write-guard");
 const credentialSecrets = require("../credential-secrets");
 const signalStrategyIdentity = require("../signal-strategy-identity");
+const liveWriteSafetyGate = require("../live-write-safety-gate");
 const { insertWebhookEventLog, insertWebhookEventTargetLogs } = require("../webhook-event-log");
 
 const { validateRegister, validateRegister1, validateRegister2, validateLogin } = require('./validation');
@@ -1374,8 +1375,84 @@ router.post('/api/grid/hook', async function(req, res){
       return res.send(blockedResponse);
     }
 
+    const previewResult = await gridRuntime.previewGridWebhook(payload);
+    const preArmGate = liveWriteSafetyGate.evaluateGridRequestThreadWrite({
+      routePath: '/user/api/grid/hook',
+      liveArmedCount: previewResult?.live?.armed || 0,
+      strategyCategory: 'grid',
+    });
+    if(!preArmGate.allowed){
+      console.log('[LIVE_WRITE_SAFETY_GATE] grid request-thread arm blocked before state mutation', {
+        reason: preArmGate.reason,
+        routePath: '/user/api/grid/hook',
+        liveArmedCount: previewResult?.live?.armed || 0,
+      });
+      const blockedResponse = {
+        ok: false,
+        strategySignal: payload.strategySignal,
+        symbol: payload.symbol,
+        bunbong: payload.bunbong,
+        matched: previewResult.matched,
+        armed: 0,
+        blockedArmCount: previewResult.armed,
+        livePrimed: 0,
+        ignoredActive: previewResult.ignoredActive,
+        ignoredConflict: previewResult.ignoredConflict,
+        ignoredSignal: previewResult.ignoredSignal,
+        live: {
+          ...(previewResult.live || {}),
+          blockedArmCount: previewResult?.live?.armed || 0,
+          armed: 0,
+        },
+        test: previewResult.test,
+        safetyGate: {
+          status: 'BLOCKED',
+          reason: preArmGate.reason,
+          code: preArmGate.code,
+        },
+      };
+      const blockedEventId = await insertWebhookEventLog({
+        ...baseWebhookLog,
+        status: 'BLOCKED',
+        resultCode: preArmGate.reason,
+        matchedCount: previewResult.matched,
+        processedCount: 0,
+        ignoredCount: previewResult.ignoredActive + previewResult.ignoredSignal,
+        httpStatus: 200,
+        note: 'live grid request-thread arm blocked by safety gate before state mutation',
+        responseBody: blockedResponse,
+      });
+      await insertWebhookEventTargetLogs(
+        blockedEventId,
+        (previewResult?.targetItems || []).map((item) => ({
+          ...item,
+          resultCode: preArmGate.reason,
+          severity: item.strategyMode === 'live' ? 'high' : item.severity,
+          opsStatus: item.strategyMode === 'live' ? 'OPEN' : item.opsStatus,
+          note: item.strategyMode === 'live'
+            ? 'live grid write requires durable queue before arming'
+            : item.note,
+        }))
+      );
+      return res.send(blockedResponse);
+    }
+
     const result = await gridRuntime.processGridWebhook(payload);
-    const livePrimed = await gridEngine.primeLiveEntriesForTargetItems(result?.targetItems || []);
+    const gridPrimeGate = liveWriteSafetyGate.evaluateGridRequestThreadWrite({
+      routePath: '/user/api/grid/hook',
+      liveArmedCount: result?.live?.armed || 0,
+      strategyCategory: 'grid',
+    });
+    let livePrimed = 0;
+    if(gridPrimeGate.allowed){
+      livePrimed = await gridEngine.primeLiveEntriesForTargetItems(result?.targetItems || []);
+    }else{
+      console.log('[LIVE_WRITE_SAFETY_GATE] grid request-thread prime blocked', {
+        reason: gridPrimeGate.reason,
+        routePath: '/user/api/grid/hook',
+        liveArmedCount: result?.live?.armed || 0,
+      });
+    }
 
   console.log(
     `[grid-hook] signal=${payload.strategySignal} symbol=${payload.symbol} bunbong=${payload.bunbong} matched=${result.matched} armed=${result.armed} ignoredActive=${result.ignoredActive} livePrimed=${livePrimed}`
@@ -1394,17 +1471,24 @@ router.post('/api/grid/hook', async function(req, res){
     ignoredSignal: result.ignoredSignal,
     live: result.live,
     test: result.test,
+    safetyGate: gridPrimeGate.allowed
+      ? null
+      : {
+          status: 'BLOCKED',
+          reason: gridPrimeGate.reason,
+          code: gridPrimeGate.code,
+        },
   };
   const outcome = buildGridWebhookOutcome(result);
   const webhookEventId = await insertWebhookEventLog({
     ...baseWebhookLog,
-    status: outcome.status,
-    resultCode: outcome.resultCode,
+    status: gridPrimeGate.allowed ? outcome.status : 'BLOCKED',
+    resultCode: gridPrimeGate.allowed ? outcome.resultCode : gridPrimeGate.reason,
     matchedCount: outcome.matchedCount,
     processedCount: outcome.processedCount,
     ignoredCount: outcome.ignoredCount,
     httpStatus: 200,
-    note: outcome.note,
+    note: gridPrimeGate.allowed ? outcome.note : 'live grid request-thread write blocked by safety gate',
     responseBody,
   });
   await insertWebhookEventTargetLogs(webhookEventId, result?.targetItems || []);

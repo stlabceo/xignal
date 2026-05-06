@@ -1,5 +1,6 @@
 const LIVE_WRITE_APPROVAL = "APPROVE_PRODUCTION_BINANCE_WRITES";
 const LIVE_EXECUTION_APPROVAL_PREFIX = "APPROVE_LIVE_ORDER_EXECUTION";
+const liveWriteSafetyGate = require("./live-write-safety-gate");
 
 const truthy = (value) =>
   ["1", "true", "y", "yes", "on"].includes(String(value || "").trim().toLowerCase());
@@ -124,6 +125,15 @@ const assertBinanceWriteAllowed = (context = {}) => {
   if (!decision.allowed) {
     throw buildGuardError(decision, context);
   }
+
+  liveWriteSafetyGate.assertGateAllowed(
+    liveWriteSafetyGate.evaluateOwnershipGuard({
+      ...context,
+      ownershipEnabled: context.ownershipEnabled === true,
+    }),
+    context
+  );
+
   return decision;
 };
 

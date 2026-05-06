@@ -1,6 +1,8 @@
 "use strict";
 
 const db = require("./database/connect/config");
+const redisClient = require("./util/redis.util");
+const liveWriteSafetyGate = require("./live-write-safety-gate");
 
 const toNumber = (value) => {
   const numeric = Number(value);
@@ -287,6 +289,10 @@ const getAccountReadiness = async (uid, { runtimeHealth = null } = {}) => {
   const positionMode = derivePositionMode(runtimeHealth || {});
   const writeDisabled = truthy(process.env.QA_DISABLE_BINANCE_WRITES);
   const liveWriteEnabled = truthy(process.env.BINANCE_LIVE_WRITES_ENABLED);
+  const liveWriteSafety = liveWriteSafetyGate.buildReadinessSnapshot({
+    env: process.env,
+    redisClient,
+  });
   const runtimeExcluded = Boolean(runtimeHealth?.excluded);
 
   if (!hasApiKey) {
@@ -309,6 +315,16 @@ const getAccountReadiness = async (uid, { runtimeHealth = null } = {}) => {
         code: "RUNTIME_UID_EXCLUDED",
         label: "현재 UID가 runtime 연결 대상에서 제외되어 있습니다.",
         action: "Live QA 대상으로 사용하려면 별도 preflight에서 runtime 제외 설정을 해제해야 합니다.",
+      })
+    );
+  }
+
+  for (const blocker of liveWriteSafety.blockers || []) {
+    issues.push(
+      buildIssue({
+        code: blocker.code,
+        label: `Live write safety gate blocker: ${blocker.code}`,
+        action: blocker.action,
       })
     );
   }
@@ -373,6 +389,7 @@ const getAccountReadiness = async (uid, { runtimeHealth = null } = {}) => {
     futuresBalanceLabel: "투자 가능 잔고",
     canTradeFutures,
     userStream,
+    liveWriteSafety,
     positionMode,
     positionModeLabel:
       positionMode === "HEDGE" ? "헤지 모드" : positionMode === "ONE_WAY" ? "원웨이 모드" : "검증 불가",
