@@ -10,6 +10,7 @@ const pidPositionLedger = require("./pid-position-ledger");
 const gridReentrySlPolicy = require("./grid-reentry-sl-policy");
 const orderIntentDispatchGate = require("./order-intent-dispatch-gate");
 const cancelVerificationPolicy = require("./cancel-verification-policy");
+const signalStaleTime = require("./signal-stale-time");
 
 const DEFAULT_POLL_MS = 500;
 const DEFAULT_STALE_SECONDS = 90;
@@ -68,6 +69,17 @@ const CLOSE_QUEUE_STATE = Object.freeze({
   GMANUAL_QUEUED: "GMANUAL_QUEUED",
   CONTROLLED_QUEUED: "CONTROLLED_CLOSE_QUEUED",
   BLOCKED_REDIS: "CLOSE_BLOCKED_REDIS",
+});
+
+const SIGNAL_ENTRY_QUEUE_STATE = Object.freeze({
+  INTENT_PENDING: "SIGNAL_ENTRY_INTENT_PENDING",
+  RUNNING: "SIGNAL_ENTRY_RUNNING",
+  BLOCKED_REDIS: "SIGNAL_ENTRY_BLOCKED_REDIS",
+  BLOCKED_OWNERSHIP: "SIGNAL_ENTRY_BLOCKED_OWNERSHIP",
+  BLOCKED_DISPATCH_GATE: "SIGNAL_ENTRY_BLOCKED_DISPATCH_GATE",
+  FAILED: "SIGNAL_ENTRY_FAILED",
+  SUBMITTED: "SIGNAL_ENTRY_SUBMITTED",
+  STALE: "SIGNAL_ENTRY_STALE",
 });
 
 const getLegPrefix = (leg) => (String(leg || "").toUpperCase() === "SHORT" ? "short" : "long");
@@ -309,6 +321,185 @@ const updateGridCloseProjection = async ({ payload = {}, state, reason = null } 
     [state, reason || state, rowId, Number(payload.uid || 0)]
   );
   return true;
+};
+
+const updateSignalEntryProjection = async ({ payload = {}, state, reason = null } = {}) => {
+  const pid = Number(payload.pid || payload.id || 0);
+  return {
+    state,
+    reason,
+    uid: Number(payload.uid || 0),
+    pid,
+  };
+};
+
+const getSignalEntryStaleInfoForIntent = (payload = {}, options = {}) =>
+  signalStaleTime.getSignalEntryPendingStaleInfo(
+    {
+      status: "EXACT_WAIT",
+      r_signalTime: payload.signalTime || payload.r_signalTime || null,
+    },
+    {
+      staleSeconds: options.signalStaleSeconds || process.env.SIGNAL_ENTRY_PENDING_STALE_SECONDS || 30,
+      now: options.now,
+    }
+  );
+
+const processSignalMarketEntryIntent = async (intent, options = {}) => {
+  const env = options.env || process.env;
+  const payload = intent?.payload?.signalEntry || intent?.payload || {};
+  const lockRedisClient = Object.prototype.hasOwnProperty.call(options, "redisClient")
+    ? options.redisClient
+    : redisClient;
+  const redisGate = liveWriteSafetyGate.evaluateRedisLockUnavailable({
+    env,
+    liveScope: true,
+    strategyCategory: "signal",
+    scope: "ORDER_INTENT_WORKER",
+    lockKey: `order-intent-worker:signal-entry:${intent.fifoKey || intent.id}`,
+  });
+
+  if (!liveWriteSafetyGate.isRedisClientReady(lockRedisClient) && !redisGate.allowed) {
+    await updateSignalEntryProjection({
+      payload,
+      state: SIGNAL_ENTRY_QUEUE_STATE.BLOCKED_REDIS,
+      reason: redisGate.reason,
+    }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(redisGate.reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: SIGNAL_ENTRY_QUEUE_STATE.BLOCKED_REDIS,
+      }),
+      errorCode: redisGate.reason,
+      errorMessage: "Redis lock unavailable; live signal market entry worker write blocked.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: redisGate.reason };
+  }
+
+  const ownershipReadiness = options.ownershipReadiness || await positionOwnership.getOwnershipReadiness().catch((error) => ({
+    enabled: false,
+    error: error?.message || String(error),
+  }));
+  const ownershipGate = liveWriteSafetyGate.evaluateOwnershipGuard({
+    env,
+    strategyCategory: "signal",
+    uid: intent.uid,
+    pid: intent.pid,
+    symbol: payload.symbol || null,
+    positionSide: payload.positionSide || null,
+    ownershipEnabled: ownershipReadiness.enabled === true,
+  });
+  if (!ownershipGate.allowed) {
+    await updateSignalEntryProjection({
+      payload,
+      state: SIGNAL_ENTRY_QUEUE_STATE.BLOCKED_OWNERSHIP,
+      reason: ownershipGate.reason,
+    }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(ownershipGate.reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: SIGNAL_ENTRY_QUEUE_STATE.BLOCKED_OWNERSHIP,
+      }),
+      errorCode: ownershipGate.reason,
+      errorMessage: `DB-backed PID ownership unavailable; live signal market entry worker write blocked. status:${ownershipReadiness.status || "UNKNOWN"}`,
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: ownershipGate.reason };
+  }
+
+  const staleInfo = getSignalEntryStaleInfoForIntent(payload, options);
+  if (staleInfo.stale) {
+    const reason = staleInfo.reason || "SIGNAL_ENTRY_STALE";
+    await updateSignalEntryProjection({
+      payload,
+      state: SIGNAL_ENTRY_QUEUE_STATE.FAILED,
+      reason,
+    }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: SIGNAL_ENTRY_QUEUE_STATE.FAILED,
+        staleInfo: {
+          stale: staleInfo.stale,
+          ageSeconds: staleInfo.ageSeconds,
+          reason: staleInfo.reason,
+        },
+      }),
+      errorCode: SIGNAL_ENTRY_QUEUE_STATE.STALE,
+      errorMessage: `Signal market entry blocked by stale pending signal:${reason}`,
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: SIGNAL_ENTRY_QUEUE_STATE.STALE };
+  }
+
+  if (options.dryRun === true || options.mock === true) {
+    const mockResult = options.mockSignalEntryResult;
+    if (mockResult === false || mockResult?.ok === false) {
+      const reason = mockResult?.reason || "SIGNAL_ENTRY_SUBMIT_FAILED";
+      await updateSignalEntryProjection({
+        payload,
+        state: SIGNAL_ENTRY_QUEUE_STATE.FAILED,
+        reason,
+      }).catch(() => {});
+      await orderIntentQueue.completeIntent({
+        id: intent.id,
+        status: orderIntentQueue.STATUS.FAILED,
+        result: {
+          ok: false,
+          dryRun: options.dryRun === true,
+          mock: options.mock === true,
+          intentType: intent.intentType,
+          fifoKey: intent.fifoKey,
+          projectionState: SIGNAL_ENTRY_QUEUE_STATE.FAILED,
+          reason,
+          clientOrderId: payload.clientOrderId || null,
+        },
+        errorCode: SIGNAL_ENTRY_QUEUE_STATE.FAILED,
+        errorMessage: `Signal market entry failed:${reason}`,
+      });
+      return { processed: true, status: orderIntentQueue.STATUS.FAILED, reason };
+    }
+
+    await updateSignalEntryProjection({
+      payload,
+      state: SIGNAL_ENTRY_QUEUE_STATE.SUBMITTED,
+      reason: SIGNAL_ENTRY_QUEUE_STATE.SUBMITTED,
+    }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.DONE,
+      result: {
+        ok: true,
+        dryRun: options.dryRun === true,
+        mock: options.mock === true,
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: SIGNAL_ENTRY_QUEUE_STATE.SUBMITTED,
+        clientOrderId: mockResult?.clientOrderId || payload.clientOrderId || null,
+        orderId: mockResult?.orderId || null,
+        side: payload.side || null,
+        positionSide: payload.positionSide || null,
+      },
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.DONE, reason: SIGNAL_ENTRY_QUEUE_STATE.SUBMITTED };
+  }
+
+  return await blockIntentByActualDispatchGate({
+    intent,
+    payload,
+    options,
+    projectionUpdater: updateSignalEntryProjection,
+    defaultProjectionState: SIGNAL_ENTRY_QUEUE_STATE.BLOCKED_DISPATCH_GATE,
+    defaultReason: "SIGNAL_ENTRY_ACTUAL_DISPATCH_GATE_PASSED_HANDLER_NOT_ENABLED",
+    errorMessage: "Signal market entry worker actual dispatch blocked by final gate.",
+  });
 };
 
 const processGridCancelIntent = async (intent, options = {}) => {
@@ -1074,6 +1265,10 @@ const processIntent = async (intent, options = {}) => {
     return await processGridLiveArmIntent(intent, options);
   }
 
+  if (intent.intentType === orderIntentQueue.INTENT_TYPE.SIGNAL_MARKET_ENTRY) {
+    return await processSignalMarketEntryIntent(intent, options);
+  }
+
   if (intent.intentType === orderIntentQueue.INTENT_TYPE.GRID_PROTECTION_CREATE) {
     return await processGridProtectionCreateIntent(intent, options);
   }
@@ -1164,6 +1359,7 @@ const getOrderIntentWorkerHealth = () => ({
 module.exports = {
   processOneIntent,
   processIntent,
+  processSignalMarketEntryIntent,
   processGridProtectionCreateIntent,
   processGridReentryCreateIntent,
   processGridCancelIntent,
@@ -1172,6 +1368,7 @@ module.exports = {
   REENTRY_QUEUE_STATE,
   CANCEL_QUEUE_STATE,
   CLOSE_QUEUE_STATE,
+  SIGNAL_ENTRY_QUEUE_STATE,
   startOrderIntentWorker,
   stopOrderIntentWorker,
   getOrderIntentWorkerHealth,

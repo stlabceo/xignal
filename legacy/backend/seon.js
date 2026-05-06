@@ -15,6 +15,7 @@ const adminOrderMonitor = require("./admin-order-monitor");
 const signalStaleTime = require("./signal-stale-time");
 const liveWriteSafetyGate = require("./live-write-safety-gate");
 const orderIntentWorker = require("./order-intent-worker");
+const orderIntentQueue = require("./order-intent-queue");
 
 const coin = require("./coin");
 const dt = require("./data");
@@ -745,6 +746,59 @@ const logPlayRuntimeEvent = (fun, code, play, message, options = {}) => {
     );
 };
 
+const enqueueLiveSignalMarketEntryIntent = async (play, signalPrice) => {
+    if(!play?.uid || !play?.id || !play?.symbol || !play?.r_signalType){
+        return {
+            queued: false,
+            reason: 'SIGNAL_ENTRY_INTENT_INVALID_PLAY',
+        };
+    }
+
+    const staleInfo = getSignalEntryPendingStaleInfo(play);
+    if(staleInfo.stale){
+        return {
+            queued: false,
+            reason: staleInfo.reason || 'SIGNAL_ENTRY_STALE',
+            staleInfo,
+        };
+    }
+
+    const summary = await orderIntentQueue.enqueueSignalMarketEntryIntent({
+        routePath: 'signal-runtime-entry',
+        sourceEventId: play.r_tid || null,
+        payload: {
+            uid: play.uid,
+            pid: play.id,
+            symbol: play.symbol,
+            side: play.r_signalType,
+            positionSide: String(play.r_signalType || '').toUpperCase() === 'SELL' ? 'SHORT' : 'LONG',
+            strategyRuntimeCode: play.type || null,
+            timeframe: play.bunbong || null,
+            sourceRuntimeTid: play.r_tid || null,
+            signalPrice,
+            signalTime: play.r_signalTime || null,
+            margin: play.margin,
+            leverage: play.leverage,
+            limitST: play.limitST,
+            clientOrderId: orderIntentQueue.buildSignalEntryClientOrderId({
+                uid: play.uid,
+                pid: play.id,
+            }),
+        },
+    });
+    logPlayRuntimeEvent(
+        'signalEntryQueue',
+        summary.inserted ? 'SIGNAL_ENTRY_INTENT_PENDING' : 'SIGNAL_ENTRY_INTENT_DUPLICATE',
+        play,
+        `intent:${summary.intent?.intentKey || 'NONE'}, clientOrderId:${summary.intent?.clientOrderId || 'NONE'}, duplicate:${summary.duplicate || 0}`
+    );
+    return {
+        queued: true,
+        reason: summary.inserted ? 'SIGNAL_ENTRY_INTENT_PENDING' : 'SIGNAL_ENTRY_INTENT_DUPLICATE',
+        intentSummary: summary,
+    };
+};
+
 const logTimeExpiryDebug = (scope, play, timeExpiryState) => {
     if(!DEBUG_TIME_EXPIRY){
         return;
@@ -1346,22 +1400,9 @@ const runPlayLive = async (st_ = false) => {
                     }
 
                     const newPrice = play.r_signalType == 'BUY' ? cPrice.bestBid : cPrice.bestAsk;
-                    console.log(`[LIVE_ENTER_DISPATCH] pid:${play.id}, signalType:${play.r_signalType}, price:${newPrice}`);
+                    console.log(`[LIVE_ENTER_QUEUE] pid:${play.id}, signalType:${play.r_signalType}, price:${newPrice}`);
 
-                    const sendData = await coin.sendEnter(
-                        play.symbol,
-                        play.r_signalType,
-                        play.leverage,
-                        play.margin,
-                        play.uid,
-                        play.id,
-                        play.limitST,
-                        null
-                    );
-
-                    if(sendData && sendData.status){
-                        await updateLivePlayStatusIfCurrent(play.id, 'EXACT_WAIT', 'EXACT');
-                    }
+                    await enqueueLiveSignalMarketEntryIntent(play, newPrice);
                     return;
                 }
 

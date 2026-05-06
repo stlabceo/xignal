@@ -20,6 +20,7 @@ const INTENT_TYPE = Object.freeze({
   GRID_GMANUAL_CLOSE: "GRID_GMANUAL_CLOSE",
   GRID_CONTROLLED_CLOSE: "GRID_CONTROLLED_CLOSE",
   GRID_REGIME_CLEANUP_CANCEL: "GRID_REGIME_CLEANUP_CANCEL",
+  SIGNAL_MARKET_ENTRY: "SIGNAL_MARKET_ENTRY",
 });
 
 const DEFAULT_MAX_ATTEMPTS = 3;
@@ -154,6 +155,85 @@ const buildGridArmFifoKey = ({ targetItem = {} } = {}) =>
   ].join(":");
 
 const normalizePositionSide = (value) => String(value || "").trim().toUpperCase();
+
+const normalizeSignalSide = (value) => String(value || "").trim().toUpperCase();
+
+const signalPositionSideFromSide = (side) => normalizeSignalSide(side) === "SELL" ? "SHORT" : "LONG";
+
+const buildSignalEntryClientOrderId = ({ uid, pid } = {}) =>
+  `NEW_${Number(uid || 0)}_${Number(pid || 0)}`;
+
+const normalizeSignalMarketEntryIntentPayload = (payload = {}) => {
+  const side = normalizeSignalSide(payload.side || payload.signalType || payload.rSignalType);
+  return {
+    ...payload,
+    uid: Number(payload.uid || 0),
+    pid: Number(payload.pid || payload.id || 0),
+    strategyCategory: "signal",
+    symbol: normalizeSymbol(payload.symbol),
+    side,
+    positionSide: normalizePositionSide(payload.positionSide || signalPositionSideFromSide(side)),
+    strategyRuntimeCode: String(payload.strategyRuntimeCode || payload.type || "").trim(),
+    timeframe: normalizeTimeframe(payload.timeframe || payload.bunbong),
+    margin: Number(payload.margin || 0),
+    leverage: Number(payload.leverage || 0),
+    limitST: payload.limitST == null ? null : String(payload.limitST),
+    signalPrice: Number(payload.signalPrice || payload.rSignalPrice || 0),
+    signalTime: payload.signalTime == null ? null : String(payload.signalTime),
+    sourceWebhookEventId: payload.sourceWebhookEventId == null ? null : String(payload.sourceWebhookEventId),
+    sourceWebhookTargetId: payload.sourceWebhookTargetId == null ? null : String(payload.sourceWebhookTargetId),
+    sourceRuntimeTid: payload.sourceRuntimeTid == null ? null : String(payload.sourceRuntimeTid),
+    clientOrderId: payload.clientOrderId || buildSignalEntryClientOrderId(payload),
+  };
+};
+
+const buildSignalMarketEntryIntentPayloadHash = ({ payload = {} } = {}) => {
+  const normalized = normalizeSignalMarketEntryIntentPayload(payload);
+  return sha1(
+    safeJsonStringify({
+      action: INTENT_TYPE.SIGNAL_MARKET_ENTRY,
+      uid: normalized.uid,
+      pid: normalized.pid,
+      symbol: normalized.symbol,
+      side: normalized.side,
+      positionSide: normalized.positionSide,
+      strategyRuntimeCode: normalized.strategyRuntimeCode,
+      timeframe: normalized.timeframe,
+      signalPrice: normalized.signalPrice,
+      signalTime: normalized.signalTime,
+      sourceWebhookEventId: normalized.sourceWebhookEventId,
+      sourceWebhookTargetId: normalized.sourceWebhookTargetId,
+      sourceRuntimeTid: normalized.sourceRuntimeTid,
+      clientOrderId: normalized.clientOrderId,
+    })
+  );
+};
+
+const buildSignalMarketEntryIntentKey = ({ payload = {} } = {}) => {
+  const normalized = normalizeSignalMarketEntryIntentPayload(payload);
+  const signalIdentity = normalized.sourceWebhookTargetId
+    || normalized.sourceWebhookEventId
+    || normalized.sourceRuntimeTid
+    || normalized.signalTime
+    || buildSignalMarketEntryIntentPayloadHash({ payload: normalized });
+  return [
+    INTENT_TYPE.SIGNAL_MARKET_ENTRY,
+    normalized.uid,
+    normalized.pid,
+    normalized.symbol,
+    normalized.side,
+    signalIdentity,
+  ].join(":");
+};
+
+const buildSignalMarketEntryFifoKey = ({ payload = {} } = {}) => {
+  const normalized = normalizeSignalMarketEntryIntentPayload(payload);
+  return [
+    normalized.uid,
+    "signal",
+    normalized.pid,
+  ].join(":");
+};
 
 const normalizeProtectionIntentPayload = (payload = {}) => ({
   ...payload,
@@ -579,6 +659,79 @@ const enqueueGridLiveArmIntents = async ({
   }
 
   return summary;
+};
+
+const enqueueSignalMarketEntryIntent = async ({
+  payload = {},
+  routePath = "signal-runtime-entry",
+  sourceEventId = null,
+} = {}) => {
+  await ensureOrderIntentSchema();
+  const normalized = normalizeSignalMarketEntryIntentPayload(payload);
+  if (!normalized.uid || !normalized.pid || !normalized.symbol || !normalized.side) {
+    throw new Error("SIGNAL_MARKET_ENTRY_INTENT_INVALID_OWNER");
+  }
+
+  const payloadHash = buildSignalMarketEntryIntentPayloadHash({ payload: normalized });
+  const intentKey = buildSignalMarketEntryIntentKey({ payload: normalized });
+  const fifoKey = buildSignalMarketEntryFifoKey({ payload: normalized });
+  const intentPayload = {
+    action: INTENT_TYPE.SIGNAL_MARKET_ENTRY,
+    routePath,
+    sourceEventId,
+    signalEntry: normalized,
+  };
+
+  const [result] = await db.query(
+    `INSERT IGNORE INTO order_intent_queue
+      (
+        intentKey,
+        fifoKey,
+        uid,
+        pid,
+        strategyCategory,
+        intentType,
+        status,
+        priority,
+        attemptCount,
+        maxAttempts,
+        routePath,
+        sourceEventId,
+        payloadHash,
+        payloadJson
+      )
+     VALUES (?, ?, ?, ?, 'signal', ?, ?, 80, 0, ?, ?, ?, ?, ?)`,
+    [
+      intentKey,
+      fifoKey,
+      normalized.uid,
+      normalized.pid,
+      INTENT_TYPE.SIGNAL_MARKET_ENTRY,
+      STATUS.PENDING,
+      DEFAULT_MAX_ATTEMPTS,
+      routePath,
+      sourceEventId,
+      payloadHash,
+      safeJsonStringify(intentPayload),
+    ]
+  );
+
+  const inserted = Number(result?.affectedRows || 0) === 1;
+  return {
+    requested: 1,
+    inserted: inserted ? 1 : 0,
+    duplicate: inserted ? 0 : 1,
+    intent: {
+      intentKey,
+      fifoKey,
+      uid: normalized.uid,
+      pid: normalized.pid,
+      status: inserted ? STATUS.PENDING : "DUPLICATE",
+      payloadHash,
+      intentType: INTENT_TYPE.SIGNAL_MARKET_ENTRY,
+      clientOrderId: normalized.clientOrderId,
+    },
+  };
 };
 
 const enqueueGridProtectionCreateIntent = async ({
@@ -1014,6 +1167,11 @@ module.exports = {
   buildGridArmIntentPayloadHash,
   buildGridArmIntentKey,
   buildGridArmFifoKey,
+  normalizeSignalMarketEntryIntentPayload,
+  buildSignalEntryClientOrderId,
+  buildSignalMarketEntryIntentPayloadHash,
+  buildSignalMarketEntryIntentKey,
+  buildSignalMarketEntryFifoKey,
   buildGridProtectionIntentPayloadHash,
   buildGridProtectionIntentKey,
   buildGridProtectionFifoKey,
@@ -1028,6 +1186,7 @@ module.exports = {
   buildGridCloseIntentKey,
   buildGridCloseFifoKey,
   enqueueGridLiveArmIntents,
+  enqueueSignalMarketEntryIntent,
   enqueueGridProtectionCreateIntent,
   enqueueGridReentryCreateIntent,
   enqueueGridCancelIntent,

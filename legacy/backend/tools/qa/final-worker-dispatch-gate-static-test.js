@@ -162,6 +162,7 @@ const buildPayload = () => ({
     orderIntentQueue.INTENT_TYPE.GRID_REGIME_CLEANUP_CANCEL,
     orderIntentQueue.INTENT_TYPE.GRID_GMANUAL_CLOSE,
     orderIntentQueue.INTENT_TYPE.GRID_CONTROLLED_CLOSE,
+    orderIntentQueue.INTENT_TYPE.SIGNAL_MARKET_ENTRY,
   ].forEach((intentType) => assert(covered.has(intentType), `Grid action coverage missing:${intentType}`));
 
   await orderIntentQueue.enqueueGridLiveArmIntents({

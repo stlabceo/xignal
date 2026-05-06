@@ -33,6 +33,7 @@ const GRID_ACTION_COVERAGE = Object.freeze([
   orderIntentQueue.INTENT_TYPE.GRID_REGIME_CLEANUP_CANCEL,
   orderIntentQueue.INTENT_TYPE.GRID_GMANUAL_CLOSE,
   orderIntentQueue.INTENT_TYPE.GRID_CONTROLLED_CLOSE,
+  orderIntentQueue.INTENT_TYPE.SIGNAL_MARKET_ENTRY,
 ]);
 
 const truthy = (value) =>
