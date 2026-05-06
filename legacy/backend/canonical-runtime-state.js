@@ -176,13 +176,27 @@ const deriveGridRuntimeState = (item = {}, options = {}) => {
     regimeStatus === "PAIR_ARM_PENDING" ||
     regimeStatus === "PAIR_ARM_FAILED" ||
     regimeStatus === "PAIR_ROLLBACK_PENDING" ||
-    regimeStatus === "PAIR_ONE_LEG_FILLED"
+    regimeStatus === "PAIR_ONE_LEG_FILLED" ||
+    regimeStatus === "PAIR_ONE_LEG_PROTECTED" ||
+    regimeStatus === "PAIR_ONE_LEG_UNPROTECTED" ||
+    regimeStatus === "GRID_PARTIAL_PROTECTION" ||
+    regimeStatus === "GRID_UNPROTECTED"
   ) {
     return "GRIDDING";
   }
 
   return "READY";
 };
+
+const GRID_CRITICAL_REGIME_STATES = new Set([
+  "PAIR_ARM_FAILED",
+  "PAIR_ROLLBACK_PENDING",
+  "PAIR_ONE_LEG_FILLED",
+  "PAIR_ONE_LEG_PROTECTED",
+  "PAIR_ONE_LEG_UNPROTECTED",
+  "GRID_PARTIAL_PROTECTION",
+  "GRID_UNPROTECTED",
+]);
 
 const decorateSignalItemSync = (item = {}, options = {}) => {
   if (!item || typeof item !== "object") {
@@ -226,6 +240,8 @@ const decorateGridItemSync = (item = {}, options = {}) => {
 
   const enabled = getItemEnabled(item);
   const runtimeState = deriveGridRuntimeState(item, options);
+  const regimeStatus = normalizeStatus(item?.regimeStatus);
+  const gridProtectionCritical = GRID_CRITICAL_REGIME_STATES.has(regimeStatus);
   const snapshots = options.snapshots || item.pidSnapshots || [];
   const longOpen = snapshots.some(
     (row) => normalizeStatus(row?.positionSide) === "LONG" && toNumber(row?.openQty) > 0
@@ -260,6 +276,8 @@ const decorateGridItemSync = (item = {}, options = {}) => {
     shortPositionStatusLabel: shortOpen ? "SHORT 보유" : "진입 대기",
     tradeAmount: toNumber(item?.margin) * toNumber(item?.leverage),
     legacyRegimeStatus: item.regimeStatus || null,
+    gridProtectionState: gridProtectionCritical ? regimeStatus : null,
+    gridProtectionCritical,
     userOverallStatusLabel: deriveGridUserStatusLabel({ enabled, runtimeState, longOpen, shortOpen }),
     displayStatus: deriveGridUserStatusLabel({ enabled, runtimeState, longOpen, shortOpen }),
   };

@@ -7889,6 +7889,7 @@ const placeGridConditionalExitOrder = async ({
     qty,
     triggerPrice,
     boundType,
+    clientOrderId = null,
 }) => {
     if(!pid || !symbol || !leg){
         return null;
@@ -7912,7 +7913,7 @@ const placeGridConditionalExitOrder = async ({
     const prefix = boundType === 'GTP' ? 'GTP' : 'GSTOP';
     const type = boundType === 'GTP' ? 'TAKE_PROFIT' : 'STOP';
     const side = leg === 'LONG' ? 'SELL' : 'BUY';
-    const clientOrderId = buildGridClientOrderId(prefix, leg, uid, pid);
+    const requestedClientOrderId = clientOrderId || buildGridClientOrderId(prefix, leg, uid, pid);
 
     try{
         const algoOrder = await privateFuturesAlgoRequest(uid, '/fapi/v1/algoOrder', {
@@ -7926,24 +7927,25 @@ const placeGridConditionalExitOrder = async ({
             quantity: normalizedQty,
             timeInForce: 'GTC',
             workingType: 'MARK_PRICE',
-            clientAlgoId: clientOrderId,
+            clientAlgoId: requestedClientOrderId,
         }, 'POST');
 
         return {
             orderId: algoOrder?.strategyId || algoOrder?.algoId || null,
-            clientOrderId,
+            clientOrderId: requestedClientOrderId,
             qty: normalizedQty,
             price: normalizedPrice,
         };
     }catch(error){
         const info = extractBinanceError(error);
         const action = classifyBinanceError(info.code);
+        const errorMessage = info.msg || error?.message || 'grid exit order failed';
         exports.msgAdd(
             'placeGridExitOrder',
             String(info.code || 'GRID_EXIT_ERROR'),
             toRuntimeMessage(
-                formatBinanceErrorGuideClean(info.msg || error?.message || 'grid exit order failed', info.code, action),
-                `pid:${pid}, symbol:${symbol}, leg:${leg}, boundType:${boundType}, qty:${normalizedQty}, triggerPrice:${normalizedPrice}`
+                formatBinanceErrorGuideClean(errorMessage, info.code, action),
+                `pid:${pid}, symbol:${symbol}, leg:${leg}, boundType:${boundType}, qty:${normalizedQty}, triggerPrice:${normalizedPrice}, clientOrderId:${requestedClientOrderId}`
             ),
             uid,
             pid,
@@ -7951,7 +7953,13 @@ const placeGridConditionalExitOrder = async ({
             symbol,
             leg
         );
-        return null;
+        return {
+            ok: false,
+            requestedClientOrderId,
+            errorCode: info.code || null,
+            errorMessage,
+            immediateTrigger: Number(info.code) === -2021 || /immediate|trigger/i.test(String(errorMessage || '')),
+        };
     }
 }
 

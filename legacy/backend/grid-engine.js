@@ -7,6 +7,7 @@ const positionOwnership = require("./position-ownership");
 const pidPositionLedger = require("./pid-position-ledger");
 const redisClient = require("./util/redis.util");
 const gridPairAtomicity = require("./grid-pair-atomicity");
+const gridProtectionGuarantee = require("./grid-protection-guarantee");
 
 const MODE_TABLE = {
   LIVE: "live_grid_strategy_list",
@@ -1599,14 +1600,23 @@ const emergencyCloseLiveGridLeg = async (row, leg, qty, logCode, message) => {
 };
 
 const collectMissingGridProtection = (exits = {}) => {
-  const missingProtection = [];
-  if (toNumber(exits.takeProfitPrice) > 0 && !exits.takeProfitOrderId) {
-    missingProtection.push("TP");
+  if (Array.isArray(exits.missingProtection)) {
+    return exits.missingProtection;
   }
-  if (toNumber(exits.stopPrice) > 0 && !exits.stopOrderId) {
-    missingProtection.push("STOP");
-  }
-  return missingProtection;
+  return gridProtectionGuarantee.classifyProtectionOutcome({
+    takeProfit: {
+      clientOrderId: exits.takeProfitOrderId || null,
+      errorCode: exits.takeProfitErrorCode || null,
+      errorMessage: exits.takeProfitErrorMessage || null,
+      immediateTrigger: exits.takeProfitImmediateTrigger || false,
+    },
+    stop: {
+      clientOrderId: exits.stopOrderId || null,
+      errorCode: exits.stopErrorCode || null,
+      errorMessage: exits.stopErrorMessage || null,
+      immediateTrigger: exits.stopImmediateTrigger || false,
+    },
+  }).missing;
 };
 
 const placeLiveEntryOrderForLeg = async (row, leg, options = {}) => {
@@ -1630,10 +1640,29 @@ const placeLiveEntryOrderForLeg = async (row, leg, options = {}) => {
   });
 };
 
-const placeLiveExitOrdersForLeg = async (row, leg, qty, entryPrice) => {
+const buildProtectionFailureOrder = ({ kind, clientOrderId, price, risk }) => ({
+  ok: false,
+  requestedClientOrderId: clientOrderId,
+  errorCode: risk?.code || "PROTECTION_BLOCKED",
+  errorMessage: risk?.reason || `${kind} protection blocked`,
+  immediateTrigger: risk?.code === gridProtectionGuarantee.PROTECTION_REJECTION_CODE.LOCAL_IMMEDIATE_TRIGGER,
+  priceSourceStale: risk?.code === gridProtectionGuarantee.PROTECTION_REJECTION_CODE.PRICE_SOURCE_STALE,
+  price,
+});
+
+const placeLiveExitOrdersForLeg = async (row, leg, qty, entryPrice, options = {}) => {
   const coin = getCoin();
   const takeProfitPrice = computeLegTakeProfitPrice(row, leg, entryPrice);
   const stopPrice = computeLegStopPrice(row, leg);
+  const price = dt.getPrice(row.symbol);
+  const takeProfitClientOrderId = gridProtectionGuarantee.deriveProtectionClientOrderId({
+    entryClientOrderId: options.entryOrderId || row?.[`${getLegFieldPrefix(leg)}EntryOrderId`] || null,
+    prefix: "GTP",
+  });
+  const stopClientOrderId = gridProtectionGuarantee.deriveProtectionClientOrderId({
+    entryClientOrderId: options.entryOrderId || row?.[`${getLegFieldPrefix(leg)}EntryOrderId`] || null,
+    prefix: "GSTOP",
+  });
   const result = {
     takeProfitPrice,
     stopPrice,
@@ -1641,21 +1670,49 @@ const placeLiveExitOrdersForLeg = async (row, leg, qty, entryPrice) => {
     stopOrderId: null,
     takeProfitSourceOrderId: null,
     stopSourceOrderId: null,
+    takeProfitErrorCode: null,
+    stopErrorCode: null,
+    takeProfitErrorMessage: null,
+    stopErrorMessage: null,
+    takeProfitImmediateTrigger: false,
+    stopImmediateTrigger: false,
+    missingProtection: [],
+    protectionState: null,
+    protectionReason: null,
   };
 
   if (takeProfitPrice > 0) {
     try {
-      const takeProfitOrder = await coin.placeGridTakeProfitOrder({
-        uid: row.uid,
-        pid: row.id,
-        symbol: row.symbol,
+      const risk = gridProtectionGuarantee.getProtectionImmediateTriggerRisk({
         leg,
-        qty,
+        boundType: "GTP",
         triggerPrice: takeProfitPrice,
+        price,
       });
+      const takeProfitOrder = risk.blocked
+        ? buildProtectionFailureOrder({
+            kind: "TP",
+            clientOrderId: takeProfitClientOrderId,
+            price: takeProfitPrice,
+            risk,
+          })
+        : await coin.placeGridTakeProfitOrder({
+            uid: row.uid,
+            pid: row.id,
+            symbol: row.symbol,
+            leg,
+            qty,
+            triggerPrice: takeProfitPrice,
+            clientOrderId: takeProfitClientOrderId,
+          });
       result.takeProfitOrderId = takeProfitOrder?.clientOrderId || null;
       result.takeProfitSourceOrderId = takeProfitOrder?.orderId || null;
+      result.takeProfitErrorCode = takeProfitOrder?.errorCode || null;
+      result.takeProfitErrorMessage = takeProfitOrder?.errorMessage || null;
+      result.takeProfitImmediateTrigger = Boolean(takeProfitOrder?.immediateTrigger);
     } catch (error) {
+      result.takeProfitErrorCode = error?.code || null;
+      result.takeProfitErrorMessage = error?.message || String(error);
       await appendGridRuntimeLog(
         row,
         "gridLiveOpen",
@@ -1677,17 +1734,36 @@ const placeLiveExitOrdersForLeg = async (row, leg, qty, entryPrice) => {
 
   if (stopPrice > 0) {
     try {
-      const stopOrder = await coin.placeGridStopOrder({
-        uid: row.uid,
-        pid: row.id,
-        symbol: row.symbol,
+      const risk = gridProtectionGuarantee.getProtectionImmediateTriggerRisk({
         leg,
-        qty,
+        boundType: "GSTOP",
         triggerPrice: stopPrice,
+        price,
       });
+      const stopOrder = risk.blocked
+        ? buildProtectionFailureOrder({
+            kind: "STOP",
+            clientOrderId: stopClientOrderId,
+            price: stopPrice,
+            risk,
+          })
+        : await coin.placeGridStopOrder({
+            uid: row.uid,
+            pid: row.id,
+            symbol: row.symbol,
+            leg,
+            qty,
+            triggerPrice: stopPrice,
+            clientOrderId: stopClientOrderId,
+          });
       result.stopOrderId = stopOrder?.clientOrderId || null;
       result.stopSourceOrderId = stopOrder?.orderId || null;
+      result.stopErrorCode = stopOrder?.errorCode || null;
+      result.stopErrorMessage = stopOrder?.errorMessage || null;
+      result.stopImmediateTrigger = Boolean(stopOrder?.immediateTrigger);
     } catch (error) {
+      result.stopErrorCode = error?.code || null;
+      result.stopErrorMessage = error?.message || String(error);
       await appendGridRuntimeLog(
         row,
         "gridLiveOpen",
@@ -1707,7 +1783,173 @@ const placeLiveExitOrdersForLeg = async (row, leg, qty, entryPrice) => {
     }
   }
 
+  const outcome = gridProtectionGuarantee.classifyProtectionOutcome({
+    takeProfit: {
+      clientOrderId: result.takeProfitOrderId,
+      sourceOrderId: result.takeProfitSourceOrderId,
+      errorCode: result.takeProfitErrorCode,
+      errorMessage: result.takeProfitErrorMessage,
+      immediateTrigger: result.takeProfitImmediateTrigger,
+    },
+    stop: {
+      clientOrderId: result.stopOrderId,
+      sourceOrderId: result.stopSourceOrderId,
+      errorCode: result.stopErrorCode,
+      errorMessage: result.stopErrorMessage,
+      immediateTrigger: result.stopImmediateTrigger,
+    },
+    oneLegEmergency: options.oneLegEmergency === true,
+  });
+  result.missingProtection = outcome.missing;
+  result.protectionState = outcome.state;
+  result.protectionReason = outcome.reason;
+  result.protectionOutcome = outcome;
   return result;
+};
+
+const buildGridProtectedLegPatch = ({
+  row,
+  leg,
+  entryOrderId,
+  entryPrice,
+  qty,
+  exits,
+  regimeStatus = "ACTIVE",
+  regimeEndReason = null,
+}) => buildOpenLegPatch({
+  leg,
+  entryOrderId,
+  entryPrice,
+  qty,
+  takeProfitPrice: exits.takeProfitPrice,
+  stopPrice: exits.stopPrice,
+  takeProfitOrderId: exits.takeProfitOrderId,
+  stopOrderId: exits.stopOrderId,
+  regimeStatus,
+  regimeEndReason,
+});
+
+const markGridProtectionCriticalState = async ({
+  row,
+  leg,
+  qty,
+  entryPrice,
+  entryOrderId,
+  exits,
+  oneLegEmergency = false,
+  reason = null,
+} = {}) => {
+  const outcome = exits?.protectionOutcome || gridProtectionGuarantee.classifyProtectionOutcome({
+    takeProfit: {
+      clientOrderId: exits?.takeProfitOrderId || null,
+      errorCode: exits?.takeProfitErrorCode || null,
+      errorMessage: exits?.takeProfitErrorMessage || null,
+      immediateTrigger: exits?.takeProfitImmediateTrigger || false,
+    },
+    stop: {
+      clientOrderId: exits?.stopOrderId || null,
+      errorCode: exits?.stopErrorCode || null,
+      errorMessage: exits?.stopErrorMessage || null,
+      immediateTrigger: exits?.stopImmediateTrigger || false,
+    },
+    oneLegEmergency,
+  });
+  const state = oneLegEmergency
+    ? gridProtectionGuarantee.GRID_PROTECTION_STATE.ONE_LEG_UNPROTECTED
+    : outcome.state;
+  await applyGridPatch("live_grid_strategy_list", row.id, {
+    ...buildGridProtectedLegPatch({
+      row,
+      leg,
+      entryOrderId,
+      entryPrice,
+      qty,
+      exits,
+      regimeStatus: state,
+      regimeEndReason: reason || outcome.reason,
+    }),
+  });
+  await appendGridRuntimeLog(
+    row,
+    "gridProtect",
+    outcome.partial ? "PROTECTION_PARTIAL_CRITICAL" : "PROTECTION_UNPROTECTED_CRITICAL",
+    `leg:${leg}, entryOrderId:${entryOrderId || "NONE"}, qty:${qty}, missing:${outcome.missing.join("+") || "NONE"}, reason:${reason || outcome.reason}, tpCode:${outcome.takeProfit.errorCode || "OK"}, stopCode:${outcome.stop.errorCode || "OK"}`,
+    leg
+  );
+  return outcome;
+};
+
+const protectGridOpenLegOrClose = async ({
+  row,
+  leg,
+  qty,
+  entryPrice,
+  entryOrderId,
+  normalRegimeStatus = "ACTIVE",
+  normalRegimeEndReason = null,
+  oneLegEmergency = false,
+  failureLogCode = "ENTRY_PROTECTION_MISSING_CLOSED",
+  failureMessage = null,
+} = {}) => {
+  const exits = await placeLiveExitOrdersForLeg(row, leg, qty, entryPrice, {
+    entryOrderId,
+    oneLegEmergency,
+  });
+  await syncGridExitReservationsForLeg(row, leg, exits, qty);
+  const outcome = exits.protectionOutcome || gridProtectionGuarantee.classifyProtectionOutcome({
+    takeProfit: { clientOrderId: exits.takeProfitOrderId },
+    stop: { clientOrderId: exits.stopOrderId },
+    oneLegEmergency,
+  });
+
+  if (outcome.protected) {
+    await applyGridPatch("live_grid_strategy_list", row.id, {
+      ...buildGridProtectedLegPatch({
+        row,
+        leg,
+        entryOrderId,
+        entryPrice,
+        qty,
+        exits,
+        regimeStatus: oneLegEmergency
+          ? gridProtectionGuarantee.GRID_PROTECTION_STATE.ONE_LEG_PROTECTED
+          : normalRegimeStatus,
+        regimeEndReason: oneLegEmergency
+          ? "PAIR_ONE_LEG_PROTECTED"
+          : normalRegimeEndReason,
+      }),
+    });
+    return {
+      protected: true,
+      exits,
+      outcome,
+      closed: false,
+    };
+  }
+
+  await markGridProtectionCriticalState({
+    row,
+    leg,
+    qty,
+    entryPrice,
+    entryOrderId,
+    exits,
+    oneLegEmergency,
+    reason: outcome.reason,
+  });
+  const closed = await emergencyCloseLiveGridLeg(
+    row,
+    leg,
+    qty,
+    failureLogCode,
+    failureMessage || `leg:${leg}, entryOrderId:${entryOrderId || "NONE"}, qty:${qty}, entryPrice:${entryPrice}, missing:${outcome.missing.join("+") || "NONE"}, reason:${outcome.reason}`
+  );
+  return {
+    protected: false,
+    exits,
+    outcome,
+    closed,
+  };
 };
 
 const syncGridExitReservationsForLeg = async (row, leg, exits, qty) => {
@@ -1829,33 +2071,19 @@ const restoreLiveGridLegAfterRecoveredEntryFill = async (row, leg, execution, is
     });
   }
 
-  const exits = await placeLiveExitOrdersForLeg(current, leg, qty, entryPrice);
-  await syncGridExitReservationsForLeg(current, leg, exits, qty);
-  const missingProtection = collectMissingGridProtection(exits);
-  if (missingProtection.length > 0) {
-    return await emergencyCloseLiveGridLeg(
-      current,
-      leg,
-      qty,
-      "ENTRY_FILL_RECOVERED_PROTECTION_MISSING_CLOSED",
-      `leg:${leg}, clientOrderId:${execution.clientOrderId}, qty:${qty}, entryPrice:${entryPrice}, missing:${missingProtection.join("+")}, issues:${[].concat(issue?.issues || []).join(",")}`
-    );
+  const protection = await protectGridOpenLegOrClose({
+    row: current,
+    leg,
+    qty,
+    entryPrice,
+    entryOrderId: execution.clientOrderId,
+    failureLogCode: "ENTRY_FILL_RECOVERED_PROTECTION_MISSING_CLOSED",
+    failureMessage: `leg:${leg}, clientOrderId:${execution.clientOrderId}, qty:${qty}, entryPrice:${entryPrice}, issues:${[].concat(issue?.issues || []).join(",")}`,
+  });
+  if (!protection.protected) {
+    return protection.closed;
   }
 
-  await applyGridPatch("live_grid_strategy_list", current.id, {
-    ...buildOpenLegPatch({
-      leg,
-      entryOrderId: execution.clientOrderId,
-      entryPrice,
-      qty,
-      takeProfitPrice: exits.takeProfitPrice,
-      stopPrice: exits.stopPrice,
-      takeProfitOrderId: exits.takeProfitOrderId,
-      stopOrderId: exits.stopOrderId,
-      regimeStatus: "ACTIVE",
-      regimeEndReason: null,
-    }),
-  });
   await touchGridLegPositionOwnership(current, leg, {
     ownerState: "OPEN",
     sourceClientOrderId: execution.clientOrderId,
@@ -1866,7 +2094,7 @@ const restoreLiveGridLegAfterRecoveredEntryFill = async (row, leg, execution, is
     current,
     "gridReconcile",
     "ENTRY_FILL_RECOVERED",
-    `leg:${leg}, clientOrderId:${execution.clientOrderId}, orderId:${execution.orderId}, qty:${qty}, entryPrice:${entryPrice}, issues:${[].concat(issue?.issues || []).join(",")}`,
+    `leg:${leg}, clientOrderId:${execution.clientOrderId}, orderId:${execution.orderId}, qty:${qty}, entryPrice:${entryPrice}, tp:${protection.exits.takeProfitOrderId}, stop:${protection.exits.stopOrderId}, issues:${[].concat(issue?.issues || []).join(",")}`,
     leg
   );
   return true;
@@ -1962,6 +2190,21 @@ const armMissingLiveExits = async (row) => {
       stopOrderId: patch[`${prefix}StopOrderId`] || current[`${prefix}StopOrderId`] || null,
     });
     if (missingProtection.length > 0) {
+      await markGridProtectionCriticalState({
+        row: current,
+        leg,
+        qty,
+        entryPrice,
+        entryOrderId: current[`${prefix}EntryOrderId`] || null,
+        exits: {
+          takeProfitPrice: current[`${prefix}TakeProfitPrice`],
+          stopPrice: current[`${prefix}StopPrice`],
+          takeProfitOrderId: patch[`${prefix}ExitOrderId`] || current[`${prefix}ExitOrderId`] || null,
+          stopOrderId: patch[`${prefix}StopOrderId`] || current[`${prefix}StopOrderId`] || null,
+          missingProtection,
+        },
+        reason: "PROTECTION_REPAIR_INCOMPLETE",
+      });
       return await emergencyCloseLiveGridLeg(
         current,
         leg,
@@ -2098,6 +2341,12 @@ const rollbackGridPairSuccessfulLeg = async (row, leg, placement) => {
   if (gridPairAtomicity.isOrderFilledOrPartiallyFilled(exchangeOrder || {})) {
     const qty = gridPairAtomicity.getOrderExecutedQty(exchangeOrder);
     const entryPrice = toNumber(exchangeOrder?.avgPrice || exchangeOrder?.price || 0);
+    await touchGridLegPositionOwnership(row, leg, {
+      ownerState: "OPEN",
+      sourceClientOrderId: clientOrderId,
+      sourceOrderId: placement?.orderId || exchangeOrder?.orderId || null,
+      note: "grid pair arm sibling failed after fill",
+    });
     await applyGridPatch("live_grid_strategy_list", row.id, {
       regimeStatus: gridPairAtomicity.GRID_PAIR_STATE.ONE_LEG_FILLED,
       regimeEndReason: "PAIR_ARM_SIBLING_FAILED",
@@ -2106,23 +2355,30 @@ const rollbackGridPairSuccessfulLeg = async (row, leg, placement) => {
       [`${prefix}Qty`]: qty,
       [`${prefix}EntryPrice`]: entryPrice > 0 ? entryPrice : null,
     });
-    await touchGridLegPositionOwnership(row, leg, {
-      ownerState: "OPEN",
-      sourceClientOrderId: clientOrderId,
-      sourceOrderId: placement?.orderId || exchangeOrder?.orderId || null,
-      note: "grid pair arm sibling failed after fill",
+    const protectedOrClosed = await protectGridOpenLegOrClose({
+      row: { ...row, regimeStatus: gridPairAtomicity.GRID_PAIR_STATE.ONE_LEG_FILLED },
+      leg,
+      qty,
+      entryPrice,
+      entryOrderId: clientOrderId,
+      oneLegEmergency: true,
+      failureLogCode: "PAIR_ONE_LEG_PROTECTION_MISSING_CLOSED",
+      failureMessage: `leg:${leg}, clientOrderId:${clientOrderId}, qty:${qty}, entryPrice:${entryPrice}, sibling:failed`,
     });
     await appendGridRuntimeLog(
       row,
       "gridLiveArm",
-      "PAIR_ONE_LEG_FILLED",
-      `leg:${leg}, clientOrderId:${clientOrderId}, qty:${qty}, sibling:failed`,
+      protectedOrClosed.protected ? "PAIR_ONE_LEG_PROTECTED" : "PAIR_ONE_LEG_PROTECTION_CRITICAL",
+      `leg:${leg}, clientOrderId:${clientOrderId}, qty:${qty}, sibling:failed, protected:${protectedOrClosed.protected ? "Y" : "N"}`,
       leg
     );
     return {
-      state: gridPairAtomicity.GRID_PAIR_STATE.ONE_LEG_FILLED,
+      state: protectedOrClosed.protected
+        ? gridProtectionGuarantee.GRID_PROTECTION_STATE.ONE_LEG_PROTECTED
+        : gridProtectionGuarantee.GRID_PROTECTION_STATE.ONE_LEG_UNPROTECTED,
       cancelVerified: false,
       filled: true,
+      protected: protectedOrClosed.protected,
     };
   }
 
@@ -2441,6 +2697,37 @@ const armMissingLiveEntries = async (row) => {
   }
 
   return changed;
+};
+
+const protectExistingOneLegEmergency = async (row) => {
+  let handled = false;
+  for (const leg of GRID_ENTRY_PAIR_LEGS) {
+    const prefix = getLegFieldPrefix(leg);
+    const qty = toNumber(row?.[`${prefix}Qty`]);
+    const entryPrice = toNumber(row?.[`${prefix}EntryPrice`]);
+    const entryOrderId = row?.[`${prefix}EntryOrderId`] || null;
+    if (!(qty > 0) || !(entryPrice > 0) || !entryOrderId) {
+      continue;
+    }
+
+    if (row?.[`${prefix}ExitOrderId`] && row?.[`${prefix}StopOrderId`]) {
+      continue;
+    }
+
+    await protectGridOpenLegOrClose({
+      row,
+      leg,
+      qty,
+      entryPrice,
+      entryOrderId,
+      oneLegEmergency: true,
+      failureLogCode: "PAIR_ONE_LEG_PROTECTION_MISSING_CLOSED",
+      failureMessage: `leg:${leg}, clientOrderId:${entryOrderId}, qty:${qty}, entryPrice:${entryPrice}, reason:existing-one-leg-emergency`,
+    });
+    handled = true;
+  }
+
+  return handled;
 };
 
 const handleGridBoundaryReset = async (mode, row, reason, message) => {
@@ -2812,7 +3099,12 @@ const runLiveCycleForItem = async (row) => {
     return;
   }
 
-  if (gridPairAtomicity.isPairArmDefectState(row)) {
+  if (row.regimeStatus === gridPairAtomicity.GRID_PAIR_STATE.ONE_LEG_FILLED) {
+    await protectExistingOneLegEmergency(row);
+    return;
+  }
+
+  if (gridPairAtomicity.isPairArmDefectState(row) || gridProtectionGuarantee.isProtectionCriticalState(row)) {
     return;
   }
 
@@ -3045,34 +3337,22 @@ const handleLiveGridEntryFill = async (parsed, reData) => {
       });
     }
 
-    const exits = await placeLiveExitOrdersForLeg(row, parsed.leg, qty, entryPrice);
-    await syncGridExitReservationsForLeg(row, parsed.leg, exits, qty);
-    const missingProtection = collectMissingGridProtection(exits);
-    if (missingProtection.length > 0) {
-      setOutcome("ENTRY_PROTECTION_MISSING");
-      return await emergencyCloseLiveGridLeg(
-        row,
-        parsed.leg,
-        qty,
-        "ENTRY_PROTECTION_MISSING_CLOSED",
-        `leg:${parsed.leg}, entryOrderId:${parsed.clientOrderId}, qty:${qty}, entryPrice:${entryPrice}, missing:${missingProtection.join("+")}`
-      );
-    }
-
-    await applyGridPatch("live_grid_strategy_list", row.id, {
-      ...buildOpenLegPatch({
-        leg: parsed.leg,
-        entryOrderId: parsed.clientOrderId,
-        entryPrice,
-        qty,
-        takeProfitPrice: exits.takeProfitPrice,
-        stopPrice: exits.stopPrice,
-        takeProfitOrderId: exits.takeProfitOrderId,
-        stopOrderId: exits.stopOrderId,
-        regimeStatus: row.regimeStatus === "ENDED" ? "ENDED" : "ACTIVE",
-        regimeEndReason: row.regimeStatus === "ENDED" ? row.regimeEndReason || "BOX_BREAK" : null,
-      }),
+    const protection = await protectGridOpenLegOrClose({
+      row,
+      leg: parsed.leg,
+      qty,
+      entryPrice,
+      entryOrderId: parsed.clientOrderId,
+      normalRegimeStatus: row.regimeStatus === "ENDED" ? "ENDED" : "ACTIVE",
+      normalRegimeEndReason: row.regimeStatus === "ENDED" ? row.regimeEndReason || "BOX_BREAK" : null,
+      oneLegEmergency: row.regimeStatus === gridPairAtomicity.GRID_PAIR_STATE.ONE_LEG_FILLED,
+      failureLogCode: "ENTRY_PROTECTION_MISSING_CLOSED",
+      failureMessage: `leg:${parsed.leg}, entryOrderId:${parsed.clientOrderId}, qty:${qty}, entryPrice:${entryPrice}`,
     });
+    if (!protection.protected) {
+      setOutcome(protection.outcome.partial ? "ENTRY_PARTIAL_PROTECTION_CRITICAL" : "ENTRY_UNPROTECTED_CRITICAL");
+      return protection.closed;
+    }
     await touchGridLegPositionOwnership(row, parsed.leg, {
       ownerState: "OPEN",
       sourceClientOrderId: parsed.clientOrderId,
@@ -3082,11 +3362,11 @@ const handleLiveGridEntryFill = async (parsed, reData) => {
     await appendGridRuntimeLog(
       row,
       "gridLiveOpen",
-      "ENTRY_FILLED",
-      `leg:${parsed.leg}, entryPrice:${entryPrice}, qty:${qty}, tp:${exits.takeProfitPrice}, stop:${exits.stopPrice}`,
+      row.regimeStatus === gridPairAtomicity.GRID_PAIR_STATE.ONE_LEG_FILLED ? "ENTRY_FILLED_ONE_LEG_PROTECTED" : "ENTRY_FILLED",
+      `leg:${parsed.leg}, entryPrice:${entryPrice}, qty:${qty}, tp:${protection.exits.takeProfitOrderId}, stop:${protection.exits.stopOrderId}`,
       parsed.leg
     );
-    setOutcome("ENTRY_FILLED");
+    setOutcome(row.regimeStatus === gridPairAtomicity.GRID_PAIR_STATE.ONE_LEG_FILLED ? "ENTRY_ONE_LEG_PROTECTED" : "ENTRY_FILLED");
     return true;
     });
   });
@@ -3139,6 +3419,15 @@ const handleLiveGridTakeProfitFill = async (parsed, reData) => {
     const missingProtection = collectMissingGridProtection(exits);
     if (missingProtection.length > 0) {
       setOutcome("TP_PARTIAL_REPROTECT_FAILED");
+      await markGridProtectionCriticalState({
+        row,
+        leg: parsed.leg,
+        qty: remainingQty,
+        entryPrice: remainingEntryPrice,
+        entryOrderId: row[`${getLegFieldPrefix(parsed.leg)}EntryOrderId`] || null,
+        exits,
+        reason: exits.protectionReason || "TP_PARTIAL_REPROTECT_FAILED",
+      });
       return await emergencyCloseLiveGridLeg(
         row,
         parsed.leg,
@@ -3188,6 +3477,15 @@ const handleLiveGridTakeProfitFill = async (parsed, reData) => {
     const missingProtection = collectMissingGridProtection(exits);
     if (missingProtection.length > 0) {
       setOutcome("TP_REMAINING_REPROTECT_FAILED");
+      await markGridProtectionCriticalState({
+        row,
+        leg: parsed.leg,
+        qty: remainingQty,
+        entryPrice: remainingEntryPrice,
+        entryOrderId: row[`${getLegFieldPrefix(parsed.leg)}EntryOrderId`] || null,
+        exits,
+        reason: exits.protectionReason || "TP_REMAINING_REPROTECT_FAILED",
+      });
       return await emergencyCloseLiveGridLeg(
         row,
         parsed.leg,
