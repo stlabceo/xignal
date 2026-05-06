@@ -46,6 +46,26 @@ const REENTRY_QUEUE_STATE = Object.freeze({
   BLOCKED_REDIS: "REENTRY_BLOCKED_REDIS",
 });
 
+const CANCEL_QUEUE_STATE = Object.freeze({
+  INTENT_PENDING: "CANCEL_INTENT_PENDING",
+  RUNNING: "CANCEL_RUNNING",
+  VERIFY_PENDING: "CANCEL_VERIFY_PENDING",
+  FAILED_ACTIVE_ORDER_REMAINS: "CANCEL_FAILED_ACTIVE_ORDER_REMAINS",
+  VERIFIED_GONE: "CANCEL_VERIFIED_GONE",
+  BLOCKED_REDIS: "CANCEL_BLOCKED_REDIS",
+});
+
+const CLOSE_QUEUE_STATE = Object.freeze({
+  INTENT_PENDING: "CLOSE_INTENT_PENDING",
+  RUNNING: "CLOSE_RUNNING",
+  FAILED: "CLOSE_FAILED",
+  BLOCKED_OWNERSHIP: "CLOSE_BLOCKED_OWNERSHIP",
+  RESERVED_DUPLICATE: "CLOSE_RESERVED_DUPLICATE",
+  GMANUAL_QUEUED: "GMANUAL_QUEUED",
+  CONTROLLED_QUEUED: "CONTROLLED_CLOSE_QUEUED",
+  BLOCKED_REDIS: "CLOSE_BLOCKED_REDIS",
+});
+
 const getLegPrefix = (leg) => (String(leg || "").toUpperCase() === "SHORT" ? "short" : "long");
 
 const loadFreshGridDecisionPriceForWorker = async (symbol, options = {}) => {
@@ -196,6 +216,322 @@ const updateGridReentryProjection = async ({ payload = {}, state, clientOrderId 
     [...Object.values(patch), rowId, Number(payload.uid || 0)]
   );
   return true;
+};
+
+const updateGridCancelProjection = async ({ payload = {}, state, reason = null } = {}) => {
+  const rowId = Number(payload.gridRowId || payload.regimeId || payload.pid || 0);
+  if (!(rowId > 0) || !payload.uid) {
+    return false;
+  }
+  await db.query(
+    `UPDATE live_grid_strategy_list
+        SET regimeStatus = ?,
+            regimeEndReason = ?,
+            updatedAt = CURRENT_TIMESTAMP
+      WHERE id = ?
+        AND uid = ?`,
+    [state, reason || state, rowId, Number(payload.uid || 0)]
+  );
+  return true;
+};
+
+const updateGridCloseProjection = async ({ payload = {}, state, reason = null } = {}) => {
+  const rowId = Number(payload.gridRowId || payload.regimeId || payload.pid || 0);
+  if (!(rowId > 0) || !payload.uid) {
+    return false;
+  }
+  await db.query(
+    `UPDATE live_grid_strategy_list
+        SET regimeStatus = ?,
+            regimeEndReason = ?,
+            updatedAt = CURRENT_TIMESTAMP
+      WHERE id = ?
+        AND uid = ?`,
+    [state, reason || state, rowId, Number(payload.uid || 0)]
+  );
+  return true;
+};
+
+const processGridCancelIntent = async (intent, options = {}) => {
+  const env = options.env || process.env;
+  const payload = intent?.payload?.cancel || intent?.payload || {};
+  const lockRedisClient = Object.prototype.hasOwnProperty.call(options, "redisClient")
+    ? options.redisClient
+    : redisClient;
+  const redisGate = liveWriteSafetyGate.evaluateRedisLockUnavailable({
+    env,
+    liveScope: true,
+    strategyCategory: "grid",
+    scope: "ORDER_INTENT_WORKER",
+    lockKey: `order-intent-worker:grid-cancel:${intent.fifoKey || intent.id}`,
+  });
+
+  if (!liveWriteSafetyGate.isRedisClientReady(lockRedisClient) && !redisGate.allowed) {
+    await updateGridCancelProjection({
+      payload,
+      state: CANCEL_QUEUE_STATE.BLOCKED_REDIS,
+      reason: redisGate.reason,
+    }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(redisGate.reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: CANCEL_QUEUE_STATE.BLOCKED_REDIS,
+      }),
+      errorCode: redisGate.reason,
+      errorMessage: "Redis lock unavailable; live grid cancel worker write blocked.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: redisGate.reason };
+  }
+
+  if (options.dryRun === true || options.mock === true) {
+    const mock = options.mockCancelResult || {};
+    let status = orderIntentQueue.STATUS.DONE;
+    let projectionState = CANCEL_QUEUE_STATE.VERIFIED_GONE;
+    let reason = "CANCEL_VERIFIED_GONE";
+
+    if (mock.timeout === true || mock.verifyPending === true) {
+      status = orderIntentQueue.STATUS.BLOCKED;
+      projectionState = CANCEL_QUEUE_STATE.VERIFY_PENDING;
+      reason = "CANCEL_VERIFY_PENDING";
+    } else if (mock.notFound === true && mock.openOrderStillPresent === true) {
+      status = orderIntentQueue.STATUS.BLOCKED;
+      projectionState = CANCEL_QUEUE_STATE.FAILED_ACTIVE_ORDER_REMAINS;
+      reason = "CANCEL_404_ACTIVE_ORDER_REMAINS";
+    } else if (mock.ok === false) {
+      status = orderIntentQueue.STATUS.BLOCKED;
+      projectionState = CANCEL_QUEUE_STATE.FAILED_ACTIVE_ORDER_REMAINS;
+      reason = mock.reason || "CANCEL_FAILED_ACTIVE_ORDER_REMAINS";
+    }
+
+    await updateGridCancelProjection({ payload, state: projectionState, reason }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status,
+      result: {
+        ok: status === orderIntentQueue.STATUS.DONE,
+        dryRun: options.dryRun === true,
+        mock: options.mock === true,
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState,
+        reason,
+        targetType: payload.targetType || null,
+        targetClientOrderId: payload.targetClientOrderId || null,
+      },
+      errorCode: status === orderIntentQueue.STATUS.DONE ? null : reason,
+      errorMessage: status === orderIntentQueue.STATUS.DONE ? null : `Grid cancel not verified:${reason}`,
+    });
+    return { processed: true, status, reason, projectionState };
+  }
+
+  await updateGridCancelProjection({
+    payload,
+    state: CANCEL_QUEUE_STATE.RUNNING,
+    reason: "CANCEL_WORKER_LIVE_WRITE_DISABLED",
+  }).catch(() => {});
+  await orderIntentQueue.completeIntent({
+    id: intent.id,
+    status: orderIntentQueue.STATUS.BLOCKED,
+    result: buildBlockResult("CANCEL_WORKER_LIVE_WRITE_DISABLED", {
+      intentType: intent.intentType,
+      fifoKey: intent.fifoKey,
+      projectionState: CANCEL_QUEUE_STATE.RUNNING,
+      note: "actual Binance cancel dispatch is intentionally blocked outside live runtime validation",
+    }),
+    errorCode: "CANCEL_WORKER_LIVE_WRITE_DISABLED",
+    errorMessage: "Grid cancel worker dispatch intentionally blocked for non-mock execution.",
+  });
+  return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: "CANCEL_WORKER_LIVE_WRITE_DISABLED" };
+};
+
+const processGridCloseIntent = async (intent, options = {}) => {
+  const env = options.env || process.env;
+  const payload = intent?.payload?.close || intent?.payload || {};
+  const lockRedisClient = Object.prototype.hasOwnProperty.call(options, "redisClient")
+    ? options.redisClient
+    : redisClient;
+  const redisGate = liveWriteSafetyGate.evaluateRedisLockUnavailable({
+    env,
+    liveScope: true,
+    strategyCategory: "grid",
+    scope: "ORDER_INTENT_WORKER",
+    lockKey: `order-intent-worker:grid-close:${intent.fifoKey || intent.id}`,
+  });
+
+  if (!liveWriteSafetyGate.isRedisClientReady(lockRedisClient) && !redisGate.allowed) {
+    await updateGridCloseProjection({
+      payload,
+      state: CLOSE_QUEUE_STATE.BLOCKED_REDIS,
+      reason: redisGate.reason,
+    }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(redisGate.reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: CLOSE_QUEUE_STATE.BLOCKED_REDIS,
+      }),
+      errorCode: redisGate.reason,
+      errorMessage: "Redis lock unavailable; live grid close worker write blocked.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: redisGate.reason };
+  }
+
+  const ownershipReadiness = await positionOwnership.getOwnershipReadiness().catch((error) => ({
+    enabled: false,
+    error: error?.message || String(error),
+  }));
+  const ownershipGate = liveWriteSafetyGate.evaluateOwnershipGuard({
+    env,
+    strategyCategory: "grid",
+    uid: intent.uid,
+    pid: intent.pid,
+    symbol: payload.symbol || null,
+    positionSide: payload.positionSide || null,
+    ownershipEnabled: ownershipReadiness.enabled === true,
+  });
+  if (!ownershipGate.allowed) {
+    await updateGridCloseProjection({
+      payload,
+      state: CLOSE_QUEUE_STATE.BLOCKED_OWNERSHIP,
+      reason: ownershipGate.reason,
+    }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(ownershipGate.reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: CLOSE_QUEUE_STATE.BLOCKED_OWNERSHIP,
+      }),
+      errorCode: ownershipGate.reason,
+      errorMessage: `DB-backed PID ownership unavailable; live grid close worker write blocked. status:${ownershipReadiness.status || "UNKNOWN"}`,
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: ownershipGate.reason };
+  }
+
+  const requestedQty = Number(payload.qty || payload.ownedQtyBasis || 0);
+  const ownershipQty = await positionOwnership.resolveOwnedCloseQty({
+    uid: intent.uid,
+    pid: intent.pid,
+    strategyCategory: "grid",
+    symbol: payload.symbol,
+    positionSide: payload.positionSide,
+    requestedQty,
+  });
+  const closeQty = Number(ownershipQty.finalCloseQty || 0);
+  if (!ownershipQty.allowed || !(closeQty > 0)) {
+    const projectionState = ownershipQty.reason === "OWNERSHIP_CLOSE_QTY_RESERVED"
+      ? CLOSE_QUEUE_STATE.RESERVED_DUPLICATE
+      : CLOSE_QUEUE_STATE.BLOCKED_OWNERSHIP;
+    await updateGridCloseProjection({
+      payload,
+      state: projectionState,
+      reason: ownershipQty.reason || "OWNERSHIP_BLOCKED",
+    }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(ownershipQty.reason || "OWNERSHIP_BLOCKED", {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState,
+        ownership: ownershipQty,
+      }),
+      errorCode: ownershipQty.reason || "OWNERSHIP_BLOCKED",
+      errorMessage: "Grid close worker blocked by PID-owned qty guard.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: ownershipQty.reason || "OWNERSHIP_BLOCKED" };
+  }
+
+  if (ownershipQty.overRequested || requestedQty > closeQty + 1e-9) {
+    await updateGridCloseProjection({
+      payload,
+      state: CLOSE_QUEUE_STATE.BLOCKED_OWNERSHIP,
+      reason: "CLOSE_OVER_OWNED_QTY_BLOCKED",
+    }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult("CLOSE_OVER_OWNED_QTY_BLOCKED", {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: CLOSE_QUEUE_STATE.BLOCKED_OWNERSHIP,
+        requestedQty,
+        closeQty,
+        ownership: ownershipQty,
+      }),
+      errorCode: "CLOSE_OVER_OWNED_QTY_BLOCKED",
+      errorMessage: "Grid close requested qty exceeds PID-owned available qty.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: "CLOSE_OVER_OWNED_QTY_BLOCKED" };
+  }
+
+  if (options.dryRun === true || options.mock === true) {
+    const mock = options.mockCloseResult || {};
+    if (mock.ok === false) {
+      const reason = mock.reason || "CLOSE_SUBMIT_FAILED";
+      await updateGridCloseProjection({ payload, state: CLOSE_QUEUE_STATE.FAILED, reason }).catch(() => {});
+      await orderIntentQueue.completeIntent({
+        id: intent.id,
+        status: orderIntentQueue.STATUS.FAILED,
+        result: {
+          ok: false,
+          dryRun: options.dryRun === true,
+          mock: options.mock === true,
+          intentType: intent.intentType,
+          fifoKey: intent.fifoKey,
+          projectionState: CLOSE_QUEUE_STATE.FAILED,
+          closeClientOrderId: payload.closeClientOrderId || null,
+          reason,
+        },
+        errorCode: reason,
+        errorMessage: `Grid close failed:${reason}`,
+      });
+      return { processed: true, status: orderIntentQueue.STATUS.FAILED, reason };
+    }
+
+    await updateGridCloseProjection({ payload, state: CLOSE_QUEUE_STATE.RUNNING, reason: payload.reason || "CLOSE_RUNNING" }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.DONE,
+      result: {
+        ok: true,
+        dryRun: options.dryRun === true,
+        mock: options.mock === true,
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: CLOSE_QUEUE_STATE.RUNNING,
+        closeClientOrderId: payload.closeClientOrderId || null,
+        closeQty,
+        ownership: ownershipQty,
+      },
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.DONE, reason: CLOSE_QUEUE_STATE.RUNNING };
+  }
+
+  await updateGridCloseProjection({
+    payload,
+    state: CLOSE_QUEUE_STATE.RUNNING,
+    reason: "CLOSE_WORKER_LIVE_WRITE_DISABLED",
+  }).catch(() => {});
+  await orderIntentQueue.completeIntent({
+    id: intent.id,
+    status: orderIntentQueue.STATUS.BLOCKED,
+    result: buildBlockResult("CLOSE_WORKER_LIVE_WRITE_DISABLED", {
+      intentType: intent.intentType,
+      fifoKey: intent.fifoKey,
+      projectionState: CLOSE_QUEUE_STATE.RUNNING,
+      note: "actual Binance close dispatch is intentionally blocked outside live runtime validation",
+    }),
+    errorCode: "CLOSE_WORKER_LIVE_WRITE_DISABLED",
+    errorMessage: "Grid close worker dispatch intentionally blocked for non-mock execution.",
+  });
+  return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: "CLOSE_WORKER_LIVE_WRITE_DISABLED" };
 };
 
 const loadActiveCloseReservationCount = async (payload = {}) => {
@@ -698,6 +1034,21 @@ const processIntent = async (intent, options = {}) => {
     return await processGridReentryCreateIntent(intent, options);
   }
 
+  if (
+    intent.intentType === orderIntentQueue.INTENT_TYPE.GRID_CANCEL_ORDER ||
+    intent.intentType === orderIntentQueue.INTENT_TYPE.GRID_CANCEL_ALL_FOR_REGIME ||
+    intent.intentType === orderIntentQueue.INTENT_TYPE.GRID_REGIME_CLEANUP_CANCEL
+  ) {
+    return await processGridCancelIntent(intent, options);
+  }
+
+  if (
+    intent.intentType === orderIntentQueue.INTENT_TYPE.GRID_GMANUAL_CLOSE ||
+    intent.intentType === orderIntentQueue.INTENT_TYPE.GRID_CONTROLLED_CLOSE
+  ) {
+    return await processGridCloseIntent(intent, options);
+  }
+
   await orderIntentQueue.completeIntent({
     id: intent.id,
     status: orderIntentQueue.STATUS.FAILED,
@@ -767,8 +1118,12 @@ module.exports = {
   processIntent,
   processGridProtectionCreateIntent,
   processGridReentryCreateIntent,
+  processGridCancelIntent,
+  processGridCloseIntent,
   PROTECTION_QUEUE_STATE,
   REENTRY_QUEUE_STATE,
+  CANCEL_QUEUE_STATE,
+  CLOSE_QUEUE_STATE,
   startOrderIntentWorker,
   stopOrderIntentWorker,
   getOrderIntentWorkerHealth,

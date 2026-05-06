@@ -188,6 +188,20 @@ const deriveGridRuntimeState = (item = {}, options = {}) => {
     regimeStatus === "REENTRY_BLOCKED_PRICE_STALE" ||
     regimeStatus === "REENTRY_BLOCKED_OWNERSHIP" ||
     regimeStatus === "REENTRY_BLOCKED_REDIS" ||
+    regimeStatus === "CANCEL_INTENT_PENDING" ||
+    regimeStatus === "CANCEL_RUNNING" ||
+    regimeStatus === "CANCEL_VERIFY_PENDING" ||
+    regimeStatus === "CANCEL_FAILED_ACTIVE_ORDER_REMAINS" ||
+    regimeStatus === "CANCEL_VERIFIED_GONE" ||
+    regimeStatus === "CANCEL_BLOCKED_REDIS" ||
+    regimeStatus === "CLOSE_INTENT_PENDING" ||
+    regimeStatus === "CLOSE_RUNNING" ||
+    regimeStatus === "CLOSE_FAILED" ||
+    regimeStatus === "CLOSE_BLOCKED_OWNERSHIP" ||
+    regimeStatus === "CLOSE_RESERVED_DUPLICATE" ||
+    regimeStatus === "CLOSE_BLOCKED_REDIS" ||
+    regimeStatus === "GMANUAL_QUEUED" ||
+    regimeStatus === "CONTROLLED_CLOSE_QUEUED" ||
     regimeStatus === "GRID_REENTRY_STALE" ||
     regimeStatus === "GRID_REENTRY_FAILED" ||
     regimeStatus === "GRID_SL_CLEANUP_PENDING" ||
@@ -214,6 +228,20 @@ const GRID_CRITICAL_REGIME_STATES = new Set([
   "REENTRY_BLOCKED_PRICE_STALE",
   "REENTRY_BLOCKED_OWNERSHIP",
   "REENTRY_BLOCKED_REDIS",
+  "CANCEL_INTENT_PENDING",
+  "CANCEL_RUNNING",
+  "CANCEL_VERIFY_PENDING",
+  "CANCEL_FAILED_ACTIVE_ORDER_REMAINS",
+  "CANCEL_VERIFIED_GONE",
+  "CANCEL_BLOCKED_REDIS",
+  "CLOSE_INTENT_PENDING",
+  "CLOSE_RUNNING",
+  "CLOSE_FAILED",
+  "CLOSE_BLOCKED_OWNERSHIP",
+  "CLOSE_RESERVED_DUPLICATE",
+  "CLOSE_BLOCKED_REDIS",
+  "GMANUAL_QUEUED",
+  "CONTROLLED_CLOSE_QUEUED",
   "GRID_REENTRY_STALE",
   "GRID_REENTRY_FAILED",
   "GRID_SL_CLEANUP_PENDING",

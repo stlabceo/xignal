@@ -351,6 +351,13 @@ const getLegPositionSide = (leg) => getLegMeta(leg)?.positionSide || null;
 const buildGridClientOrderId = (prefix, leg, uid, pid) =>
   `${prefix}_${getLegMeta(leg)?.code || "X"}_${uid}_${pid}_${nowClientSuffix()}`;
 
+const GRID_CANCEL_CLOSE_STATE = Object.freeze({
+  CANCEL_INTENT_PENDING: "CANCEL_INTENT_PENDING",
+  CLOSE_INTENT_PENDING: "CLOSE_INTENT_PENDING",
+  GMANUAL_QUEUED: "GMANUAL_QUEUED",
+  CONTROLLED_CLOSE_QUEUED: "CONTROLLED_CLOSE_QUEUED",
+});
+
 const parseGridClientOrderId = (clientOrderId) => {
   const raw = String(clientOrderId || "").trim();
   const match = raw.match(/^(GENTRY|GTP|GSTOP|GMANUAL)_(L|S)_(\d+)_(\d+)(?:_(\d+))?$/);
@@ -936,20 +943,141 @@ const appendGridRuntimeLog = async (row, fun, code, message, leg = null) => {
   } catch (error) {}
 };
 
+const getGridCancelTargetType = (options = {}) => {
+  if (options.targetType) {
+    return String(options.targetType).trim().toUpperCase();
+  }
+  if (options.includeEntries === false && options.includeExits !== false) {
+    return "PROTECTION";
+  }
+  if (options.includeEntries !== false && options.includeExits === false) {
+    return "ENTRY";
+  }
+  return "ALL_FOR_REGIME";
+};
+
+const enqueueLiveGridCancelIntent = async (row, options = {}) => {
+  if (!row?.uid || !row?.id || !row?.symbol) {
+    return { pending: false, reason: "GRID_CANCEL_INTENT_INVALID_ROW" };
+  }
+  const targetType = getGridCancelTargetType(options);
+  const intentType = targetType === "REGIME_CLEANUP"
+    ? orderIntentQueue.INTENT_TYPE.GRID_REGIME_CLEANUP_CANCEL
+    : targetType === "ORDER"
+      ? orderIntentQueue.INTENT_TYPE.GRID_CANCEL_ORDER
+      : orderIntentQueue.INTENT_TYPE.GRID_CANCEL_ALL_FOR_REGIME;
+  const summary = await orderIntentQueue.enqueueGridCancelIntent({
+    intentType,
+    routePath: options.routePath || "grid-runtime-cancel",
+    sourceEventId: options.sourceEventId || null,
+    payload: {
+      uid: row.uid,
+      pid: row.id,
+      gridRowId: row.id,
+      regimeId: row.id,
+      symbol: row.symbol,
+      positionSide: options.leg || options.positionSide || null,
+      targetType,
+      targetOrderId: options.targetOrderId || null,
+      targetClientOrderId: options.targetClientOrderId || options.clientOrderId || null,
+      includeEntries: options.includeEntries !== false,
+      includeExits: options.includeExits !== false,
+      reason: options.reason || "GRID_CANCEL",
+      sourceReason: options.sourceReason || options.reason || "GRID_CANCEL",
+    },
+  });
+  await applyGridPatch("live_grid_strategy_list", row.id, {
+    regimeStatus: GRID_CANCEL_CLOSE_STATE.CANCEL_INTENT_PENDING,
+    regimeEndReason: options.reason || "CANCEL_INTENT_PENDING",
+  }).catch(() => {});
+  await appendGridRuntimeLog(
+    row,
+    "gridCancelQueue",
+    "CANCEL_INTENT_PENDING",
+    `targetType:${targetType}, leg:${options.leg || "ALL"}, intent:${summary.intent?.intentKey || "NONE"}, duplicate:${summary.duplicate || 0}`,
+    options.leg || null
+  );
+  return {
+    pending: true,
+    reason: "CANCEL_INTENT_PENDING",
+    targetType,
+    intentSummary: summary,
+  };
+};
+
+const enqueueLiveGridCloseIntent = async (row, leg, qty, reason = "CONTROLLED_CLOSE", options = {}) => {
+  const closeQty = toNumber(qty);
+  if (!row?.uid || !row?.id || !row?.symbol || !leg || !(closeQty > 0)) {
+    return { pending: false, reason: "GRID_CLOSE_INTENT_INVALID_ROW_OR_QTY" };
+  }
+  const normalizedReason = String(reason || "CONTROLLED_CLOSE").trim().toUpperCase();
+  const intentType = normalizedReason.includes("GMANUAL") || normalizedReason.includes("MANUAL")
+    ? orderIntentQueue.INTENT_TYPE.GRID_GMANUAL_CLOSE
+    : orderIntentQueue.INTENT_TYPE.GRID_CONTROLLED_CLOSE;
+  const closeClientOrderId = options.closeClientOrderId
+    || orderIntentQueue.buildGridCloseClientOrderId({
+      uid: row.uid,
+      pid: row.id,
+      symbol: row.symbol,
+      positionSide: leg,
+      qty: closeQty,
+      reason: normalizedReason,
+      sourceEventId: options.sourceEventId || null,
+      sourceOrderId: options.sourceOrderId || null,
+      sourceTradeId: options.sourceTradeId || null,
+      sourceClientOrderId: options.sourceClientOrderId || null,
+    });
+  const summary = await orderIntentQueue.enqueueGridCloseIntent({
+    intentType,
+    routePath: options.routePath || "grid-runtime-close",
+    sourceEventId: options.sourceEventId || null,
+    payload: {
+      uid: row.uid,
+      pid: row.id,
+      gridRowId: row.id,
+      regimeId: row.id,
+      symbol: row.symbol,
+      positionSide: leg,
+      qty: closeQty,
+      ownedQtyBasis: options.ownedQtyBasis || closeQty,
+      reservedCloseQtyBasis: options.reservedCloseQtyBasis || 0,
+      reason: normalizedReason,
+      sourceEventId: options.sourceEventId || null,
+      sourceOrderId: options.sourceOrderId || null,
+      sourceTradeId: options.sourceTradeId || null,
+      sourceClientOrderId: options.sourceClientOrderId || null,
+      closeClientOrderId,
+    },
+  });
+  const state = intentType === orderIntentQueue.INTENT_TYPE.GRID_GMANUAL_CLOSE
+    ? GRID_CANCEL_CLOSE_STATE.GMANUAL_QUEUED
+    : GRID_CANCEL_CLOSE_STATE.CONTROLLED_CLOSE_QUEUED;
+  await applyGridPatch("live_grid_strategy_list", row.id, {
+    regimeStatus: state,
+    regimeEndReason: normalizedReason,
+  }).catch(() => {});
+  await appendGridRuntimeLog(
+    row,
+    "gridCloseQueue",
+    state,
+    `leg:${leg}, qty:${closeQty}, closeClientOrderId:${closeClientOrderId}, intent:${summary.intent?.intentKey || "NONE"}, duplicate:${summary.duplicate || 0}`,
+    leg
+  );
+  return {
+    pending: true,
+    reason: state,
+    closeClientOrderId,
+    intentSummary: summary,
+  };
+};
+
 const cancelAllGridOrders = async (mode, row, options = {}) => {
   if (mode !== "LIVE") {
     return 0;
   }
 
-  const coin = getCoin();
-  return await coin.cancelGridOrders({
-    uid: row.uid,
-    symbol: row.symbol,
-    pid: row.id,
-    leg: options.leg || null,
-    includeEntries: options.includeEntries !== false,
-    includeExits: options.includeExits !== false,
-  });
+  await enqueueLiveGridCancelIntent(row, options);
+  return 0;
 };
 
 const loadLiveGridLegProtectionState = async (row, leg) => {
@@ -1540,94 +1668,31 @@ const truthSyncLiveGridRow = async ({ row, exchangeSnapshotCache = null } = {}) 
 };
 
 const emergencyCloseLiveGridLeg = async (row, leg, qty, logCode, message) => {
-  const coin = getCoin();
-  let cleanupOrderId = null;
-  let closeAttempt = null;
-
-  try {
-    await cancelAllGridOrders("LIVE", row, {
-      leg,
-      includeEntries: false,
-      includeExits: true,
-    });
-
-    const cleanupOrder = await coin.closeGridLegMarketOrder({
-      uid: row.uid,
-      pid: row.id,
-      symbol: row.symbol,
-      leg,
-      qty,
-    });
-    closeAttempt = cleanupOrder || null;
-    cleanupOrderId = cleanupOrder?.clientOrderId || null;
-  } catch (error) {
-    const reconciled = await reconcileEndedGridLegIfExchangeFlat(
-      row,
-      leg,
-      "gridLiveSafety",
-      logCode,
-      `${message}, closeError:${error?.message || error}`,
-      row.regimeEndReason || "BOX_BREAK"
-    );
-    if (reconciled) {
-      return true;
-    }
-    await appendGridRuntimeLog(
-      row,
-      "gridLiveSafety",
-      `${logCode}_CLOSE_ERROR`,
-      `${message}, closeError:${error?.message || error}`,
-      leg
-    );
-    return false;
-  }
-
-  if (!cleanupOrderId) {
-    const reconciled = await reconcileEndedGridLegIfExchangeFlat(
-      row,
-      leg,
-      "gridLiveSafety",
-      logCode,
-      message,
-      row.regimeEndReason || "BOX_BREAK"
-    );
-    if (!reconciled) {
-      const exchangePosition = await coin.getGridLegExchangePosition({
-        uid: row.uid,
-        symbol: row.symbol,
-        leg,
-      });
-      const exchangeQty = toNumber(exchangePosition?.qty);
-      await appendGridRuntimeLog(
-        row,
-        "gridLiveSafety",
-        `${logCode}_CLOSE_MISSING`,
-        `${message}, closeAttempt:${closeAttempt ? "UNKNOWN" : "NONE"}, exchangeQty:${exchangeQty}`,
-        leg
-      );
-      return false;
-    }
-  }
-
+  await cancelAllGridOrders("LIVE", row, {
+    leg,
+    includeEntries: false,
+    includeExits: true,
+    reason: `${logCode}_PROTECTION_CANCEL`,
+  });
+  const closeIntent = await enqueueLiveGridCloseIntent(row, leg, qty, logCode, {
+    routePath: "grid-emergency-close",
+  });
   const refreshed = (await loadGridItem("LIVE", row.id)) || row;
   const synced = await syncLiveGridRowFromPidState(refreshed, {
-    regimeStatus: "ENDED",
-    regimeEndReason: refreshed.regimeEndReason || "BOX_BREAK",
+    regimeStatus: closeIntent.pending
+      ? GRID_CANCEL_CLOSE_STATE.CONTROLLED_CLOSE_QUEUED
+      : "CLOSE_FAILED",
+    regimeEndReason: logCode,
     clearOpenLegOrderRefs: false,
   });
   await appendGridRuntimeLog(
     synced || refreshed,
     "gridLiveSafety",
-    logCode,
-    `${message}, cleanupOrderId:${cleanupOrderId || "NONE"}`,
+    closeIntent.pending ? `${logCode}_QUEUED` : `${logCode}_QUEUE_FAILED`,
+    `${message}, closeIntent:${closeIntent.intentSummary?.intent?.intentKey || "NONE"}, closeClientOrderId:${closeIntent.closeClientOrderId || "NONE"}`,
     leg
   );
-  await finalizeEndedGridRegimeIfIdle(
-    "LIVE",
-    synced || refreshed,
-    (synced || refreshed)?.regimeEndReason || "BOX_BREAK"
-  );
-  return true;
+  return closeIntent.pending;
 };
 
 const collectMissingGridProtection = (exits = {}) => {
@@ -3231,11 +3296,20 @@ const protectExistingOneLegEmergency = async (row) => {
 };
 
 const handleGridBoundaryReset = async (mode, row, reason, message) => {
+  if (mode === "LIVE") {
+    await cancelAllGridOrders(mode, row, {
+      reason,
+      targetType: "REGIME_CLEANUP",
+    });
+    await applyGridPatch(getTableName(mode), row.id, {
+      regimeStatus: GRID_CANCEL_CLOSE_STATE.CANCEL_INTENT_PENDING,
+      regimeEndReason: reason,
+    });
+    await appendGridRuntimeLog(row, "gridReset", `${reason}_CANCEL_QUEUED`, message);
+    return;
+  }
   await cancelAllGridOrders(mode, row);
   await applyGridPatch(getTableName(mode), row.id, buildResetRegimePatch(reason));
-  if (mode === "LIVE") {
-    await releaseAllGridPositionOwnership(row);
-  }
   await appendGridRuntimeLog(row, "gridReset", reason, message);
 };
 
@@ -3336,13 +3410,24 @@ const suspendGridStrategy = async (mode, row, reason = "POLICY_AUTO_OFF_USER") =
     await cancelAllGridOrders("LIVE", row, {
       includeEntries: true,
       includeExits: false,
+      reason,
+      targetType: "REGIME_CLEANUP",
     });
+    await applyGridPatch(tableName, row.id, {
+      regimeStatus: GRID_CANCEL_CLOSE_STATE.CANCEL_INTENT_PENDING,
+      regimeEndReason: reason,
+    });
+    await appendGridRuntimeLog(
+      row,
+      "gridControl",
+      `${reason}_CANCEL_QUEUED`,
+      `mode:${mode}, strategy suspended by policy auto-off; cleanup intents queued`
+    );
+    return true;
   }
 
   const refreshed = (await loadGridItem(mode, row.id)) || row;
-  const hasLiveOpenExposure = mode === "LIVE"
-    ? await hasLiveGridOpenSnapshotQty(refreshed)
-    : hasOpenPosition(refreshed);
+  const hasLiveOpenExposure = hasOpenPosition(refreshed);
   const patch = hasLiveOpenExposure
     ? {
         regimeStatus: "ENDED",
@@ -3359,9 +3444,6 @@ const suspendGridStrategy = async (mode, row, reason = "POLICY_AUTO_OFF_USER") =
       };
 
   await applyGridPatch(tableName, row.id, patch);
-  if (mode === "LIVE" && !hasLiveOpenExposure) {
-    await releaseAllGridPositionOwnership(refreshed);
-  }
   await appendGridRuntimeLog(
     refreshed,
     "gridControl",
@@ -3378,12 +3460,14 @@ const deactivateGridStrategy = async (mode, row, reason = "MANUAL_OFF") => {
   }
 
   if (mode === "LIVE") {
-    await cancelAllGridOrders("LIVE", row);
-    const coin = getCoin();
+    await cancelAllGridOrders("LIVE", row, {
+      reason,
+      targetType: "REGIME_CLEANUP",
+    });
     const baseline = await syncLiveGridRowFromPidState(row, {
-      regimeStatus: "ENDED",
+      regimeStatus: GRID_CANCEL_CLOSE_STATE.CANCEL_INTENT_PENDING,
       regimeEndReason: reason,
-      clearOpenLegOrderRefs: true,
+      clearOpenLegOrderRefs: false,
     });
 
     for (const leg of ["LONG", "SHORT"]) {
@@ -3393,61 +3477,21 @@ const deactivateGridStrategy = async (mode, row, reason = "MANUAL_OFF") => {
         continue;
       }
 
-      try {
-        const closeAttempt = await coin.closeGridLegMarketOrder({
-          uid: row.uid,
-          pid: row.id,
-          symbol: row.symbol,
-          leg,
-          qty,
-        });
-        if (!closeAttempt?.clientOrderId) {
-          const exchangePosition = await coin.getGridLegExchangePosition({
-            uid: row.uid,
-            symbol: row.symbol,
-            leg,
-          });
-          if (!(toNumber(exchangePosition?.qty) > 0)) {
-            await pidPositionLedger.closeSnapshotAsOrphan({
-              uid: row.uid,
-              pid: row.id,
-              strategyCategory: "grid",
-              symbol: row.symbol,
-              positionSide: leg,
-              eventType: "GRID_ORPHAN_CLOSE",
-              note: `manual-off: exchange-flat-orphan-close`,
-            });
-            await appendGridRuntimeLog(
-              baseline || row,
-              "gridControl",
-              "MANUAL_CLOSE_ORPHAN_CLOSED",
-              `leg:${leg}, qty:${qty}, exchange flat while pid snapshot remained open`,
-              leg
-            );
-          }
-        }
-      } catch (error) {
-        await appendGridRuntimeLog(
-          baseline || row,
-          "gridControl",
-          "MANUAL_CLOSE_ERROR",
-          `leg:${leg}, qty:${qty}, message:${error?.message || error}`,
-          leg
-        );
-      }
+      await enqueueLiveGridCloseIntent(row, leg, qty, reason, {
+        routePath: "grid-manual-off",
+      });
     }
     const refreshed = (await loadGridItem("LIVE", row.id)) || baseline || row;
     const synced = await syncLiveGridRowFromPidState(refreshed, {
-      regimeStatus: "ENDED",
+      regimeStatus: GRID_CANCEL_CLOSE_STATE.GMANUAL_QUEUED,
       regimeEndReason: reason,
-      clearOpenLegOrderRefs: true,
+      clearOpenLegOrderRefs: false,
     });
-    await finalizeEndedGridRegimeIfIdle("LIVE", synced || refreshed, reason);
     await appendGridRuntimeLog(
       synced || refreshed,
       "gridControl",
-      reason,
-      `mode:${mode}, strategy manually turned off`
+      `${reason}_QUEUED`,
+      `mode:${mode}, strategy manually turned off; cleanup intents queued`
     );
     return true;
   }
@@ -3794,37 +3838,22 @@ const handleLiveGridEntryFill = async (parsed, reData) => {
     }
 
     if (row?.[`${prefix}LegStatus`] === "OPEN" && existingLegQty > 0) {
-      let cleanupOrderId = null;
-      try {
-        const cleanupOrder = await getCoin().closeGridLegMarketOrder({
-          uid: row.uid,
-          pid: row.id,
-          symbol: row.symbol,
-          leg: parsed.leg,
-          qty,
-        });
-        cleanupOrderId = cleanupOrder?.clientOrderId || null;
-      } catch (error) {
-        await appendGridRuntimeLog(
-          row,
-          "gridLiveOpen",
-          "ENTRY_FILLED_DUPLICATE_CLEANUP_ERROR",
-          `leg:${parsed.leg}, duplicateEntryOrderId:${parsed.clientOrderId}, qty:${qty}, message:${error?.message || error}`,
-          parsed.leg
-        );
-        setOutcome("ENTRY_DUPLICATE_CLEANUP_ERROR");
-        return false;
-      }
+      const cleanupIntent = await enqueueLiveGridCloseIntent(row, parsed.leg, qty, "DUPLICATE_ENTRY_CONTROLLED_CLOSE", {
+        routePath: "grid-duplicate-entry-cleanup",
+        sourceClientOrderId: parsed.clientOrderId,
+        sourceOrderId: reData.i || null,
+        sourceTradeId: reData.t || null,
+      });
 
       await appendGridRuntimeLog(
         row,
         "gridLiveOpen",
-        "ENTRY_FILLED_DUPLICATE",
-        `leg:${parsed.leg}, duplicateEntryOrderId:${parsed.clientOrderId}, qty:${qty}, cleanupOrderId:${cleanupOrderId || "NONE"}`,
+        cleanupIntent.pending ? "ENTRY_FILLED_DUPLICATE_CLOSE_QUEUED" : "ENTRY_FILLED_DUPLICATE_CLOSE_QUEUE_FAILED",
+        `leg:${parsed.leg}, duplicateEntryOrderId:${parsed.clientOrderId}, qty:${qty}, closeClientOrderId:${cleanupIntent.closeClientOrderId || "NONE"}`,
         parsed.leg
       );
-      setOutcome("ENTRY_DUPLICATE");
-      return true;
+      setOutcome(cleanupIntent.pending ? "ENTRY_DUPLICATE_CLOSE_QUEUED" : "ENTRY_DUPLICATE_CLOSE_QUEUE_FAILED");
+      return cleanupIntent.pending;
     }
 
     if (
@@ -4178,67 +4207,26 @@ const handleLiveGridManualCloseFill = async (parsed, reData) => {
 
     const refreshed = (await loadGridItem("LIVE", row.id)) || row;
     if (remainingQty > 0) {
-      let retryOrderId = null;
-      let retryReconciled = false;
-      try {
-        const retryOrder = await getCoin().closeGridLegMarketOrder({
-          uid: row.uid,
-          pid: row.id,
-          symbol: row.symbol,
-          leg: parsed.leg,
-          qty: remainingQty,
-        });
-        retryOrderId = retryOrder?.clientOrderId || null;
-      } catch (error) {
-        retryReconciled = await reconcileEndedGridLegIfExchangeFlat(
-          refreshed,
-          parsed.leg,
-          "gridLiveManualClose",
-          "MANUAL_CLOSE_RETRY",
-          `leg:${parsed.leg}, remainingQty:${remainingQty}, message:${error?.message || error}`,
-          refreshed.regimeEndReason || "MANUAL_OFF"
-        );
-        if (!retryReconciled) {
-          await appendGridRuntimeLog(
-            refreshed,
-            "gridLiveManualClose",
-            "MANUAL_CLOSE_RETRY_ERROR",
-            `leg:${parsed.leg}, remainingQty:${remainingQty}, message:${error?.message || error}`,
-            parsed.leg
-          );
-        }
-      }
-
-      if (!retryReconciled && !retryOrderId) {
-        retryReconciled = await reconcileEndedGridLegIfExchangeFlat(
-          refreshed,
-          parsed.leg,
-          "gridLiveManualClose",
-          "MANUAL_CLOSE_RETRY",
-          `leg:${parsed.leg}, remainingQty:${remainingQty}, retryOrderId:NONE`,
-          refreshed.regimeEndReason || "MANUAL_OFF"
-        );
-      }
-
-      if (retryReconciled) {
-        setOutcome("MANUAL_CLOSE_RECONCILED");
-        return true;
-      }
-
+      const retryIntent = await enqueueLiveGridCloseIntent(refreshed, parsed.leg, remainingQty, "GMANUAL_RETRY_CLOSE", {
+        routePath: "grid-manual-close-retry",
+        sourceClientOrderId: parsed.clientOrderId,
+        sourceOrderId: reData.i || null,
+        sourceTradeId: reData.t || null,
+      });
       const synced = await syncLiveGridRowFromPidState(refreshed, {
-        regimeStatus: "ENDED",
+        regimeStatus: GRID_CANCEL_CLOSE_STATE.GMANUAL_QUEUED,
         regimeEndReason: refreshed.regimeEndReason || "MANUAL_OFF",
         clearOpenLegOrderRefs: false,
       });
       await appendGridRuntimeLog(
         synced || refreshed,
         "gridLiveManualClose",
-        "MANUAL_CLOSE_PARTIAL_RETRY",
-        `leg:${parsed.leg}, exitPrice:${toNumber(reData.ap || reData.L)}, filledQty:${toNumber(reData.l || reData.z)}, remainingQty:${remainingQty}, retryOrderId:${retryOrderId || "NONE"}`,
+        retryIntent.pending ? "MANUAL_CLOSE_RETRY_QUEUED" : "MANUAL_CLOSE_RETRY_QUEUE_FAILED",
+        `leg:${parsed.leg}, exitPrice:${toNumber(reData.ap || reData.L)}, filledQty:${toNumber(reData.l || reData.z)}, remainingQty:${remainingQty}, closeClientOrderId:${retryIntent.closeClientOrderId || "NONE"}`,
         parsed.leg
       );
-      setOutcome("MANUAL_CLOSE_PARTIAL_RETRY");
-      return true;
+      setOutcome(retryIntent.pending ? "MANUAL_CLOSE_RETRY_QUEUED" : "MANUAL_CLOSE_RETRY_QUEUE_FAILED");
+      return retryIntent.pending;
     }
 
     await releaseGridLegPositionOwnership(row, parsed.leg);

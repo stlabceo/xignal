@@ -15,6 +15,11 @@ const INTENT_TYPE = Object.freeze({
   GRID_LIVE_ARM: "GRID_LIVE_ARM",
   GRID_PROTECTION_CREATE: "GRID_PROTECTION_CREATE",
   GRID_REENTRY_CREATE: "GRID_REENTRY_CREATE",
+  GRID_CANCEL_ORDER: "GRID_CANCEL_ORDER",
+  GRID_CANCEL_ALL_FOR_REGIME: "GRID_CANCEL_ALL_FOR_REGIME",
+  GRID_GMANUAL_CLOSE: "GRID_GMANUAL_CLOSE",
+  GRID_CONTROLLED_CLOSE: "GRID_CONTROLLED_CLOSE",
+  GRID_REGIME_CLEANUP_CANCEL: "GRID_REGIME_CLEANUP_CANCEL",
 });
 
 const DEFAULT_MAX_ATTEMPTS = 3;
@@ -234,6 +239,46 @@ const normalizeReentryIntentPayload = (payload = {}) => ({
   reentryClientOrderId: payload.reentryClientOrderId || null,
 });
 
+const normalizeCancelIntentPayload = (payload = {}) => ({
+  ...payload,
+  uid: Number(payload.uid || 0),
+  pid: Number(payload.pid || 0),
+  strategyCategory: "grid",
+  symbol: normalizeSymbol(payload.symbol),
+  positionSide: normalizePositionSide(payload.positionSide || payload.leg),
+  regimeId: payload.regimeId || payload.gridRowId || payload.pid || null,
+  targetType: String(payload.targetType || "ALL_FOR_REGIME").trim().toUpperCase(),
+  targetOrderId: payload.targetOrderId == null ? null : String(payload.targetOrderId),
+  targetClientOrderId: payload.targetClientOrderId || payload.clientOrderId || null,
+  includeEntries: payload.includeEntries !== false,
+  includeExits: payload.includeExits !== false,
+  reason: String(payload.reason || payload.sourceReason || "GRID_CANCEL").trim().toUpperCase(),
+  sourceReason: String(payload.sourceReason || payload.reason || "GRID_CANCEL").trim().toUpperCase(),
+});
+
+const normalizeCloseIntentPayload = (payload = {}) => {
+  const normalized = {
+    ...payload,
+    uid: Number(payload.uid || 0),
+    pid: Number(payload.pid || 0),
+    strategyCategory: "grid",
+    symbol: normalizeSymbol(payload.symbol),
+    positionSide: normalizePositionSide(payload.positionSide || payload.leg),
+    regimeId: payload.regimeId || payload.gridRowId || payload.pid || null,
+    qty: Number(payload.qty || payload.ownedQtyBasis || payload.ownedQty || 0),
+    ownedQtyBasis: Number(payload.ownedQtyBasis || payload.qty || payload.ownedQty || 0),
+    reservedCloseQtyBasis: Number(payload.reservedCloseQtyBasis || 0),
+    reason: String(payload.reason || "CONTROLLED_CLOSE").trim().toUpperCase(),
+    sourceEventId: payload.sourceEventId == null ? null : String(payload.sourceEventId),
+    sourceOrderId: payload.sourceOrderId == null ? null : String(payload.sourceOrderId),
+    sourceTradeId: payload.sourceTradeId == null ? null : String(payload.sourceTradeId),
+    sourceClientOrderId: payload.sourceClientOrderId || null,
+    closeClientOrderId: payload.closeClientOrderId || null,
+  };
+  normalized.closeClientOrderId = normalized.closeClientOrderId || buildGridCloseClientOrderId(normalized);
+  return normalized;
+};
+
 const buildGridReentryIntentPayloadHash = ({ payload = {} } = {}) => {
   const normalized = normalizeReentryIntentPayload(payload);
   return sha1(
@@ -274,6 +319,156 @@ const buildGridReentryIntentKey = ({ payload = {} } = {}) => {
 
 const buildGridReentryFifoKey = ({ payload = {} } = {}) => {
   const normalized = normalizeReentryIntentPayload(payload);
+  return [
+    normalized.uid,
+    "grid",
+    normalized.pid,
+    "regime",
+    normalized.regimeId || normalized.pid,
+  ].join(":");
+};
+
+const resolveGridCancelIntentType = (payload = {}) => {
+  const normalizedType = String(payload.intentType || "").trim().toUpperCase();
+  if (
+    normalizedType === INTENT_TYPE.GRID_CANCEL_ORDER ||
+    normalizedType === INTENT_TYPE.GRID_CANCEL_ALL_FOR_REGIME ||
+    normalizedType === INTENT_TYPE.GRID_REGIME_CLEANUP_CANCEL
+  ) {
+    return normalizedType;
+  }
+  const targetType = String(payload.targetType || "").trim().toUpperCase();
+  if (targetType === "ORDER" || payload.targetClientOrderId || payload.targetOrderId) {
+    return INTENT_TYPE.GRID_CANCEL_ORDER;
+  }
+  if (targetType === "REGIME_CLEANUP") {
+    return INTENT_TYPE.GRID_REGIME_CLEANUP_CANCEL;
+  }
+  return INTENT_TYPE.GRID_CANCEL_ALL_FOR_REGIME;
+};
+
+const resolveGridCloseIntentType = (payload = {}) => {
+  const normalizedType = String(payload.intentType || "").trim().toUpperCase();
+  if (
+    normalizedType === INTENT_TYPE.GRID_GMANUAL_CLOSE ||
+    normalizedType === INTENT_TYPE.GRID_CONTROLLED_CLOSE
+  ) {
+    return normalizedType;
+  }
+  const reason = String(payload.reason || "").trim().toUpperCase();
+  if (reason.includes("GMANUAL") || reason.includes("MANUAL")) {
+    return INTENT_TYPE.GRID_GMANUAL_CLOSE;
+  }
+  return INTENT_TYPE.GRID_CONTROLLED_CLOSE;
+};
+
+const buildGridCancelIntentPayloadHash = ({ payload = {} } = {}) => {
+  const normalized = normalizeCancelIntentPayload(payload);
+  return sha1(
+    safeJsonStringify({
+      action: resolveGridCancelIntentType(normalized),
+      uid: normalized.uid,
+      pid: normalized.pid,
+      symbol: normalized.symbol,
+      positionSide: normalized.positionSide,
+      regimeId: normalized.regimeId,
+      targetType: normalized.targetType,
+      targetOrderId: normalized.targetOrderId,
+      targetClientOrderId: normalized.targetClientOrderId,
+      includeEntries: normalized.includeEntries,
+      includeExits: normalized.includeExits,
+      reason: normalized.reason,
+    })
+  );
+};
+
+const buildGridCancelIntentKey = ({ payload = {} } = {}) => {
+  const normalized = normalizeCancelIntentPayload(payload);
+  const intentType = resolveGridCancelIntentType(normalized);
+  const targetIdentity = normalized.targetClientOrderId
+    || normalized.targetOrderId
+    || `${normalized.targetType}:${normalized.includeEntries ? "E1" : "E0"}:${normalized.includeExits ? "X1" : "X0"}:${normalized.reason}`;
+  return [
+    intentType,
+    normalized.uid,
+    normalized.pid,
+    normalized.symbol,
+    normalized.positionSide || "ALL",
+    targetIdentity,
+  ].join(":");
+};
+
+const buildGridCancelFifoKey = ({ payload = {} } = {}) => {
+  const normalized = normalizeCancelIntentPayload(payload);
+  return [
+    normalized.uid,
+    "grid",
+    normalized.pid,
+    "regime",
+    normalized.regimeId || normalized.pid,
+  ].join(":");
+};
+
+const buildGridCloseClientOrderId = (payload = {}) => {
+  const sideCode = normalizePositionSide(payload.positionSide || payload.leg) === "SHORT" ? "S" : "L";
+  const seed = sha1(
+    safeJsonStringify({
+      uid: Number(payload.uid || 0),
+      pid: Number(payload.pid || 0),
+      symbol: normalizeSymbol(payload.symbol),
+      positionSide: normalizePositionSide(payload.positionSide || payload.leg),
+      reason: payload.reason || null,
+      sourceEventId: payload.sourceEventId || null,
+      sourceOrderId: payload.sourceOrderId || null,
+      sourceTradeId: payload.sourceTradeId || null,
+      sourceClientOrderId: payload.sourceClientOrderId || null,
+    })
+  );
+  const suffix = String(parseInt(seed.slice(0, 10), 16) % 100000000).padStart(8, "0");
+  return `GMANUAL_${sideCode}_${Number(payload.uid || 0)}_${Number(payload.pid || 0)}_${suffix}`;
+};
+
+const buildGridCloseIntentPayloadHash = ({ payload = {} } = {}) => {
+  const normalized = normalizeCloseIntentPayload(payload);
+  return sha1(
+    safeJsonStringify({
+      action: resolveGridCloseIntentType(normalized),
+      uid: normalized.uid,
+      pid: normalized.pid,
+      symbol: normalized.symbol,
+      positionSide: normalized.positionSide,
+      regimeId: normalized.regimeId,
+      qty: normalized.qty,
+      ownedQtyBasis: normalized.ownedQtyBasis,
+      reason: normalized.reason,
+      sourceEventId: normalized.sourceEventId,
+      sourceOrderId: normalized.sourceOrderId,
+      sourceTradeId: normalized.sourceTradeId,
+      sourceClientOrderId: normalized.sourceClientOrderId,
+      closeClientOrderId: normalized.closeClientOrderId,
+    })
+  );
+};
+
+const buildGridCloseIntentKey = ({ payload = {} } = {}) => {
+  const normalized = normalizeCloseIntentPayload(payload);
+  const intentType = resolveGridCloseIntentType(normalized);
+  const closeIdentity = normalized.closeClientOrderId
+    || normalized.sourceTradeId
+    || normalized.sourceOrderId
+    || buildGridCloseIntentPayloadHash({ payload: normalized });
+  return [
+    intentType,
+    normalized.uid,
+    normalized.pid,
+    normalized.symbol,
+    normalized.positionSide,
+    closeIdentity,
+  ].join(":");
+};
+
+const buildGridCloseFifoKey = ({ payload = {} } = {}) => {
+  const normalized = normalizeCloseIntentPayload(payload);
   return [
     normalized.uid,
     "grid",
@@ -528,6 +723,161 @@ const enqueueGridReentryCreateIntent = async ({
   };
 };
 
+const enqueueGridCancelIntent = async ({
+  payload = {},
+  intentType = null,
+  routePath = "grid-runtime-cancel",
+  sourceEventId = null,
+} = {}) => {
+  await ensureOrderIntentSchema();
+  const normalized = normalizeCancelIntentPayload({
+    ...payload,
+    intentType: intentType || payload.intentType,
+  });
+  if (!normalized.uid || !normalized.pid || !normalized.symbol) {
+    throw new Error("GRID_CANCEL_INTENT_INVALID_OWNER");
+  }
+
+  const resolvedIntentType = resolveGridCancelIntentType(normalized);
+  const payloadHash = buildGridCancelIntentPayloadHash({ payload: normalized });
+  const intentKey = buildGridCancelIntentKey({ payload: normalized });
+  const fifoKey = buildGridCancelFifoKey({ payload: normalized });
+  const intentPayload = {
+    action: resolvedIntentType,
+    routePath,
+    sourceEventId,
+    cancel: normalized,
+  };
+
+  const [result] = await db.query(
+    `INSERT IGNORE INTO order_intent_queue
+      (
+        intentKey,
+        fifoKey,
+        uid,
+        pid,
+        strategyCategory,
+        intentType,
+        status,
+        priority,
+        attemptCount,
+        maxAttempts,
+        routePath,
+        sourceEventId,
+        payloadHash,
+        payloadJson
+      )
+     VALUES (?, ?, ?, ?, 'grid', ?, ?, 70, 0, ?, ?, ?, ?, ?)`,
+    [
+      intentKey,
+      fifoKey,
+      normalized.uid,
+      normalized.pid,
+      resolvedIntentType,
+      STATUS.PENDING,
+      DEFAULT_MAX_ATTEMPTS,
+      routePath,
+      sourceEventId,
+      payloadHash,
+      safeJsonStringify(intentPayload),
+    ]
+  );
+
+  const inserted = Number(result?.affectedRows || 0) === 1;
+  return {
+    requested: 1,
+    inserted: inserted ? 1 : 0,
+    duplicate: inserted ? 0 : 1,
+    intent: {
+      intentKey,
+      fifoKey,
+      uid: normalized.uid,
+      pid: normalized.pid,
+      status: inserted ? STATUS.PENDING : "DUPLICATE",
+      payloadHash,
+      intentType: resolvedIntentType,
+    },
+  };
+};
+
+const enqueueGridCloseIntent = async ({
+  payload = {},
+  intentType = null,
+  routePath = "grid-runtime-close",
+  sourceEventId = null,
+} = {}) => {
+  await ensureOrderIntentSchema();
+  const normalized = normalizeCloseIntentPayload({
+    ...payload,
+    intentType: intentType || payload.intentType,
+  });
+  if (!normalized.uid || !normalized.pid || !normalized.symbol || !normalized.positionSide) {
+    throw new Error("GRID_CLOSE_INTENT_INVALID_OWNER");
+  }
+
+  const resolvedIntentType = resolveGridCloseIntentType(normalized);
+  const payloadHash = buildGridCloseIntentPayloadHash({ payload: normalized });
+  const intentKey = buildGridCloseIntentKey({ payload: normalized });
+  const fifoKey = buildGridCloseFifoKey({ payload: normalized });
+  const intentPayload = {
+    action: resolvedIntentType,
+    routePath,
+    sourceEventId,
+    close: normalized,
+  };
+
+  const [result] = await db.query(
+    `INSERT IGNORE INTO order_intent_queue
+      (
+        intentKey,
+        fifoKey,
+        uid,
+        pid,
+        strategyCategory,
+        intentType,
+        status,
+        priority,
+        attemptCount,
+        maxAttempts,
+        routePath,
+        sourceEventId,
+        payloadHash,
+        payloadJson
+      )
+     VALUES (?, ?, ?, ?, 'grid', ?, ?, 75, 0, ?, ?, ?, ?, ?)`,
+    [
+      intentKey,
+      fifoKey,
+      normalized.uid,
+      normalized.pid,
+      resolvedIntentType,
+      STATUS.PENDING,
+      DEFAULT_MAX_ATTEMPTS,
+      routePath,
+      sourceEventId,
+      payloadHash,
+      safeJsonStringify(intentPayload),
+    ]
+  );
+
+  const inserted = Number(result?.affectedRows || 0) === 1;
+  return {
+    requested: 1,
+    inserted: inserted ? 1 : 0,
+    duplicate: inserted ? 0 : 1,
+    intent: {
+      intentKey,
+      fifoKey,
+      uid: normalized.uid,
+      pid: normalized.pid,
+      status: inserted ? STATUS.PENDING : "DUPLICATE",
+      payloadHash,
+      intentType: resolvedIntentType,
+      closeClientOrderId: normalized.closeClientOrderId,
+    },
+  };
+};
+
 const claimNextIntent = async ({ workerId = null } = {}) => {
   await ensureOrderIntentSchema();
   const claimWorkerId = String(workerId || `worker-${process.pid || "local"}`).slice(0, 80);
@@ -670,9 +1020,18 @@ module.exports = {
   buildGridReentryIntentPayloadHash,
   buildGridReentryIntentKey,
   buildGridReentryFifoKey,
+  buildGridCancelIntentPayloadHash,
+  buildGridCancelIntentKey,
+  buildGridCancelFifoKey,
+  buildGridCloseClientOrderId,
+  buildGridCloseIntentPayloadHash,
+  buildGridCloseIntentKey,
+  buildGridCloseFifoKey,
   enqueueGridLiveArmIntents,
   enqueueGridProtectionCreateIntent,
   enqueueGridReentryCreateIntent,
+  enqueueGridCancelIntent,
+  enqueueGridCloseIntent,
   claimNextIntent,
   completeIntent,
   recoverStaleRunningIntents,
