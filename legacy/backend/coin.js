@@ -16,6 +16,7 @@ const strategyControlState = require("./strategy-control-state");
 const binanceWriteGuard = require("./binance-write-guard");
 const binanceReadGuard = require("./binance-read-guard");
 const credentialSecrets = require("./credential-secrets");
+const binanceWriteTimeSync = require("./binance-write-time-sync");
 let gridEngine = null;
 let policyEngine = null;
 const Binance = require('node-binance-api');
@@ -47,8 +48,7 @@ const recentBoundRegistrationTargets = new Map();
 const completedBoundRegistrationEntries = new Map();
 const liveSplitTradeAccumulators = new Map();
 const accountRiskSnapshotCache = {};
-let futuresServerTimeOffsetMs = 0;
-let futuresServerTimeSyncedAt = 0;
+const futuresTimeSyncState = binanceWriteTimeSync.createFuturesTimeSyncState();
 const DEBUG_RUNTIME_TRACE = process.env.DEBUG_TIME_EXPIRY === '1' || process.env.DEBUG_RUNTIME_TRACE === '1';
 const isQaReplayMode = binanceWriteGuard.isQaReplayMode;
 
@@ -278,7 +278,18 @@ const submitFuturesOrder = async (context = {}, type, side, symbol, qty, price, 
         orderType: type,
         quantity: qty,
     });
-    return await binance[context.uid].futuresOrder(type, side, symbol, qty, price, options);
+    return await runBinanceWriteWithTimeSync(
+        {
+            ...context,
+            symbol,
+            side,
+            positionSide: options?.positionSide || context.positionSide || null,
+            clientOrderId: options?.newClientOrderId || context.clientOrderId || null,
+            orderType: type,
+            quantity: qty,
+        },
+        () => binance[context.uid].futuresOrder(type, side, symbol, qty, price, options)
+    );
 };
 
 const cancelFuturesOrder = async (context = {}, symbol, orderId) => {
@@ -288,7 +299,14 @@ const cancelFuturesOrder = async (context = {}, symbol, orderId) => {
         symbol,
         orderId,
     });
-    return await binance[context.uid].futuresCancel(symbol, orderId);
+    return await runBinanceWriteWithTimeSync(
+        {
+            ...context,
+            symbol,
+            orderId,
+        },
+        () => binance[context.uid].futuresCancel(symbol, orderId)
+    );
 };
 
 const privateFuturesClientWrite = async (context = {}, endpoint, params = {}, method = 'POST') => {
@@ -299,7 +317,17 @@ const privateFuturesClientWrite = async (context = {}, endpoint, params = {}, me
         clientOrderId: params?.clientAlgoId || params?.newClientOrderId || context.clientOrderId || null,
         orderId: params?.orderId || params?.algoId || context.orderId || null,
     });
-    return await binance[context.uid].privateFuturesRequest(endpoint, params, method);
+    return await runBinanceWriteWithTimeSync(
+        {
+            ...context,
+            endpoint,
+            method,
+            symbol: params?.symbol || context.symbol || null,
+            clientOrderId: params?.clientAlgoId || params?.newClientOrderId || context.clientOrderId || null,
+            orderId: params?.orderId || params?.algoId || context.orderId || null,
+        },
+        () => binance[context.uid].privateFuturesRequest(endpoint, params, method)
+    );
 };
 
 const updateBinanceRuntimeMeta = (uid, patch = {}) => {
@@ -2142,24 +2170,96 @@ const buildSignedQuery = (secret, params = {}) => {
 }
 
 const syncFuturesServerTime = async (force = false) => {
-    const now = Date.now();
-    if(!force && futuresServerTimeSyncedAt > 0 && (now - futuresServerTimeSyncedAt) < 60000){
-        return futuresServerTimeOffsetMs;
-    }
-
-    const response = await axios.get(`${FUTURES_BASE_URL}/fapi/v1/time`, {
-        timeout: 5000,
+    const result = await binanceWriteTimeSync.syncFuturesServerTime({
+        state: futuresTimeSyncState,
+        force,
+        fetchServerTime: async () => {
+            const response = await axios.get(`${FUTURES_BASE_URL}/fapi/v1/time`, {
+                timeout: 5000,
+            });
+            return response?.data?.serverTime;
+        },
     });
-    const serverTime = Number(response?.data?.serverTime || 0);
-    if(Number.isFinite(serverTime) && serverTime > 0){
-        futuresServerTimeOffsetMs = serverTime - Date.now();
-        futuresServerTimeSyncedAt = Date.now();
-    }
-
-    return futuresServerTimeOffsetMs;
+    return result.offsetMs;
 }
 
-const getFuturesTimestamp = () => Date.now() + futuresServerTimeOffsetMs - 1000;
+const getFuturesTimestamp = () => binanceWriteTimeSync.getFuturesTimestamp({
+    state: futuresTimeSyncState,
+});
+
+const syncNodeBinanceFuturesWriteTime = async (uid, force = false) => {
+    const client = binance?.[uid];
+    if(!client){
+        const error = new Error('futures api client not initialized');
+        error.code = -90023;
+        throw error;
+    }
+
+    return await binanceWriteTimeSync.syncNodeBinanceFuturesClientTime(client, {
+        state: futuresTimeSyncState,
+        force,
+        fetchServerTime: async () => {
+            const response = await axios.get(`${FUTURES_BASE_URL}/fapi/v1/time`, {
+                timeout: 5000,
+            });
+            return response?.data?.serverTime;
+        },
+    });
+}
+
+const logBinanceWriteTimeSyncRetry = async (context = {}, eventCode, error = null, syncResult = null, attempt = null) => {
+    if(!(Number(context.uid || 0) > 0)){
+        return null;
+    }
+    const info = error ? extractBinanceError(error) : {};
+    try{
+        return await insertBinanceRuntimeEventLog({
+            uid: context.uid,
+            pid: context.pid || null,
+            strategyCategory: context.strategyCategory || null,
+            eventType: 'BINANCE_TIME_SYNC',
+            eventCode,
+            severity: eventCode === 'WRITE_TIME_SYNC_RETRY_FAILED' ? 'high' : 'medium',
+            symbol: context.symbol || null,
+            side: context.side || null,
+            positionSide: context.positionSide || null,
+            clientOrderId: context.clientOrderId || null,
+            orderId: context.orderId || null,
+            orderType: context.orderType || null,
+            quantity: context.quantity || null,
+            note: `caller:${context.caller || 'unknown'}, attempt:${attempt || 'n/a'}, code:${info.code || 'n/a'}`,
+            payload: {
+                caller: context.caller || null,
+                action: context.action || null,
+                endpoint: context.endpoint || null,
+                method: context.method || null,
+                attempt,
+                errorCode: info.code || null,
+                errorMessage: info.msg || error?.message || null,
+                offsetMs: syncResult?.offsetMs ?? null,
+                serverTimeMs: syncResult?.serverTimeMs ?? null,
+                syncedAtMs: syncResult?.syncedAtMs ?? null,
+            },
+        });
+    }catch(_){
+        return null;
+    }
+}
+
+const runBinanceWriteWithTimeSync = async (context = {}, operation) => {
+    await syncNodeBinanceFuturesWriteTime(context.uid, false);
+    return await binanceWriteTimeSync.runWithTimestampRetry({
+        operation,
+        syncTime: async ({ force }) => syncNodeBinanceFuturesWriteTime(context.uid, force),
+        maxTimestampRetries: 1,
+        onRetry: async ({ attempt, error, syncResult }) => {
+            await logBinanceWriteTimeSyncRetry(context, 'WRITE_TIME_SYNC_RETRY', error, syncResult, attempt);
+        },
+        onFailure: async ({ attempt, error }) => {
+            await logBinanceWriteTimeSyncRetry(context, 'WRITE_TIME_SYNC_RETRY_FAILED', error, null, attempt);
+        },
+    });
+}
 
 const getMemberApiRuntime = (uid) => {
     return binanceClientRuntime[uid] || null;
@@ -2253,12 +2353,16 @@ const privateFuturesSignedRequest = async (uid, path, params = {}, method = 'GET
         throw error;
     }
 
-    await syncFuturesServerTime(false).catch(() => {});
+    if(normalizedMethod === 'GET'){
+        await syncFuturesServerTime(false).catch(() => {});
+    }else{
+        await syncFuturesServerTime(false);
+    }
 
     const requestOnce = async () => {
         const signedQuery = buildSignedQuery(credentials.appSecret, {
             ...params,
-            recvWindow: 10000,
+            recvWindow: binanceWriteTimeSync.DEFAULT_RECV_WINDOW_MS,
             timestamp: getFuturesTimestamp(),
         });
 
@@ -2282,7 +2386,46 @@ const privateFuturesSignedRequest = async (uid, path, params = {}, method = 'GET
     };
 
     try{
-        return await requestOnce();
+        return await binanceWriteTimeSync.runWithTimestampRetry({
+            operation: requestOnce,
+            syncTime: async ({ force }) => {
+                await syncFuturesServerTime(force);
+                return {
+                    offsetMs: futuresTimeSyncState.offsetMs,
+                    serverTimeMs: futuresTimeSyncState.serverTimeMs,
+                    syncedAtMs: futuresTimeSyncState.syncedAtMs,
+                };
+            },
+            maxTimestampRetries: 1,
+            onRetry: normalizedMethod === 'GET'
+                ? null
+                : async ({ attempt, error, syncResult }) => {
+                    await logBinanceWriteTimeSyncRetry({
+                        uid,
+                        action: `SIGNED_${normalizedMethod}`,
+                        symbol: params?.symbol || null,
+                        clientOrderId: params?.clientAlgoId || params?.newClientOrderId || params?.origClientOrderId || null,
+                        orderId: params?.orderId || params?.algoId || null,
+                        endpoint: path,
+                        method: normalizedMethod,
+                        caller: `coin.privateFuturesSignedRequest:${path}`,
+                    }, 'WRITE_TIME_SYNC_RETRY', error, syncResult, attempt);
+                },
+            onFailure: normalizedMethod === 'GET'
+                ? null
+                : async ({ attempt, error }) => {
+                    await logBinanceWriteTimeSyncRetry({
+                        uid,
+                        action: `SIGNED_${normalizedMethod}`,
+                        symbol: params?.symbol || null,
+                        clientOrderId: params?.clientAlgoId || params?.newClientOrderId || params?.origClientOrderId || null,
+                        orderId: params?.orderId || params?.algoId || null,
+                        endpoint: path,
+                        method: normalizedMethod,
+                        caller: `coin.privateFuturesSignedRequest:${path}`,
+                    }, 'WRITE_TIME_SYNC_RETRY_FAILED', error, null, attempt);
+                },
+        });
     }catch(error){
         binanceReadGuard.recordPrivateRequestFailure({
             uid,
@@ -2290,11 +2433,6 @@ const privateFuturesSignedRequest = async (uid, path, params = {}, method = 'GET
             method: normalizedMethod,
             error,
         });
-        const info = extractBinanceError(error);
-        if(Number(info.code) === -1021){
-            await syncFuturesServerTime(true);
-            return await requestOnce();
-        }
         throw error;
     }
 }
@@ -11163,17 +11301,31 @@ const validateProvidedBinanceKeysReadOnly = async (appKey, appSecret) => {
         });
         const revealedSecret = credentialSecrets.revealSecret(appSecret);
         await syncFuturesServerTime(false).catch(() => {});
-        const signedQuery = buildSignedQuery(revealedSecret, {
-            recvWindow: 10000,
-            timestamp: getFuturesTimestamp(),
-        });
-        const response = await axios({
-            method: 'GET',
-            url: `${FUTURES_BASE_URL}/fapi/v3/account?${signedQuery}`,
-            timeout: 10000,
-            headers: {
-                'X-MBX-APIKEY': appKey,
+        const requestOnce = async () => {
+            const signedQuery = buildSignedQuery(revealedSecret, {
+                recvWindow: binanceWriteTimeSync.DEFAULT_RECV_WINDOW_MS,
+                timestamp: getFuturesTimestamp(),
+            });
+            return await axios({
+                method: 'GET',
+                url: `${FUTURES_BASE_URL}/fapi/v3/account?${signedQuery}`,
+                timeout: 10000,
+                headers: {
+                    'X-MBX-APIKEY': appKey,
+                },
+            });
+        };
+        const response = await binanceWriteTimeSync.runWithTimestampRetry({
+            operation: requestOnce,
+            syncTime: async ({ force }) => {
+                await syncFuturesServerTime(force);
+                return {
+                    offsetMs: futuresTimeSyncState.offsetMs,
+                    serverTimeMs: futuresTimeSyncState.serverTimeMs,
+                    syncedAtMs: futuresTimeSyncState.syncedAtMs,
+                };
             },
+            maxTimestampRetries: 1,
         });
 
         binanceReadGuard.recordPrivateRequestSuccess({
