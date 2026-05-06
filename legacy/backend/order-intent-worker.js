@@ -4,6 +4,9 @@ const orderIntentQueue = require("./order-intent-queue");
 const liveWriteSafetyGate = require("./live-write-safety-gate");
 const positionOwnership = require("./position-ownership");
 const redisClient = require("./util/redis.util");
+const db = require("./database/connect/config");
+const gridProtectionGuarantee = require("./grid-protection-guarantee");
+const pidPositionLedger = require("./pid-position-ledger");
 
 const DEFAULT_POLL_MS = 500;
 const DEFAULT_STALE_SECONDS = 90;
@@ -21,6 +24,286 @@ const buildBlockResult = (reason, extra = {}) => ({
   reason,
   ...extra,
 });
+
+const PROTECTION_QUEUE_STATE = Object.freeze({
+  PENDING: "PROTECTION_INTENT_PENDING",
+  RUNNING: "PROTECTION_CREATE_RUNNING",
+  PARTIAL: "PROTECTION_PARTIAL",
+  FAILED: "PROTECTION_FAILED",
+  BLOCKED_OWNERSHIP: "PROTECTION_BLOCKED_OWNERSHIP",
+  BLOCKED_REDIS: "PROTECTION_BLOCKED_REDIS",
+  PROTECTED: "PROTECTION_PROTECTED",
+});
+
+const getLegPrefix = (leg) => (String(leg || "").toUpperCase() === "SHORT" ? "short" : "long");
+
+const deriveFallbackProtectionClientOrderId = ({ payload = {}, prefix }) => {
+  const derived = gridProtectionGuarantee.deriveProtectionClientOrderId({
+    entryClientOrderId: payload.entryOrderId || null,
+    prefix,
+  });
+  if (derived) {
+    return derived;
+  }
+  const sideCode = String(payload.positionSide || "").toUpperCase() === "SHORT" ? "S" : "L";
+  const seed = String(payload.entryOrderId || payload.sourceOrderId || payload.sourceTradeId || `${payload.uid}_${payload.pid}`);
+  let suffix = 0;
+  for (const char of seed) {
+    suffix = (suffix * 31 + char.charCodeAt(0)) % 100000000;
+  }
+  return `${prefix}_${sideCode}_${Number(payload.uid || 0)}_${Number(payload.pid || 0)}_${String(suffix).padStart(8, "0")}`;
+};
+
+const normalizeProtectionMockOrder = ({ payload, kind, mockOrder }) => {
+  if (mockOrder === false) {
+    return { errorCode: "MOCK_PROTECTION_REJECTED", errorMessage: `${kind} rejected by mock` };
+  }
+  if (mockOrder && typeof mockOrder === "object") {
+    return mockOrder;
+  }
+  const prefix = kind === "TP" ? "GTP" : "GSTOP";
+  return {
+    clientOrderId: deriveFallbackProtectionClientOrderId({ payload, prefix }),
+    orderId: `MOCK_${deriveFallbackProtectionClientOrderId({ payload, prefix })}`,
+  };
+};
+
+const buildProtectionResultState = (outcome) => {
+  if (outcome.protected) {
+    return PROTECTION_QUEUE_STATE.PROTECTED;
+  }
+  return outcome.partial ? PROTECTION_QUEUE_STATE.PARTIAL : PROTECTION_QUEUE_STATE.FAILED;
+};
+
+const updateGridProtectionProjection = async ({ payload = {}, outcome = {}, state, result = {} } = {}) => {
+  const rowId = Number(payload.gridRowId || payload.regimeId || payload.pid || 0);
+  if (!(rowId > 0)) {
+    return false;
+  }
+
+  const leg = String(payload.positionSide || payload.leg || "").toUpperCase();
+  const prefix = getLegPrefix(leg);
+  const protectionQty = Number(payload.ownedQty || payload.qty || 0);
+  const patch = {
+    [`${prefix}LegStatus`]: "OPEN",
+    [`${prefix}EntryOrderId`]: payload.entryOrderId || null,
+    [`${prefix}Qty`]: protectionQty,
+    [`${prefix}EntryPrice`]: Number(payload.entryPrice || 0) || null,
+    [`${prefix}TakeProfitPrice`]: Number(payload.takeProfitPrice || 0) || null,
+    [`${prefix}StopPrice`]: Number(payload.stopPrice || 0) || null,
+    [`${prefix}ExitOrderId`]: result.takeProfit?.clientOrderId || null,
+    [`${prefix}StopOrderId`]: result.stop?.clientOrderId || null,
+    regimeStatus: outcome.protected
+      ? (payload.oneLegEmergency ? "PAIR_ONE_LEG_PROTECTED" : "ACTIVE")
+      : state,
+    regimeEndReason: outcome.protected
+      ? (payload.oneLegEmergency ? "PAIR_ONE_LEG_PROTECTED" : null)
+      : outcome.reason || state,
+  };
+
+  const assignments = Object.keys(patch).map((key) => `${key} = ?`).join(", ");
+  await db.query(
+    `UPDATE live_grid_strategy_list
+        SET ${assignments},
+            updatedAt = CURRENT_TIMESTAMP
+      WHERE id = ?
+        AND uid = ?`,
+    [...Object.values(patch), rowId, Number(payload.uid || 0)]
+  );
+  return true;
+};
+
+const syncProtectionReservationsForIntent = async ({ payload = {}, result = {}, qty = 0 } = {}) => {
+  const reservations = [];
+  if (result.takeProfit?.clientOrderId) {
+    reservations.push({
+      clientOrderId: result.takeProfit.clientOrderId,
+      sourceOrderId: result.takeProfit.sourceOrderId || result.takeProfit.orderId || null,
+      actualOrderId: result.takeProfit.orderId || null,
+      reservationKind: "GRID_TP",
+      reservedQty: qty,
+      note: "grid protection intent take-profit",
+    });
+  }
+  if (result.stop?.clientOrderId) {
+    reservations.push({
+      clientOrderId: result.stop.clientOrderId,
+      sourceOrderId: result.stop.sourceOrderId || result.stop.orderId || null,
+      actualOrderId: result.stop.orderId || null,
+      reservationKind: "GRID_STOP",
+      reservedQty: qty,
+      note: "grid protection intent stop-loss",
+    });
+  }
+
+  return await pidPositionLedger.replaceExitReservations({
+    uid: payload.uid,
+    pid: payload.pid,
+    strategyCategory: "grid",
+    symbol: payload.symbol,
+    positionSide: payload.positionSide,
+    reservations,
+  });
+};
+
+const processGridProtectionCreateIntent = async (intent, options = {}) => {
+  const env = options.env || process.env;
+  const payload = intent?.payload?.protection || intent?.payload || {};
+  const lockRedisClient = Object.prototype.hasOwnProperty.call(options, "redisClient")
+    ? options.redisClient
+    : redisClient;
+  const redisGate = liveWriteSafetyGate.evaluateRedisLockUnavailable({
+    env,
+    liveScope: true,
+    strategyCategory: "grid",
+    scope: "ORDER_INTENT_WORKER",
+    lockKey: `order-intent-worker:grid-protection:${intent.fifoKey || intent.id}`,
+  });
+
+  if (!liveWriteSafetyGate.isRedisClientReady(lockRedisClient) && !redisGate.allowed) {
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(redisGate.reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: PROTECTION_QUEUE_STATE.BLOCKED_REDIS,
+      }),
+      errorCode: redisGate.reason,
+      errorMessage: "Redis lock unavailable; live grid protection worker write blocked.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: redisGate.reason };
+  }
+
+  const ownershipReadiness = await positionOwnership.getOwnershipReadiness().catch((error) => ({
+    enabled: false,
+    error: error?.message || String(error),
+  }));
+  const ownershipGate = liveWriteSafetyGate.evaluateOwnershipGuard({
+    env,
+    strategyCategory: "grid",
+    uid: intent.uid,
+    pid: intent.pid,
+    symbol: payload.symbol || null,
+    positionSide: payload.positionSide || null,
+    ownershipEnabled: ownershipReadiness.enabled === true,
+  });
+
+  if (!ownershipGate.allowed) {
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(ownershipGate.reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: PROTECTION_QUEUE_STATE.BLOCKED_OWNERSHIP,
+      }),
+      errorCode: ownershipGate.reason,
+      errorMessage: `DB-backed PID ownership unavailable; live grid protection worker write blocked. status:${ownershipReadiness.status || "UNKNOWN"}`,
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: ownershipGate.reason };
+  }
+
+  const ownershipQty = await positionOwnership.resolveOwnedCloseQty({
+    uid: intent.uid,
+    pid: intent.pid,
+    strategyCategory: "grid",
+    symbol: payload.symbol,
+    positionSide: payload.positionSide,
+    requestedQty: payload.ownedQty || payload.qty,
+  });
+  if (!ownershipQty.allowed || !(Number(ownershipQty.finalCloseQty || 0) > 0)) {
+    await updateGridProtectionProjection({
+      payload,
+      state: PROTECTION_QUEUE_STATE.BLOCKED_OWNERSHIP,
+      outcome: { protected: false, partial: false, reason: ownershipQty.reason || "OWNERSHIP_BLOCKED" },
+    }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(ownershipQty.reason || "OWNERSHIP_BLOCKED", {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        projectionState: PROTECTION_QUEUE_STATE.BLOCKED_OWNERSHIP,
+        ownership: ownershipQty,
+      }),
+      errorCode: ownershipQty.reason || "OWNERSHIP_BLOCKED",
+      errorMessage: "Grid protection worker blocked by PID-owned qty guard.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason: ownershipQty.reason || "OWNERSHIP_BLOCKED" };
+  }
+
+  if (options.dryRun === true || options.mock === true) {
+    const mock = options.mockProtectionResult || {};
+    const takeProfit = normalizeProtectionMockOrder({
+      payload,
+      kind: "TP",
+      mockOrder: Object.prototype.hasOwnProperty.call(mock, "takeProfit") ? mock.takeProfit : undefined,
+    });
+    const stop = normalizeProtectionMockOrder({
+      payload,
+      kind: "STOP",
+      mockOrder: Object.prototype.hasOwnProperty.call(mock, "stop") ? mock.stop : undefined,
+    });
+    const outcome = gridProtectionGuarantee.classifyProtectionOutcome({
+      takeProfit,
+      stop,
+      oneLegEmergency: payload.oneLegEmergency === true,
+    });
+    const projectionState = buildProtectionResultState(outcome);
+    const result = {
+      ok: outcome.protected,
+      dryRun: options.dryRun === true,
+      mock: options.mock === true,
+      intentType: intent.intentType,
+      fifoKey: intent.fifoKey,
+      projectionState,
+      protectionState: outcome.state,
+      protectionReason: outcome.reason,
+      missingProtection: outcome.missing,
+      protectionQty: ownershipQty.finalCloseQty,
+      takeProfit,
+      stop,
+    };
+    await syncProtectionReservationsForIntent({
+      payload,
+      result,
+      qty: ownershipQty.finalCloseQty,
+    }).catch(() => {});
+    await updateGridProtectionProjection({ payload, outcome, state: projectionState, result }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: outcome.protected ? orderIntentQueue.STATUS.DONE : orderIntentQueue.STATUS.BLOCKED,
+      result,
+      errorCode: outcome.protected ? null : outcome.reason,
+      errorMessage: outcome.protected ? null : `Grid protection critical:${outcome.reason}`,
+    });
+    return {
+      processed: true,
+      status: outcome.protected ? orderIntentQueue.STATUS.DONE : orderIntentQueue.STATUS.BLOCKED,
+      reason: outcome.protected ? "PROTECTION_PROTECTED" : outcome.reason,
+      projectionState,
+    };
+  }
+
+  await orderIntentQueue.completeIntent({
+    id: intent.id,
+    status: orderIntentQueue.STATUS.BLOCKED,
+    result: buildBlockResult("PROTECTION_WORKER_LIVE_WRITE_DISABLED", {
+      intentType: intent.intentType,
+      fifoKey: intent.fifoKey,
+      projectionState: PROTECTION_QUEUE_STATE.RUNNING,
+      note: "actual Binance protection dispatch is intentionally blocked outside live runtime validation",
+    }),
+    errorCode: "PROTECTION_WORKER_LIVE_WRITE_DISABLED",
+    errorMessage: "Grid protection worker dispatch intentionally blocked for non-mock execution.",
+  });
+  return {
+    processed: true,
+    status: orderIntentQueue.STATUS.BLOCKED,
+    reason: "PROTECTION_WORKER_LIVE_WRITE_DISABLED",
+  };
+};
 
 const processGridLiveArmIntent = async (intent, options = {}) => {
   const env = options.env || process.env;
@@ -116,6 +399,10 @@ const processIntent = async (intent, options = {}) => {
     return await processGridLiveArmIntent(intent, options);
   }
 
+  if (intent.intentType === orderIntentQueue.INTENT_TYPE.GRID_PROTECTION_CREATE) {
+    return await processGridProtectionCreateIntent(intent, options);
+  }
+
   await orderIntentQueue.completeIntent({
     id: intent.id,
     status: orderIntentQueue.STATUS.FAILED,
@@ -183,6 +470,8 @@ const getOrderIntentWorkerHealth = () => ({
 module.exports = {
   processOneIntent,
   processIntent,
+  processGridProtectionCreateIntent,
+  PROTECTION_QUEUE_STATE,
   startOrderIntentWorker,
   stopOrderIntentWorker,
   getOrderIntentWorkerHealth,

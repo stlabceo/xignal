@@ -11,6 +11,7 @@ const gridProtectionGuarantee = require("./grid-protection-guarantee");
 const gridPriceSource = require("./grid-price-source");
 const gridReentrySlPolicy = require("./grid-reentry-sl-policy");
 const liveWriteSafetyGate = require("./live-write-safety-gate");
+const orderIntentQueue = require("./order-intent-queue");
 
 const MODE_TABLE = {
   LIVE: "live_grid_strategy_list",
@@ -1880,6 +1881,147 @@ const placeLiveExitOrdersForLeg = async (row, leg, qty, entryPrice, options = {}
   return result;
 };
 
+const enqueueLiveProtectionIntentForLeg = async (row, leg, qty, entryPrice, options = {}) => {
+  const prefix = getLegFieldPrefix(leg);
+  const takeProfitPrice = computeLegTakeProfitPrice(row, leg, entryPrice);
+  const stopPrice = computeLegStopPrice(row, leg);
+  const entryOrderId = options.entryOrderId || row?.[`${prefix}EntryOrderId`] || null;
+  const ownershipQty = await positionOwnership.resolveOwnedCloseQty({
+    uid: row.uid,
+    pid: row.id,
+    strategyCategory: "grid",
+    symbol: row.symbol,
+    positionSide: leg,
+    requestedQty: qty,
+  });
+  const protectionQty = Number(ownershipQty?.finalCloseQty || 0);
+  const baseExits = {
+    takeProfitPrice,
+    stopPrice,
+    takeProfitOrderId: null,
+    stopOrderId: null,
+    takeProfitSourceOrderId: null,
+    stopSourceOrderId: null,
+    takeProfitErrorCode: null,
+    stopErrorCode: null,
+    takeProfitErrorMessage: null,
+    stopErrorMessage: null,
+    takeProfitImmediateTrigger: false,
+    stopImmediateTrigger: false,
+    missingProtection: [],
+    protectionState: "PROTECTION_INTENT_PENDING",
+    protectionReason: "PROTECTION_INTENT_PENDING",
+    protectionQty,
+  };
+
+  if (!ownershipQty.allowed || !(protectionQty > 0)) {
+    const exits = {
+      ...baseExits,
+      takeProfitErrorCode: ownershipQty.reason || "OWNERSHIP_CLOSE_QTY_BLOCKED",
+      stopErrorCode: ownershipQty.reason || "OWNERSHIP_CLOSE_QTY_BLOCKED",
+      takeProfitErrorMessage: `grid protection intent blocked by PID ownership:${ownershipQty.reason || "UNKNOWN"}`,
+      stopErrorMessage: `grid protection intent blocked by PID ownership:${ownershipQty.reason || "UNKNOWN"}`,
+    };
+    const outcome = gridProtectionGuarantee.classifyProtectionOutcome({
+      takeProfit: {
+        errorCode: exits.takeProfitErrorCode,
+        errorMessage: exits.takeProfitErrorMessage,
+      },
+      stop: {
+        errorCode: exits.stopErrorCode,
+        errorMessage: exits.stopErrorMessage,
+      },
+      oneLegEmergency: options.oneLegEmergency === true,
+    });
+    exits.missingProtection = outcome.missing;
+    exits.protectionState = "PROTECTION_BLOCKED_OWNERSHIP";
+    exits.protectionReason = ownershipQty.reason || "OWNERSHIP_BLOCKED";
+    exits.protectionOutcome = outcome;
+    await markGridProtectionCriticalState({
+      row,
+      leg,
+      qty,
+      entryPrice,
+      entryOrderId,
+      exits,
+      oneLegEmergency: options.oneLegEmergency === true,
+      reason: "PROTECTION_BLOCKED_OWNERSHIP",
+    });
+    return {
+      protected: false,
+      pending: false,
+      queued: false,
+      exits,
+      outcome,
+      closed: false,
+      reason: "PROTECTION_BLOCKED_OWNERSHIP",
+    };
+  }
+
+  const summary = await orderIntentQueue.enqueueGridProtectionCreateIntent({
+    routePath: options.routePath || "grid-runtime-protection",
+    sourceEventId: options.sourceEventId || null,
+    payload: {
+      uid: row.uid,
+      pid: row.id,
+      gridRowId: row.id,
+      regimeId: row.id,
+      symbol: row.symbol,
+      positionSide: leg,
+      qty,
+      ownedQty: protectionQty,
+      entryPrice,
+      entryOrderId,
+      sourceOrderId: options.sourceOrderId || null,
+      sourceTradeId: options.sourceTradeId || null,
+      takeProfitPrice,
+      stopPrice,
+      oneLegEmergency: options.oneLegEmergency === true,
+      fillEvidence: options.fillEvidence || null,
+    },
+  });
+  const outcome = {
+    protected: false,
+    partial: false,
+    pending: true,
+    state: "PROTECTION_INTENT_PENDING",
+    reason: "PROTECTION_INTENT_PENDING",
+    missing: [],
+  };
+  const exits = {
+    ...baseExits,
+    protectionOutcome: outcome,
+  };
+  await applyGridPatch("live_grid_strategy_list", row.id, {
+    ...buildGridProtectedLegPatch({
+      row,
+      leg,
+      entryOrderId,
+      entryPrice,
+      qty: protectionQty,
+      exits,
+      regimeStatus: "PROTECTION_INTENT_PENDING",
+      regimeEndReason: "PROTECTION_INTENT_PENDING",
+    }),
+  });
+  await appendGridRuntimeLog(
+    row,
+    "gridProtectQueue",
+    summary.inserted ? "PROTECTION_INTENT_ENQUEUED" : "PROTECTION_INTENT_DUPLICATE",
+    `leg:${leg}, entryOrderId:${entryOrderId || "NONE"}, qty:${protectionQty}, tp:${takeProfitPrice}, stop:${stopPrice}, intent:${summary.intent?.intentKey || "NONE"}`,
+    leg
+  );
+  return {
+    protected: false,
+    pending: true,
+    queued: true,
+    exits,
+    outcome,
+    closed: false,
+    intentSummary: summary,
+  };
+};
+
 const buildGridProtectedLegPatch = ({
   row,
   leg,
@@ -1963,7 +2105,25 @@ const protectGridOpenLegOrClose = async ({
   oneLegEmergency = false,
   failureLogCode = "ENTRY_PROTECTION_MISSING_CLOSED",
   failureMessage = null,
+  useDurableProtectionQueue = true,
+  routePath = null,
+  sourceEventId = null,
+  sourceOrderId = null,
+  sourceTradeId = null,
+  fillEvidence = null,
 } = {}) => {
+  if (useDurableProtectionQueue !== false) {
+    return await enqueueLiveProtectionIntentForLeg(row, leg, qty, entryPrice, {
+      entryOrderId,
+      oneLegEmergency,
+      routePath,
+      sourceEventId,
+      sourceOrderId,
+      sourceTradeId,
+      fillEvidence,
+    });
+  }
+
   const exits = await placeLiveExitOrdersForLeg(row, leg, qty, entryPrice, {
     entryOrderId,
     oneLegEmergency,
@@ -2154,6 +2314,22 @@ const restoreLiveGridLegAfterRecoveredEntryFill = async (row, leg, execution, is
     failureLogCode: "ENTRY_FILL_RECOVERED_PROTECTION_MISSING_CLOSED",
     failureMessage: `leg:${leg}, clientOrderId:${execution.clientOrderId}, qty:${qty}, entryPrice:${entryPrice}, issues:${[].concat(issue?.issues || []).join(",")}`,
   });
+  if (protection.pending) {
+    await touchGridLegPositionOwnership(current, leg, {
+      ownerState: "PROTECTION_INTENT_PENDING",
+      sourceClientOrderId: execution.clientOrderId,
+      sourceOrderId: execution.orderId || null,
+      note: "exchange-entry-reconcile-protection-intent",
+    });
+    await appendGridRuntimeLog(
+      current,
+      "gridReconcile",
+      "ENTRY_FILL_RECOVERED_PROTECTION_INTENT_PENDING",
+      `leg:${leg}, clientOrderId:${execution.clientOrderId}, orderId:${execution.orderId}, qty:${qty}, entryPrice:${entryPrice}, issues:${[].concat(issue?.issues || []).join(",")}`,
+      leg
+    );
+    return true;
+  }
   if (!protection.protected) {
     return protection.closed;
   }
@@ -2177,7 +2353,6 @@ const restoreLiveGridLegAfterRecoveredEntryFill = async (row, leg, execution, is
 const armMissingLiveExits = async (row) => {
   let changed = false;
   let current = row;
-  const coin = getCoin();
 
   for (const leg of ["LONG", "SHORT"]) {
     const prefix = getLegFieldPrefix(leg);
@@ -2191,103 +2366,24 @@ const armMissingLiveExits = async (row) => {
       continue;
     }
 
-    const patch = {};
-    if (!current[`${prefix}ExitOrderId`] && toNumber(current[`${prefix}TakeProfitPrice`]) > 0) {
-      const order = await coin.placeGridTakeProfitOrder({
-        uid: current.uid,
-        pid: current.id,
-        symbol: current.symbol,
-        leg,
-        qty,
-        triggerPrice: current[`${prefix}TakeProfitPrice`],
-      });
-      patch[`${prefix}ExitOrderId`] = order?.clientOrderId || null;
-      if (!patch[`${prefix}ExitOrderId`]) {
-        await appendGridRuntimeLog(
-          current,
-          "gridLiveRepair",
-          "TAKE_PROFIT_REPAIR_MISSING",
-          `leg:${leg}, qty:${qty}, targetPrice:${current[`${prefix}TakeProfitPrice`]}`,
-          leg
-        );
-      }
-    }
-
-    if (!current[`${prefix}StopOrderId`] && toNumber(current[`${prefix}StopPrice`]) > 0) {
-      const order = await coin.placeGridStopOrder({
-        uid: current.uid,
-        pid: current.id,
-        symbol: current.symbol,
-        leg,
-        qty,
-        triggerPrice: current[`${prefix}StopPrice`],
-      });
-      patch[`${prefix}StopOrderId`] = order?.clientOrderId || null;
-      if (!patch[`${prefix}StopOrderId`]) {
-        await appendGridRuntimeLog(
-          current,
-          "gridLiveRepair",
-          "STOP_REPAIR_MISSING",
-          `leg:${leg}, qty:${qty}, stopPrice:${current[`${prefix}StopPrice`]}`,
-          leg
-        );
-      }
-    }
-
-    if (Object.keys(patch).length === 0) {
+    if (current[`${prefix}ExitOrderId`] && current[`${prefix}StopOrderId`]) {
       continue;
     }
 
-    await syncGridExitReservationsForLeg(
-      current,
+    const protection = await protectGridOpenLegOrClose({
+      row: current,
       leg,
-      {
-        takeProfitOrderId: patch[`${prefix}ExitOrderId`] || current[`${prefix}ExitOrderId`] || null,
-        stopOrderId: patch[`${prefix}StopOrderId`] || current[`${prefix}StopOrderId`] || null,
-        takeProfitSourceOrderId: null,
-        stopSourceOrderId: null,
-      },
-      qty
-    );
-    await applyGridPatch("live_grid_strategy_list", current.id, patch);
-    await appendGridRuntimeLog(
-      current,
-      "gridLiveRepair",
-      "EXITS_REPAIRED",
-      `leg:${leg}, tp:${patch[`${prefix}ExitOrderId`] || current[`${prefix}ExitOrderId`] || "KEEP"}, stop:${patch[`${prefix}StopOrderId`] || current[`${prefix}StopOrderId`] || "KEEP"}`,
-      leg
-    );
-    const missingProtection = collectMissingGridProtection({
-      takeProfitPrice: current[`${prefix}TakeProfitPrice`],
-      stopPrice: current[`${prefix}StopPrice`],
-      takeProfitOrderId: patch[`${prefix}ExitOrderId`] || current[`${prefix}ExitOrderId`] || null,
-      stopOrderId: patch[`${prefix}StopOrderId`] || current[`${prefix}StopOrderId`] || null,
+      qty,
+      entryPrice,
+      entryOrderId: current[`${prefix}EntryOrderId`] || null,
+      routePath: "grid-live-exit-repair",
+      failureLogCode: "EXIT_REPAIR_INCOMPLETE_CLOSED",
+      failureMessage: `leg:${leg}, qty:${qty}, reason:missing-live-exit-repair`,
     });
-    if (missingProtection.length > 0) {
-      await markGridProtectionCriticalState({
-        row: current,
-        leg,
-        qty,
-        entryPrice,
-        entryOrderId: current[`${prefix}EntryOrderId`] || null,
-        exits: {
-          takeProfitPrice: current[`${prefix}TakeProfitPrice`],
-          stopPrice: current[`${prefix}StopPrice`],
-          takeProfitOrderId: patch[`${prefix}ExitOrderId`] || current[`${prefix}ExitOrderId`] || null,
-          stopOrderId: patch[`${prefix}StopOrderId`] || current[`${prefix}StopOrderId`] || null,
-          missingProtection,
-        },
-        reason: "PROTECTION_REPAIR_INCOMPLETE",
-      });
-      return await emergencyCloseLiveGridLeg(
-        current,
-        leg,
-        qty,
-        "EXIT_REPAIR_INCOMPLETE_CLOSED",
-        `leg:${leg}, qty:${qty}, missing:${missingProtection.join("+")}`
-      );
+    if (!protection.protected && !protection.pending) {
+      return protection.closed;
     }
-    current = { ...current, ...patch };
+    current = (await loadGridItem("LIVE", current.id)) || current;
     changed = true;
   }
 
@@ -2700,17 +2796,24 @@ const rollbackGridPairSuccessfulLeg = async (row, leg, placement) => {
     await appendGridRuntimeLog(
       row,
       "gridLiveArm",
-      protectedOrClosed.protected ? "PAIR_ONE_LEG_PROTECTED" : "PAIR_ONE_LEG_PROTECTION_CRITICAL",
-      `leg:${leg}, clientOrderId:${clientOrderId}, qty:${qty}, sibling:failed, protected:${protectedOrClosed.protected ? "Y" : "N"}`,
+      protectedOrClosed.protected
+        ? "PAIR_ONE_LEG_PROTECTED"
+        : protectedOrClosed.pending
+          ? "PAIR_ONE_LEG_PROTECTION_INTENT_PENDING"
+          : "PAIR_ONE_LEG_PROTECTION_CRITICAL",
+      `leg:${leg}, clientOrderId:${clientOrderId}, qty:${qty}, sibling:failed, protected:${protectedOrClosed.protected ? "Y" : "N"}, pending:${protectedOrClosed.pending ? "Y" : "N"}`,
       leg
     );
     return {
       state: protectedOrClosed.protected
         ? gridProtectionGuarantee.GRID_PROTECTION_STATE.ONE_LEG_PROTECTED
+        : protectedOrClosed.pending
+          ? "PROTECTION_INTENT_PENDING"
         : gridProtectionGuarantee.GRID_PROTECTION_STATE.ONE_LEG_UNPROTECTED,
       cancelVerified: false,
       filled: true,
       protected: protectedOrClosed.protected,
+      pending: Boolean(protectedOrClosed.pending),
     };
   }
 
@@ -3677,12 +3780,39 @@ const handleLiveGridEntryFill = async (parsed, reData) => {
       qty,
       entryPrice,
       entryOrderId: parsed.clientOrderId,
+      sourceOrderId: reData.i || null,
+      sourceTradeId: reData.t || null,
+      fillEvidence: {
+        eventType: reData.x || null,
+        endStatus: reData.X || null,
+        lastFillQty: reData.l || null,
+        cumulativeFillQty: reData.z || null,
+        tradeTime: reData.T || null,
+      },
+      routePath: "grid-runtime-entry-fill",
       normalRegimeStatus: row.regimeStatus === "ENDED" ? "ENDED" : "ACTIVE",
       normalRegimeEndReason: row.regimeStatus === "ENDED" ? row.regimeEndReason || "BOX_BREAK" : null,
       oneLegEmergency: row.regimeStatus === gridPairAtomicity.GRID_PAIR_STATE.ONE_LEG_FILLED,
       failureLogCode: "ENTRY_PROTECTION_MISSING_CLOSED",
       failureMessage: `leg:${parsed.leg}, entryOrderId:${parsed.clientOrderId}, qty:${qty}, entryPrice:${entryPrice}`,
     });
+    if (protection.pending) {
+      await touchGridLegPositionOwnership(row, parsed.leg, {
+        ownerState: "PROTECTION_INTENT_PENDING",
+        sourceClientOrderId: parsed.clientOrderId,
+        sourceOrderId: reData.i || null,
+        note: `entry-protection-intent:${reData.X || "FILLED"}`,
+      });
+      await appendGridRuntimeLog(
+        row,
+        "gridLiveOpen",
+        "ENTRY_PROTECTION_INTENT_PENDING",
+        `leg:${parsed.leg}, entryPrice:${entryPrice}, qty:${qty}, intent:${protection.intentSummary?.intent?.intentKey || "NONE"}`,
+        parsed.leg
+      );
+      setOutcome("ENTRY_PROTECTION_INTENT_PENDING");
+      return true;
+    }
     if (!protection.protected) {
       setOutcome(protection.outcome.partial ? "ENTRY_PARTIAL_PROTECTION_CRITICAL" : "ENTRY_UNPROTECTED_CRITICAL");
       return protection.closed;
@@ -3748,28 +3878,34 @@ const handleLiveGridTakeProfitFill = async (parsed, reData) => {
       includeEntries: false,
       includeExits: true,
     });
-    const exits = await placeLiveExitOrdersForLeg(row, parsed.leg, remainingQty, remainingEntryPrice);
-    await syncGridExitReservationsForLeg(row, parsed.leg, exits, remainingQty);
-    const missingProtection = collectMissingGridProtection(exits);
-    if (missingProtection.length > 0) {
-      setOutcome("TP_PARTIAL_REPROTECT_FAILED");
-      await markGridProtectionCriticalState({
+    const protection = await protectGridOpenLegOrClose({
+      row,
+      leg: parsed.leg,
+      qty: remainingQty,
+      entryPrice: remainingEntryPrice,
+      entryOrderId: row[`${getLegFieldPrefix(parsed.leg)}EntryOrderId`] || null,
+      sourceOrderId: reData.i || null,
+      sourceTradeId: reData.t || null,
+      routePath: "grid-tp-partial-reprotect",
+      failureLogCode: "TAKE_PROFIT_PARTIAL_REPROTECT_FAILED_CLOSED",
+      failureMessage: `leg:${parsed.leg}, remainingQty:${remainingQty}, reason:tp-partial-reprotect`,
+    });
+    if (protection.pending) {
+      await appendGridRuntimeLog(
         row,
-        leg: parsed.leg,
-        qty: remainingQty,
-        entryPrice: remainingEntryPrice,
-        entryOrderId: row[`${getLegFieldPrefix(parsed.leg)}EntryOrderId`] || null,
-        exits,
-        reason: exits.protectionReason || "TP_PARTIAL_REPROTECT_FAILED",
-      });
-      return await emergencyCloseLiveGridLeg(
-        row,
-        parsed.leg,
-        remainingQty,
-        "TAKE_PROFIT_PARTIAL_REPROTECT_FAILED_CLOSED",
-        `leg:${parsed.leg}, remainingQty:${remainingQty}, missing:${missingProtection.join("+")}`
+        "gridLiveExit",
+        "TAKE_PROFIT_PARTIAL_REPROTECT_INTENT_PENDING",
+        `leg:${parsed.leg}, remainingQty:${remainingQty}, exitPrice:${toNumber(reData.L || reData.ap)}, intent:${protection.intentSummary?.intent?.intentKey || "NONE"}`,
+        parsed.leg
       );
+      setOutcome("TP_PARTIAL_REPROTECT_INTENT_PENDING");
+      return true;
     }
+    if (!protection.protected) {
+      setOutcome(protection.outcome.partial ? "TP_PARTIAL_REPROTECT_PARTIAL_CRITICAL" : "TP_PARTIAL_REPROTECT_FAILED");
+      return protection.closed;
+    }
+    const exits = protection.exits;
     await applyGridPatch("live_grid_strategy_list", row.id, {
       ...buildOpenLegPatch({
         leg: parsed.leg,
@@ -3806,28 +3942,34 @@ const handleLiveGridTakeProfitFill = async (parsed, reData) => {
   });
 
   if (remainingQty > 0) {
-    const exits = await placeLiveExitOrdersForLeg(row, parsed.leg, remainingQty, remainingEntryPrice);
-    await syncGridExitReservationsForLeg(row, parsed.leg, exits, remainingQty);
-    const missingProtection = collectMissingGridProtection(exits);
-    if (missingProtection.length > 0) {
-      setOutcome("TP_REMAINING_REPROTECT_FAILED");
-      await markGridProtectionCriticalState({
+    const protection = await protectGridOpenLegOrClose({
+      row,
+      leg: parsed.leg,
+      qty: remainingQty,
+      entryPrice: remainingEntryPrice,
+      entryOrderId: row[`${getLegFieldPrefix(parsed.leg)}EntryOrderId`] || null,
+      sourceOrderId: reData.i || null,
+      sourceTradeId: reData.t || null,
+      routePath: "grid-tp-remaining-reprotect",
+      failureLogCode: "TAKE_PROFIT_REMAINING_REPROTECT_FAILED_CLOSED",
+      failureMessage: `leg:${parsed.leg}, remainingQty:${remainingQty}, reason:tp-remaining-reprotect`,
+    });
+    if (protection.pending) {
+      await appendGridRuntimeLog(
         row,
-        leg: parsed.leg,
-        qty: remainingQty,
-        entryPrice: remainingEntryPrice,
-        entryOrderId: row[`${getLegFieldPrefix(parsed.leg)}EntryOrderId`] || null,
-        exits,
-        reason: exits.protectionReason || "TP_REMAINING_REPROTECT_FAILED",
-      });
-      return await emergencyCloseLiveGridLeg(
-        row,
-        parsed.leg,
-        remainingQty,
-        "TAKE_PROFIT_REMAINING_REPROTECT_FAILED_CLOSED",
-        `leg:${parsed.leg}, remainingQty:${remainingQty}, missing:${missingProtection.join("+")}`
+        "gridLiveExit",
+        "TAKE_PROFIT_REMAINING_REPROTECT_INTENT_PENDING",
+        `leg:${parsed.leg}, remainingQty:${remainingQty}, exitPrice:${toNumber(reData.ap || reData.L)}, intent:${protection.intentSummary?.intent?.intentKey || "NONE"}`,
+        parsed.leg
       );
+      setOutcome("TP_REMAINING_REPROTECT_INTENT_PENDING");
+      return true;
     }
+    if (!protection.protected) {
+      setOutcome(protection.outcome.partial ? "TP_REMAINING_REPROTECT_PARTIAL_CRITICAL" : "TP_REMAINING_REPROTECT_FAILED");
+      return protection.closed;
+    }
+    const exits = protection.exits;
     await applyGridPatch("live_grid_strategy_list", row.id, {
       ...buildOpenLegPatch({
         leg: parsed.leg,
