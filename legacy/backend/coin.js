@@ -7791,6 +7791,7 @@ exports.placeGridEntryOrder = async ({
     qty,
     marginType = null,
     leverage = null,
+    clientOrderId = null,
 }) => {
     if(!pid || !symbol || !leg){
         return null;
@@ -7811,11 +7812,12 @@ exports.placeGridEntryOrder = async ({
         return null;
     }
 
+    const requestedClientOrderId = clientOrderId || buildGridClientOrderId('GENTRY', leg, uid, pid);
+
     try{
         await ensureMarginAndLeverage(uid, symbol, marginType, leverage);
 
         const orderSide = leg === 'LONG' ? 'BUY' : 'SELL';
-        const clientOrderId = buildGridClientOrderId('GENTRY', leg, uid, pid);
         const order = await submitFuturesOrder(
             {
                 uid,
@@ -7832,25 +7834,35 @@ exports.placeGridEntryOrder = async ({
             {
                 timeInForce: 'GTC',
                 positionSide: leg,
-                newClientOrderId: clientOrderId,
+                newClientOrderId: requestedClientOrderId,
             }
         );
 
         return {
             orderId: order?.orderId || null,
-            clientOrderId,
+            clientOrderId: requestedClientOrderId,
             qty: normalizedQty,
             price: normalizedPrice,
         };
     }catch(error){
         const info = extractBinanceError(error);
         const action = classifyBinanceError(info.code);
+        const errorMessage = info.msg || error?.message || 'grid entry order failed';
+        const needsVerification = Boolean(
+            error?.code === 'ECONNABORTED'
+            || /timeout|timed out|econnreset|socket hang up|unknown/i.test(String(errorMessage || ''))
+            || [-1001, -1007, -1021].includes(Number(info.code))
+        );
+        const duplicate = Boolean(
+            [-2010, -4111].includes(Number(info.code))
+            || /duplicate|clientorderid.*used|client order id.*used/i.test(String(errorMessage || ''))
+        );
         exports.msgAdd(
             'placeGridEntryOrder',
             String(info.code || 'GRID_ENTRY_ERROR'),
             toRuntimeMessage(
-                formatBinanceErrorGuideClean(info.msg || error?.message || 'grid entry order failed', info.code, action),
-                `pid:${pid}, symbol:${symbol}, leg:${leg}, qty:${normalizedQty}, triggerPrice:${normalizedPrice}, marginType:${marginType || '-'}, leverage:${leverage || '-'}`
+                formatBinanceErrorGuideClean(errorMessage, info.code, action),
+                `pid:${pid}, symbol:${symbol}, leg:${leg}, qty:${normalizedQty}, triggerPrice:${normalizedPrice}, clientOrderId:${requestedClientOrderId}, marginType:${marginType || '-'}, leverage:${leverage || '-'}`
             ),
             uid,
             pid,
@@ -7858,7 +7870,14 @@ exports.placeGridEntryOrder = async ({
             symbol,
             leg
         );
-        return null;
+        return {
+            ok: false,
+            requestedClientOrderId,
+            errorCode: info.code || null,
+            errorMessage,
+            needsVerification,
+            duplicate,
+        };
     }
 }
 
@@ -8420,6 +8439,22 @@ const findExchangeOrder = async (uid, symbol, { orderId = null, clientOrderId = 
 
         throw error;
     }
+}
+
+exports.findGridEntryOrder = async ({
+    uid,
+    symbol,
+    orderId = null,
+    clientOrderId = null,
+} = {}) => {
+    if(!uid || !symbol || (!orderId && !clientOrderId)){
+        return null;
+    }
+
+    return await findExchangeOrder(uid, symbol, {
+        orderId,
+        clientOrderId,
+    });
 }
 
 const syncEnterOrderFromQuery = async (uid, pid, minQty, queriedOrder) => {

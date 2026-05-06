@@ -161,12 +161,23 @@ const deriveSignalRuntimeState = (item = {}, options = {}) => {
 const deriveGridRuntimeState = (item = {}, options = {}) => {
   const snapshots = options.snapshots || item.pidSnapshots || [];
   const reservations = options.reservations || item.pidReservations || [];
+  const regimeStatus = normalizeStatus(item?.regimeStatus);
 
   if (hasOpenSnapshotRows(snapshots) || hasActiveReservations(reservations)) {
     return "GRIDDING";
   }
 
   if (item?.longEntryOrderId || item?.shortEntryOrderId) {
+    return "GRIDDING";
+  }
+
+  if (
+    regimeStatus === "ACTIVE" ||
+    regimeStatus === "PAIR_ARM_PENDING" ||
+    regimeStatus === "PAIR_ARM_FAILED" ||
+    regimeStatus === "PAIR_ROLLBACK_PENDING" ||
+    regimeStatus === "PAIR_ONE_LEG_FILLED"
+  ) {
     return "GRIDDING";
   }
 

@@ -6,6 +6,7 @@ const gridRuntime = require("./grid-runtime");
 const positionOwnership = require("./position-ownership");
 const pidPositionLedger = require("./pid-position-ledger");
 const redisClient = require("./util/redis.util");
+const gridPairAtomicity = require("./grid-pair-atomicity");
 
 const MODE_TABLE = {
   LIVE: "live_grid_strategy_list",
@@ -567,6 +568,7 @@ const isGridControlEnabled = (row) =>
 const canArmEntriesForRow = (row) =>
   isGridControlEnabled(row)
   && row?.regimeStatus !== "ENDED"
+  && !gridPairAtomicity.isPairArmDefectState(row)
   && row?.regimeEndReason !== "BOX_BREAK"
   && row?.regimeEndReason !== "BOX_BREAK_WAITING";
 
@@ -1607,7 +1609,7 @@ const collectMissingGridProtection = (exits = {}) => {
   return missingProtection;
 };
 
-const placeLiveEntryOrderForLeg = async (row, leg) => {
+const placeLiveEntryOrderForLeg = async (row, leg, options = {}) => {
   const coin = getCoin();
   const triggerPrice = toNumber(row.triggerPrice);
   const qty = computeGridEntryQty(row, triggerPrice);
@@ -1624,6 +1626,7 @@ const placeLiveEntryOrderForLeg = async (row, leg) => {
     qty,
     marginType: row.marginType,
     leverage: row.leverage,
+    clientOrderId: options.clientOrderId || null,
   });
 };
 
@@ -1974,9 +1977,387 @@ const armMissingLiveExits = async (row) => {
   return changed;
 };
 
+const GRID_ENTRY_PAIR_LEGS = ["LONG", "SHORT"];
+
+const getPairEntryPatch = (leg, patch) => {
+  const prefix = getLegFieldPrefix(leg);
+  return Object.fromEntries(
+    Object.entries(patch).map(([key, value]) => [`${prefix}${key}`, value])
+  );
+};
+
+const isInitialGridEntryPairCandidate = (row) =>
+  canArmEntriesForRow(row)
+  && GRID_ENTRY_PAIR_LEGS.every((leg) => {
+    const prefix = getLegFieldPrefix(leg);
+    return row?.[`${prefix}LegStatus`] === "ENTRY_ARMED" && !row?.[`${prefix}EntryOrderId`];
+  });
+
+const isOneSidedEntryArmWithoutOppositeContext = (row) => {
+  if (!canArmEntriesForRow(row)) {
+    return false;
+  }
+
+  const armedLegs = GRID_ENTRY_PAIR_LEGS.filter((leg) => {
+    const prefix = getLegFieldPrefix(leg);
+    return row?.[`${prefix}LegStatus`] === "ENTRY_ARMED" && !row?.[`${prefix}EntryOrderId`];
+  });
+  if (armedLegs.length !== 1) {
+    return false;
+  }
+
+  const hasOpenLegContext = GRID_ENTRY_PAIR_LEGS.some((leg) => hasOpenLeg(row, leg));
+  return !hasOpenLegContext && !gridPairAtomicity.hasAnyGridEntryOrderRef(row);
+};
+
+const markGridPairArmFailed = async (row, reason, message) => {
+  const patch = {
+    regimeStatus: gridPairAtomicity.GRID_PAIR_STATE.FAILED,
+    regimeEndReason: reason,
+    ...getPairEntryPatch("LONG", {
+      LegStatus: gridPairAtomicity.GRID_PAIR_LEG_STATUS.FAILED,
+      EntryOrderId: null,
+    }),
+    ...getPairEntryPatch("SHORT", {
+      LegStatus: gridPairAtomicity.GRID_PAIR_LEG_STATUS.FAILED,
+      EntryOrderId: null,
+    }),
+  };
+  await applyGridPatch("live_grid_strategy_list", row.id, patch);
+  await releaseGridLegPositionOwnership(row, "LONG").catch(() => {});
+  await releaseGridLegPositionOwnership(row, "SHORT").catch(() => {});
+  await appendGridRuntimeLog(row, "gridLiveArm", reason, message);
+  return true;
+};
+
+const findGridEntryOrderForLeg = async (row, leg, { orderId = null, clientOrderId = null } = {}) => {
+  if (!clientOrderId && !orderId) {
+    return null;
+  }
+
+  const coin = getCoin();
+  if (typeof coin.findGridEntryOrder !== "function") {
+    return null;
+  }
+
+  return await coin.findGridEntryOrder({
+    uid: row.uid,
+    symbol: row.symbol,
+    orderId,
+    clientOrderId,
+  }).catch(() => null);
+};
+
+const resolveGridPairPlacementResult = async (row, leg, result, requestedClientOrderId) => {
+  if (result?.clientOrderId) {
+    return {
+      leg,
+      ok: true,
+      clientOrderId: result.clientOrderId,
+      orderId: result.orderId || null,
+      exchangeOrder: result.raw || null,
+      source: "ACK",
+    };
+  }
+
+  if (gridPairAtomicity.shouldVerifyAfterWriteResult(result)) {
+    const exchangeOrder = await findGridEntryOrderForLeg(row, leg, {
+      clientOrderId: requestedClientOrderId || result?.requestedClientOrderId || null,
+    });
+    if (exchangeOrder) {
+      return {
+        leg,
+        ok: true,
+        clientOrderId: String(exchangeOrder.clientOrderId || exchangeOrder.origClientOrderId || requestedClientOrderId),
+        orderId: exchangeOrder.orderId || null,
+        exchangeOrder,
+        source: gridPairAtomicity.isDuplicateOrderResult(result) ? "DUPLICATE_VERIFIED" : "READ_AFTER_WRITE",
+      };
+    }
+  }
+
+  return {
+    leg,
+    ok: false,
+    clientOrderId: requestedClientOrderId || result?.requestedClientOrderId || null,
+    orderId: result?.orderId || null,
+    errorCode: result?.errorCode || null,
+    errorMessage: result?.errorMessage || null,
+    source: "FAILED",
+  };
+};
+
+const rollbackGridPairSuccessfulLeg = async (row, leg, placement) => {
+  const prefix = getLegFieldPrefix(leg);
+  const clientOrderId = placement?.clientOrderId || null;
+  const exchangeOrder = placement?.exchangeOrder || await findGridEntryOrderForLeg(row, leg, {
+    orderId: placement?.orderId || null,
+    clientOrderId,
+  });
+
+  if (gridPairAtomicity.isOrderFilledOrPartiallyFilled(exchangeOrder || {})) {
+    const qty = gridPairAtomicity.getOrderExecutedQty(exchangeOrder);
+    const entryPrice = toNumber(exchangeOrder?.avgPrice || exchangeOrder?.price || 0);
+    await applyGridPatch("live_grid_strategy_list", row.id, {
+      regimeStatus: gridPairAtomicity.GRID_PAIR_STATE.ONE_LEG_FILLED,
+      regimeEndReason: "PAIR_ARM_SIBLING_FAILED",
+      [`${prefix}LegStatus`]: gridPairAtomicity.GRID_PAIR_LEG_STATUS.ONE_LEG_FILLED,
+      [`${prefix}EntryOrderId`]: clientOrderId,
+      [`${prefix}Qty`]: qty,
+      [`${prefix}EntryPrice`]: entryPrice > 0 ? entryPrice : null,
+    });
+    await touchGridLegPositionOwnership(row, leg, {
+      ownerState: "OPEN",
+      sourceClientOrderId: clientOrderId,
+      sourceOrderId: placement?.orderId || exchangeOrder?.orderId || null,
+      note: "grid pair arm sibling failed after fill",
+    });
+    await appendGridRuntimeLog(
+      row,
+      "gridLiveArm",
+      "PAIR_ONE_LEG_FILLED",
+      `leg:${leg}, clientOrderId:${clientOrderId}, qty:${qty}, sibling:failed`,
+      leg
+    );
+    return {
+      state: gridPairAtomicity.GRID_PAIR_STATE.ONE_LEG_FILLED,
+      cancelVerified: false,
+      filled: true,
+    };
+  }
+
+  let cancelVerified = false;
+  try {
+    const rowWithOrder = {
+      ...row,
+      [`${prefix}EntryOrderId`]: clientOrderId,
+    };
+    const canceledCount = await cancelAllGridOrders("LIVE", rowWithOrder, {
+      leg,
+      includeEntries: true,
+      includeExits: false,
+    });
+    cancelVerified = canceledCount > 0;
+  } catch (error) {
+    cancelVerified = false;
+  }
+
+  if (!cancelVerified) {
+    const afterCancel = await findGridEntryOrderForLeg(row, leg, {
+      orderId: placement?.orderId || null,
+      clientOrderId,
+    });
+    cancelVerified = gridPairAtomicity.isOrderTerminalCanceled(afterCancel || {});
+  }
+
+  if (cancelVerified) {
+    await releaseGridLegPositionOwnership(row, leg).catch(() => {});
+    return {
+      state: gridPairAtomicity.GRID_PAIR_STATE.FAILED,
+      cancelVerified: true,
+      filled: false,
+    };
+  }
+
+  await applyGridPatch("live_grid_strategy_list", row.id, {
+    regimeStatus: gridPairAtomicity.GRID_PAIR_STATE.ROLLBACK_PENDING,
+    regimeEndReason: "PAIR_ARM_ROLLBACK_PENDING",
+    [`${prefix}LegStatus`]: gridPairAtomicity.GRID_PAIR_LEG_STATUS.ROLLBACK_PENDING,
+    [`${prefix}EntryOrderId`]: clientOrderId,
+  });
+  await appendGridRuntimeLog(
+    row,
+    "gridLiveArm",
+    "PAIR_ROLLBACK_PENDING",
+    `leg:${leg}, clientOrderId:${clientOrderId}, sibling:failed`,
+    leg
+  );
+  return {
+    state: gridPairAtomicity.GRID_PAIR_STATE.ROLLBACK_PENDING,
+    cancelVerified: false,
+    filled: false,
+  };
+};
+
+const handleGridPairArmFailure = async (row, placements, reservedSlots, ownershipReservations) => {
+  const successLegs = GRID_ENTRY_PAIR_LEGS.filter((leg) => placements[leg]?.ok);
+  const failedLegs = GRID_ENTRY_PAIR_LEGS.filter((leg) => !placements[leg]?.ok);
+
+  for (const leg of GRID_ENTRY_PAIR_LEGS) {
+    if (reservedSlots[leg]) {
+      await finalizeLiveGridEntrySlot(
+        row,
+        leg,
+        reservedSlots[leg],
+        placements[leg]?.ok ? placements[leg].clientOrderId : null
+      ).catch(() => {});
+    }
+  }
+
+  if (successLegs.length === 0) {
+    await markGridPairArmFailed(
+      row,
+      "PAIR_ARM_BOTH_FAILED",
+      `long:${placements.LONG?.errorCode || "FAIL"}, short:${placements.SHORT?.errorCode || "FAIL"}`
+    );
+    return true;
+  }
+
+  const rollbackResults = {};
+  for (const leg of successLegs) {
+    rollbackResults[leg] = await rollbackGridPairSuccessfulLeg(row, leg, placements[leg]);
+  }
+
+  for (const leg of failedLegs) {
+    const prefix = getLegFieldPrefix(leg);
+    await releaseGridLegPositionOwnership(row, leg).catch(() => {});
+    await applyGridPatch("live_grid_strategy_list", row.id, {
+      [`${prefix}LegStatus`]: gridPairAtomicity.GRID_PAIR_LEG_STATUS.FAILED,
+      [`${prefix}EntryOrderId`]: null,
+    });
+  }
+
+  const hasFilled = Object.values(rollbackResults).some((item) => item?.filled);
+  const hasPendingRollback = Object.values(rollbackResults).some((item) => item?.state === gridPairAtomicity.GRID_PAIR_STATE.ROLLBACK_PENDING);
+  if (!hasFilled && !hasPendingRollback) {
+    await applyGridPatch("live_grid_strategy_list", row.id, {
+      regimeStatus: gridPairAtomicity.GRID_PAIR_STATE.FAILED,
+      regimeEndReason: "PAIR_ARM_ROLLBACK_CONFIRMED",
+      ...Object.assign({}, ...successLegs.map((leg) => getPairEntryPatch(leg, {
+        LegStatus: gridPairAtomicity.GRID_PAIR_LEG_STATUS.FAILED,
+        EntryOrderId: null,
+      }))),
+    });
+  }
+
+  await appendGridRuntimeLog(
+    row,
+    "gridLiveArm",
+    hasFilled ? "PAIR_ONE_LEG_FILLED" : hasPendingRollback ? "PAIR_ROLLBACK_PENDING" : "PAIR_ARM_FAILED",
+    `success:${successLegs.join("+") || "NONE"}, failed:${failedLegs.join("+") || "NONE"}`
+  );
+  return true;
+};
+
+const armInitialLiveEntryPair = async (row) => {
+  const current = (await loadGridItem("LIVE", row.id)) || row;
+  if (!isInitialGridEntryPairCandidate(current)) {
+    return false;
+  }
+
+  const reservedSlots = {};
+  const ownershipReservations = {};
+  const placements = {};
+  const requestedClientOrderIds = Object.fromEntries(
+    GRID_ENTRY_PAIR_LEGS.map((leg) => [
+      leg,
+      gridPairAtomicity.buildGridPairClientOrderId(current, leg),
+    ])
+  );
+
+  await applyGridPatch("live_grid_strategy_list", current.id, {
+    regimeStatus: gridPairAtomicity.GRID_PAIR_STATE.PENDING,
+    regimeEndReason: null,
+  });
+
+  try {
+    for (const leg of GRID_ENTRY_PAIR_LEGS) {
+      ownershipReservations[leg] = await acquireGridLegPositionOwnership(current, leg, {
+        ownerState: "ENTRY_ARMED",
+        sourceClientOrderId: requestedClientOrderIds[leg],
+        note: "grid pair entry arm",
+      });
+      if (!ownershipReservations[leg]?.ok) {
+        throw new Error(`PAIR_OWNERSHIP_FAILED:${leg}:${ownershipReservations[leg]?.reason || "UNKNOWN"}`);
+      }
+    }
+
+    for (const leg of GRID_ENTRY_PAIR_LEGS) {
+      reservedSlots[leg] = await reserveLiveGridEntrySlot(current, leg);
+      if (!reservedSlots[leg]) {
+        throw new Error(`PAIR_ENTRY_SLOT_BUSY:${leg}`);
+      }
+    }
+
+    for (const leg of GRID_ENTRY_PAIR_LEGS) {
+      const result = await placeLiveEntryOrderForLeg(current, leg, {
+        clientOrderId: requestedClientOrderIds[leg],
+      });
+      placements[leg] = await resolveGridPairPlacementResult(
+        current,
+        leg,
+        result,
+        requestedClientOrderIds[leg]
+      );
+    }
+
+    if (GRID_ENTRY_PAIR_LEGS.every((leg) => placements[leg]?.ok)) {
+      for (const leg of GRID_ENTRY_PAIR_LEGS) {
+        await finalizeLiveGridEntrySlot(current, leg, reservedSlots[leg], placements[leg].clientOrderId);
+        await touchGridLegPositionOwnership(current, leg, {
+          ownerState: "ENTRY_ARMED",
+          sourceClientOrderId: placements[leg].clientOrderId,
+          sourceOrderId: placements[leg].orderId || null,
+          note: "grid pair entry order placed",
+        });
+      }
+      await applyGridPatch("live_grid_strategy_list", current.id, {
+        regimeStatus: "ACTIVE",
+        regimeEndReason: null,
+      });
+      await appendGridRuntimeLog(
+        current,
+        "gridLiveArm",
+        "ENTRY_PAIR_ARMED",
+        `long:${placements.LONG.clientOrderId}, short:${placements.SHORT.clientOrderId}`
+      );
+      return true;
+    }
+
+    return await handleGridPairArmFailure(current, placements, reservedSlots, ownershipReservations);
+  } catch (error) {
+    if (Object.values(placements).some((placement) => placement?.ok)) {
+      await appendGridRuntimeLog(
+        current,
+        "gridLiveArm",
+        "PAIR_ARM_EXCEPTION",
+        `message:${error?.message || error}`
+      );
+      return await handleGridPairArmFailure(current, placements, reservedSlots, ownershipReservations);
+    }
+
+    for (const leg of GRID_ENTRY_PAIR_LEGS) {
+      if (reservedSlots[leg]) {
+        await finalizeLiveGridEntrySlot(current, leg, reservedSlots[leg], null).catch(() => {});
+      }
+      if (ownershipReservations[leg]?.ok) {
+        await releaseGridLegPositionOwnership(current, leg).catch(() => {});
+      }
+    }
+    await markGridPairArmFailed(
+      current,
+      "PAIR_ARM_SETUP_FAILED",
+      `message:${error?.message || error}`
+    );
+    return true;
+  }
+};
+
 const armMissingLiveEntries = async (row) => {
   if (!canArmEntriesForRow(row)) {
     return false;
+  }
+
+  if (isInitialGridEntryPairCandidate(row)) {
+    return await armInitialLiveEntryPair(row);
+  }
+
+  if (isOneSidedEntryArmWithoutOppositeContext(row)) {
+    return await markGridPairArmFailed(
+      row,
+      "PAIR_ARM_ONE_SIDED",
+      "one-sided entry arm without opposite open/order context"
+    );
   }
 
   let changed = false;
@@ -2095,7 +2476,12 @@ const finalizeEndedGridRegimeIfIdle = async (mode, row, reason = "BOX_BREAK") =>
     refreshed = (await loadGridItem(mode, row.id)) || refreshed;
     const hasOpenQty = await hasLiveGridOpenSnapshotQty(refreshed);
     const hasActiveReservations = await hasLiveGridActiveReservations(refreshed);
-    if (hasOpenQty || hasAnyEntryArmed(refreshed) || hasActiveReservations) {
+    if (
+      hasOpenQty
+      || hasAnyEntryArmed(refreshed)
+      || gridPairAtomicity.hasAnyGridEntryOrderRef(refreshed)
+      || hasActiveReservations
+    ) {
       return false;
     }
   } else if (hasOpenPosition(refreshed) || hasAnyEntryArmed(refreshed)) {
@@ -2423,6 +2809,10 @@ const runTestCycleForItem = async (row) => {
 const runLiveCycleForItem = async (row) => {
   const price = dt.getPrice(row.symbol);
   if (!price.st) {
+    return;
+  }
+
+  if (gridPairAtomicity.isPairArmDefectState(row)) {
     return;
   }
 
