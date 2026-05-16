@@ -142,7 +142,7 @@ const buildGridWebhookTargetItem = ({
   note,
 });
 
-const armGridWebhookTargetsForMode = async (mode, payload) => {
+const armGridWebhookTargetsForMode = async (mode, payload, options = {}) => {
   const tableName = getGridWebhookTableName(mode);
   if (!tableName) {
     return {
@@ -155,6 +155,8 @@ const armGridWebhookTargetsForMode = async (mode, payload) => {
     };
   }
 
+  const scopedUid = Number(options.uid || options.userId || 0) || null;
+  const uidPredicate = scopedUid ? " AND uid = ?" : "";
   const [rows] = await db.query(
       `SELECT
         id,
@@ -180,8 +182,9 @@ const armGridWebhookTargetsForMode = async (mode, payload) => {
       WHERE enabled = 'Y'
         AND symbol = ?
         AND bunbong = ?
+        ${uidPredicate}
       ORDER BY id ASC`,
-    [payload.symbol, payload.bunbong]
+    scopedUid ? [payload.symbol, payload.bunbong, scopedUid] : [payload.symbol, payload.bunbong]
   );
 
   const strategySignalKey = normalizeGridSignalKey(payload.strategySignal);
@@ -296,7 +299,7 @@ const armGridWebhookTargetsForMode = async (mode, payload) => {
   return result;
 };
 
-const previewGridWebhookTargetsForMode = async (mode, payload) => {
+const previewGridWebhookTargetsForMode = async (mode, payload, options = {}) => {
   const tableName = getGridWebhookTableName(mode);
   if (!tableName) {
     return {
@@ -309,6 +312,8 @@ const previewGridWebhookTargetsForMode = async (mode, payload) => {
     };
   }
 
+  const scopedUid = Number(options.uid || options.userId || 0) || null;
+  const uidPredicate = scopedUid ? " AND uid = ?" : "";
   const [rows] = await db.query(
       `SELECT
         id,
@@ -334,8 +339,9 @@ const previewGridWebhookTargetsForMode = async (mode, payload) => {
       WHERE enabled = 'Y'
         AND symbol = ?
         AND bunbong = ?
+        ${uidPredicate}
       ORDER BY id ASC`,
-    [payload.symbol, payload.bunbong]
+    scopedUid ? [payload.symbol, payload.bunbong, scopedUid] : [payload.symbol, payload.bunbong]
   );
 
   const strategySignalKey = normalizeGridSignalKey(payload.strategySignal);
@@ -419,11 +425,11 @@ const combineGridWebhookResults = (liveResult, testResult) => ({
   targetItems: [...(liveResult.targetItems || []), ...(testResult.targetItems || [])],
 });
 
-const previewGridWebhook = async (payload = {}) => {
+const previewGridWebhook = async (payload = {}, options = {}) => {
   const normalized = normalizeGridWebhookPayload(payload);
   const [liveResult, testResult] = await Promise.all([
-    previewGridWebhookTargetsForMode("live", normalized),
-    previewGridWebhookTargetsForMode("test", normalized),
+    previewGridWebhookTargetsForMode("live", normalized, options),
+    previewGridWebhookTargetsForMode("test", normalized, options),
   ]);
 
   return combineGridWebhookResults(liveResult, testResult);
@@ -435,7 +441,7 @@ const processGridWebhook = async (payload = {}, options = {}) => {
   const includeTest = options.includeTest !== false;
   const [liveResult, testResult] = await Promise.all([
     includeLive
-      ? armGridWebhookTargetsForMode("live", normalized)
+      ? armGridWebhookTargetsForMode("live", normalized, options)
       : {
           matched: 0,
           armed: 0,
@@ -445,7 +451,7 @@ const processGridWebhook = async (payload = {}, options = {}) => {
           targetItems: [],
         },
     includeTest
-      ? armGridWebhookTargetsForMode("test", normalized)
+      ? armGridWebhookTargetsForMode("test", normalized, options)
       : {
           matched: 0,
           armed: 0,

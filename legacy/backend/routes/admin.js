@@ -30,6 +30,12 @@ const binanceWriteGuard = require("../binance-write-guard");
 const adminOrderMonitor = require("../admin-order-monitor");
 const credentialSecrets = require("../credential-secrets");
 const trackRecordClassifier = require("../track-record-classifier");
+const demoTrackRecord = require("../demo-track-record");
+const {
+  insertWebhookEventLog,
+  updateWebhookEventLogOutcome,
+  insertWebhookEventTargetLogs,
+} = require("../webhook-event-log");
 
 const dt = require("../data");
 const dayjs = require("dayjs");
@@ -2064,6 +2070,16 @@ const buildOrderProcessRow = async (targetRow, options = {}) => {
   const fromTime = dayjs(createdAtMs - 5 * 1000).format("YYYY-MM-DD HH:mm:ss");
   const toTime = dayjs(defaultWindowEndMs).format("YYYY-MM-DD HH:mm:ss");
   const parsedPayloadJson = parseOrderProcessPayloadJson(targetRow.payloadJson);
+  if (targetMode === "test") {
+    const demoRow = await demoTrackRecord.buildDemoOrderProcessRow(targetRow, {
+      nowMs,
+      includeDetail,
+      currentItem: hasCurrentItemOverride ? currentItemOverride : undefined,
+    });
+    if (demoRow) {
+      return demoRow;
+    }
+  }
   const isWithinExtendedLifecycleWindow = (value) => {
     const valueMs = normalizeDateMs(value);
     return Boolean(valueMs && valueMs >= createdAtMs && valueMs <= extendedWindowEndMs);
@@ -2774,7 +2790,12 @@ const buildTrackRecordListItem = (processRow = {}) => {
     realizedPnl: cycleRealizedPnl,
     returnPct: classification.returnPct,
     result: classification.result,
-    source: "live-ledger",
+    source: processRow.trackRecordSource || (processRow.trackRecordType === "demo" ? "demo-track-record" : "live-ledger"),
+    trackRecordType: processRow.trackRecordType || (processRow.strategyMode === "test" ? "demo" : "live"),
+    tradeMode: processRow.tradeMode || processRow.strategyMode || null,
+    strategySuccessScope: processRow.strategySuccessScope || (processRow.strategyMode === "test" ? "demo_only" : "live"),
+    statsEligible: processRow.statsEligible,
+    recommendationEligible: processRow.recommendationEligible,
     issueCategoryLabel: needsReview ? processRow.issueCategoryLabel || null : null,
     issueSourceLabel: needsReview ? processRow.issueSourceLabel || null : null,
     issueLabel: needsReview ? processRow.issueLabel || null : null,
@@ -5149,6 +5170,223 @@ router.post('/test/add', validateItemAdd, async function(req, res){
   return res.send(true);
 });
 
+const normalizeDemoHookSymbol = (value) =>
+  String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/^[A-Z0-9_]+:/, "")
+    .replace(/\.P$/i, "");
+
+const normalizeDemoSignalHookBunbong = (value) => {
+  const normalized = String(value || "").trim().toUpperCase();
+  const minuteMatch = normalized.match(/^(\d+)\s*(M|MIN|MINUTE|MINUTES)$/);
+  if (minuteMatch) {
+    return minuteMatch[1];
+  }
+  return normalized.replace(/\s+/g, "");
+};
+
+const normalizeDemoSignalHookPayload = (payload = {}) => ({
+  ...payload,
+  db_type: String(payload?.db_type || payload?.strategyType || payload?.strategy || "").trim(),
+  type: String(payload?.type || payload?.signalType || payload?.side || "").trim().toUpperCase(),
+  symbol: normalizeDemoHookSymbol(payload?.symbol || payload?.ticker || payload?.market),
+  bunbong: normalizeDemoSignalHookBunbong(payload?.bunbong || payload?.timeframe || payload?.interval),
+  uuid: String(payload?.uuid || payload?.strategyUuid || "").trim(),
+  time: String(payload?.time || payload?.signalTime || payload?.eventTime || "").trim(),
+  close: payload?.close,
+});
+
+const validateDemoSignalHookPayload = (payload = {}) => {
+  if (!payload.db_type) {
+    return { ok: false, reason: "missing-db-type" };
+  }
+  if (!payload.type) {
+    return { ok: false, reason: "missing-type" };
+  }
+  if (!payload.symbol) {
+    return { ok: false, reason: "missing-symbol" };
+  }
+  if (!payload.bunbong) {
+    return { ok: false, reason: "missing-bunbong" };
+  }
+  return { ok: true };
+};
+
+const normalizeWebhookResultCode = (value, fallback = "RECEIVED") =>
+  String(value || fallback)
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || fallback;
+
+const buildDemoSignalWebhookOutcome = (summary = {}) => {
+  const processedCount =
+    Number(summary.enteredCount || 0) +
+    Number(summary.reverseCloseCount || 0) +
+    Number(summary.reverseCancelCount || 0);
+  const ignoredCount =
+    Number(summary.ignoredNotReadyCount || 0) +
+    Number(summary.ignoredSignalMismatchCount || 0) +
+    Number(summary.lockSkippedCount || 0) +
+    Number(summary.entryRejectedCount || 0);
+
+  if (!summary.ok) {
+    return {
+      status: "IGNORED",
+      resultCode: normalizeWebhookResultCode(summary.reason, "IGNORED"),
+      matchedCount: Number(summary.matchedCount || 0),
+      processedCount,
+      ignoredCount: Math.max(ignoredCount, 1),
+      note: summary.reason || null,
+    };
+  }
+  if (summary.enteredCount > 0) {
+    return {
+      status: "PROCESSED",
+      resultCode: "ENTERED_PENDING",
+      matchedCount: Number(summary.matchedCount || 0),
+      processedCount,
+      ignoredCount,
+      note: "demo-strategy-enter-pending",
+    };
+  }
+  if (summary.reverseCloseCount > 0) {
+    return {
+      status: "PROCESSED",
+      resultCode: "REVERSE_SIGNAL_CLOSE",
+      matchedCount: Number(summary.matchedCount || 0),
+      processedCount,
+      ignoredCount,
+      note: "demo-reverse-signal-close-dispatched",
+    };
+  }
+  if (summary.reverseCancelCount > 0) {
+    return {
+      status: "PROCESSED",
+      resultCode: "REVERSE_SIGNAL_CANCEL",
+      matchedCount: Number(summary.matchedCount || 0),
+      processedCount,
+      ignoredCount,
+      note: "demo-reverse-signal-cancelled-entry-pending",
+    };
+  }
+  return {
+    status: "IGNORED",
+    resultCode: summary.matchedCount ? "RUNTIME_NOT_READY" : "NO_MATCHING_STRATEGY",
+    matchedCount: Number(summary.matchedCount || 0),
+    processedCount,
+    ignoredCount: Math.max(ignoredCount, 1),
+    note: summary.matchedCount ? "matched-demo-strategy-not-ready" : "no-demo-strategy-matched",
+  };
+};
+
+const buildDemoGridWebhookOutcome = (result = {}) => {
+  if (result.armed > 0) {
+    return {
+      status: "PROCESSED",
+      resultCode: "GRID_ARMED",
+      matchedCount: Number(result.matched || 0),
+      processedCount: Number(result.armed || 0),
+      ignoredCount: Number(result.ignoredActive || 0) + Number(result.ignoredSignal || 0),
+      note: "demo-grid-regime-armed",
+    };
+  }
+  return {
+    status: "IGNORED",
+    resultCode: result.matched ? "GRID_ACTIVE_IGNORED" : "NO_MATCHING_GRID_STRATEGY",
+    matchedCount: Number(result.matched || 0),
+    processedCount: 0,
+    ignoredCount: Math.max(
+      Number(result.ignoredActive || 0) +
+        Number(result.ignoredSignal || 0) +
+        Number(result.ignoredConflict || 0),
+      1
+    ),
+    note: result.matched ? "matched-demo-grid-not-armable" : "no-demo-grid-strategy-matched",
+  };
+};
+
+router.post("/test/hook", async (req, res) => {
+  const userId = req.decoded.userId;
+  const rawPayload = req.body || {};
+  const reqData = normalizeDemoSignalHookPayload(rawPayload);
+  const validation = validateDemoSignalHookPayload(reqData);
+  const baseWebhookLog = {
+    hookCategory: "signal",
+    routePath: "/admin/test/hook",
+    requestIp: getRequestIp(req),
+    rawBody: rawPayload,
+    normalizedBody: reqData,
+    strategyKey: reqData.db_type || null,
+    strategyUuid: reqData.uuid || null,
+    symbol: reqData.symbol || null,
+    bunbong: reqData.bunbong || null,
+    signalType: reqData.type || null,
+  };
+
+  try {
+    if (!validation.ok) {
+      await insertWebhookEventLog({
+        ...baseWebhookLog,
+        status: "IGNORED",
+        resultCode: "INVALID_PAYLOAD",
+        ignoredCount: 1,
+        httpStatus: 400,
+        note: validation.reason,
+        responseBody: { ok: false, reason: validation.reason },
+      });
+      return res.status(400).send({ ok: false, reason: validation.reason });
+    }
+
+    const webhookEventId = await insertWebhookEventLog({
+      ...baseWebhookLog,
+      status: "RECEIVED",
+      resultCode: "ACCEPTED",
+      httpStatus: 200,
+      note: "demo-signal-hook-accepted-before-processing",
+      responseBody: { ok: true, accepted: true, demoOnly: true },
+    });
+    const summary = await seon.enterTestCoin(reqData, {
+      uid: userId,
+      sourceWebhookEventId: webhookEventId,
+    });
+    const outcome = buildDemoSignalWebhookOutcome(summary);
+    if (webhookEventId) {
+      await updateWebhookEventLogOutcome(webhookEventId, {
+        status: outcome.status,
+        resultCode: outcome.resultCode,
+        matchedCount: outcome.matchedCount,
+        processedCount: outcome.processedCount,
+        ignoredCount: outcome.ignoredCount,
+        httpStatus: 200,
+        note: outcome.note,
+        responseBody: { ok: true, demoOnly: true, summary },
+      });
+      await insertWebhookEventTargetLogs(webhookEventId, summary?.targetItems || []);
+    }
+
+    return res.send({
+      ok: true,
+      demoOnly: true,
+      eventId: webhookEventId,
+      summary,
+      outcome,
+    });
+  } catch (error) {
+    await insertWebhookEventLog({
+      ...baseWebhookLog,
+      status: "ERROR",
+      resultCode: "RUNTIME_ERROR",
+      ignoredCount: 1,
+      httpStatus: 500,
+      note: error?.message || "demo-signal-hook-runtime-error",
+      responseBody: { ok: false, reason: "runtime-error", demoOnly: true },
+    });
+    return sendRouteError(res, 500, `데모 시그널 훅 처리 실패: ${error?.message || error}`);
+  }
+});
+
 router.post("/test/auto", async (req, res) => {
   return handlePlayAutoRoute(req, res, "TEST");
 });
@@ -6252,13 +6490,11 @@ router.get("/account/readiness", async (req, res) => {
   }));
   const member = await dbcon.DBOneCall(`CALL SP_A_MEMBER_GET(?)`, [userId]);
   const hasCredentials = Boolean(member?.appKey && member?.appSecret);
-  if (hasCredentials) {
-    runtimeHealth.apiValidation = await coin.validateMemberApiKeys(member.appKey, member.appSecret).catch((error) => ({
-      ok: false,
-      code: error?.code || "VALIDATION_ERROR",
-      message: error?.message || "Binance API validation failed.",
-    }));
-  }
+  runtimeHealth.hasCredentials = hasCredentials;
+  runtimeHealth.accountReadPolicy = "MANUAL_REFRESH_ONLY";
+  runtimeHealth.accountReadSkipReason = hasCredentials
+    ? "ADMIN_ACCOUNT_READINESS_BACKGROUND_PRIVATE_READ_DISABLED"
+    : "API_KEY_MISSING";
   const payload = await accountReadiness.getAccountReadiness(userId, { runtimeHealth });
   return res.send(payload);
 });
@@ -6291,11 +6527,18 @@ router.post("/account/ensure-hedge-mode", async (req, res) => {
 
 router.get("/runtime/account-risk/current", async (req, res) => {
   const userId = req.decoded.userId;
+  const manualRefresh = String(req.query.manualRefresh || "").trim().toUpperCase() === "Y";
   const payload = await coin.getBinanceAccountRiskCurrent(userId, {
-    persist: true,
-    force: String(req.query.force || "").trim().toUpperCase() === "Y",
+    persist: manualRefresh,
+    force: manualRefresh && String(req.query.force || "").trim().toUpperCase() === "Y",
+    cacheOnly: !manualRefresh,
+    maxAgeMs: manualRefresh ? 0 : 10 * 60 * 1000,
   });
-  return res.send(decorateAccountRiskRow(payload));
+  return res.send(decorateAccountRiskRow({
+    ...payload,
+    manualRefresh,
+    accountReadPolicy: manualRefresh ? "MANUAL_REFRESH" : "CACHE_ONLY_MANUAL_REFRESH_REQUIRED",
+  }));
 });
 
 router.get("/runtime/account-risk/history", async (req, res) => {
@@ -6366,14 +6609,10 @@ router.get("/runtime/account-risk/summary", async (req, res) => {
     [userId, since]
   );
 
-  const latest = await coin.getBinanceAccountRiskCurrent(userId, {
-    persist: true,
-    maxAgeMs: 10000,
-  });
-
   return res.send({
     hours,
-    latest: decorateAccountRiskRow(latest),
+    latest: null,
+    accountReadPolicy: "SUMMARY_DB_ONLY_NO_PRIVATE_REFRESH",
     overview: overviewRows?.[0] || {
       snapshotCount: 0,
       maxAccountMarginRatio: 0,
@@ -6608,8 +6847,9 @@ router.get("/policy/preview/user", async (req, res) => {
   }
 
   const snapshot = await coin.getBinanceAccountRiskCurrent(requestedUid, {
-    persist: true,
-    maxAgeMs: 10000,
+    persist: false,
+    cacheOnly: true,
+    maxAgeMs: 10 * 60 * 1000,
   });
   const preview = await policyEngine.buildUserPolicyPreview({
     uid: requestedUid,
@@ -6646,8 +6886,9 @@ router.get("/runtime/ops/overview", async (req, res) => {
     coin.getBinanceRuntimeHealth(userId),
     coin.getBinanceRuntimeReconciliation(userId),
     coin.getBinanceAccountRiskCurrent(userId, {
-      persist: true,
-      maxAgeMs: 10000,
+      persist: false,
+      cacheOnly: true,
+      maxAgeMs: 10 * 60 * 1000,
     }),
     db.query(
       `SELECT severity, COUNT(*) AS eventCount, MAX(created_at) AS lastCreatedAt
@@ -6977,8 +7218,9 @@ router.get("/runtime/ops/users/item", async (req, res) => {
       reconcileError: error.message || "reconcile failed",
     })),
     coin.getBinanceAccountRiskCurrent(targetUid, {
-      persist: true,
-      maxAgeMs: 10000,
+      persist: false,
+      cacheOnly: true,
+      maxAgeMs: 10 * 60 * 1000,
     }).catch(() => ({
       uid: targetUid,
       riskLevel: "UNKNOWN",
@@ -7413,6 +7655,11 @@ router.get("/runtime/binance/order-monitor/overview", async (req, res) => {
       rawLimit,
       symbols,
       localOnly: req.query.localOnly,
+      forensicMode: req.query.forensicMode,
+      recoveryMode: req.query.recoveryMode,
+      privateRead: req.query.privateRead,
+      privateReadApproved: req.query.privateReadApproved,
+      operatorApproved: req.query.operatorApproved,
     });
     return res.send(payload);
   } catch (error) {
@@ -8317,6 +8564,88 @@ router.post("/grid/live/auto", async (req, res) => {
 
 router.post("/grid/test/auto", async (req, res) => {
   return handleGridAutoRoute(req, res, "TEST");
+});
+
+router.post("/grid/test/hook", async (req, res) => {
+  const userId = req.decoded.userId;
+  const rawPayload = req.body || {};
+  const validation = gridRuntime.validateGridWebhookPayload(rawPayload);
+  const normalizedPayload = validation.payload || {};
+  const baseWebhookLog = {
+    hookCategory: "grid",
+    routePath: "/admin/grid/test/hook",
+    requestIp: getRequestIp(req),
+    rawBody: rawPayload,
+    normalizedBody: normalizedPayload,
+    strategyKey: normalizedPayload?.strategySignalKey || null,
+    signalTag: normalizedPayload?.strategySignal || null,
+    symbol: normalizedPayload?.symbol || null,
+    bunbong: normalizedPayload?.bunbong || null,
+  };
+
+  try {
+    if (!validation.ok) {
+      await insertWebhookEventLog({
+        ...baseWebhookLog,
+        status: "IGNORED",
+        resultCode: "INVALID_PAYLOAD",
+        ignoredCount: 1,
+        httpStatus: 400,
+        note: validation.reason,
+        responseBody: { ok: false, reason: validation.reason, demoOnly: true },
+      });
+      return res.status(400).send({ ok: false, reason: validation.reason, demoOnly: true });
+    }
+
+    const result = await gridRuntime.processGridWebhook(normalizedPayload, {
+      includeLive: false,
+      includeTest: true,
+      uid: userId,
+    });
+    const outcome = buildDemoGridWebhookOutcome(result);
+    const responseBody = {
+      ok: true,
+      demoOnly: true,
+      strategySignal: normalizedPayload.strategySignal,
+      symbol: normalizedPayload.symbol,
+      bunbong: normalizedPayload.bunbong,
+      matched: result.matched,
+      armed: result.armed,
+      ignoredActive: result.ignoredActive,
+      ignoredConflict: result.ignoredConflict,
+      ignoredSignal: result.ignoredSignal,
+      test: result.test,
+    };
+    const webhookEventId = await insertWebhookEventLog({
+      ...baseWebhookLog,
+      status: outcome.status,
+      resultCode: outcome.resultCode,
+      matchedCount: outcome.matchedCount,
+      processedCount: outcome.processedCount,
+      ignoredCount: outcome.ignoredCount,
+      httpStatus: 200,
+      note: outcome.note,
+      responseBody,
+    });
+    await insertWebhookEventTargetLogs(webhookEventId, result?.targetItems || []);
+
+    return res.send({
+      ...responseBody,
+      eventId: webhookEventId,
+      outcome,
+    });
+  } catch (error) {
+    await insertWebhookEventLog({
+      ...baseWebhookLog,
+      status: "ERROR",
+      resultCode: "RUNTIME_ERROR",
+      ignoredCount: 1,
+      httpStatus: 500,
+      note: error?.message || "demo-grid-hook-runtime-error",
+      responseBody: { ok: false, reason: "runtime-error", demoOnly: true },
+    });
+    return sendRouteError(res, 500, `데모 Grid 훅 처리 실패: ${error?.message || error}`);
+  }
 });
 
 router.post("/grid/live/del", async (req, res) => {

@@ -601,17 +601,23 @@ const loadSignalTargetsByRoute = async (tableName, liveSt, reqData, side) => {
     }));
 };
 
-const loadSignalTargets = async (reqData, side) => {
-    const liveExact = await loadSignalTargetsByUuid('live_play_list', 'Y', reqData);
-    const testExact = await loadSignalTargetsByUuid('test_play_list', 'N', reqData);
-    const exactMatches = uniquePlayTargets(liveExact.concat(testExact));
+const loadSignalTargets = async (reqData, side, options = {}) => {
+    const includeLive = options.includeLive !== false;
+    const includeTest = options.includeTest !== false;
+    const scopedUid = Number(options.uid || options.userId || 0) || null;
+    const scopeRows = (rows = []) => scopedUid
+        ? rows.filter((row) => Number(row?.uid || 0) === scopedUid)
+        : rows;
+    const liveExact = includeLive ? await loadSignalTargetsByUuid('live_play_list', 'Y', reqData) : [];
+    const testExact = includeTest ? await loadSignalTargetsByUuid('test_play_list', 'N', reqData) : [];
+    const exactMatches = uniquePlayTargets(scopeRows(liveExact.concat(testExact)));
     if(exactMatches.length > 0){
         return exactMatches;
     }
 
-    const liveRoute = await loadSignalTargetsByRoute('live_play_list', 'Y', reqData, side);
-    const testRoute = await loadSignalTargetsByRoute('test_play_list', 'N', reqData, side);
-    return uniquePlayTargets(liveRoute.concat(testRoute));
+    const liveRoute = includeLive ? await loadSignalTargetsByRoute('live_play_list', 'Y', reqData, side) : [];
+    const testRoute = includeTest ? await loadSignalTargetsByRoute('test_play_list', 'N', reqData, side) : [];
+    return uniquePlayTargets(scopeRows(liveRoute.concat(testRoute)));
 };
 
 const liveCloseReasonMap = new Map();
@@ -705,12 +711,16 @@ const parseDatabaseUtcTime = (value) => {
     return parsed.isValid() ? parsed : null;
 };
 
-const getTimeExpiryState = (play, now = dayjs.utc()) => {
+const getTimeExpiryState = (play, now = dayjs.utc(), options = {}) => {
     if(!isTimeExpiryExitEnabled(play) || !play?.r_exactTime){
         return { enabled: false, triggered: false, elapsedMinutes: 0, exactTime: null, now };
     }
 
-    const exactTime = parseDatabaseUtcTime(play.r_exactTime);
+    const exactTime = options.dateObjectAsUtcWallClock && play.r_exactTime instanceof Date
+        ? dayjs.utc(dayjs(play.r_exactTime).format('YYYY-MM-DD HH:mm:ss'), 'YYYY-MM-DD HH:mm:ss', true)
+        : options.dateObjectAsUtc && play.r_exactTime instanceof Date
+        ? dayjs.utc(play.r_exactTime)
+        : parseDatabaseUtcTime(play.r_exactTime);
     if(!exactTime){
         return { enabled: true, triggered: false, elapsedMinutes: 0, exactTime: null, now };
     }
@@ -1676,7 +1686,7 @@ const runPlayTest = async (st_ = false) => {
                         runtimeExitReason = 'bound-stop';
                     }
 
-                    const timeExpiryState = getTimeExpiryState(play);
+                    const timeExpiryState = getTimeExpiryState(play, dayjs.utc(), { dateObjectAsUtcWallClock: true });
                     logTimeExpiryDebug('test', play, timeExpiryState);
                     if(!endType && timeExpiryState.triggered){
                         endType = 'STOP';
@@ -1770,6 +1780,10 @@ const runPlayTest = async (st_ = false) => {
 
     runTestST = false
 }
+
+exports.runPlayTestForDemoQa = async function(){
+    return runPlayTest(true);
+};
 
 // runPrice();
 exports.ckCancel = (cancel, oldPrice, curPrice, side) => {
@@ -1928,7 +1942,7 @@ exports.randomString = function(length){
     return result;
 };
 
-exports.enterCoin = async function(reqData){
+exports.enterCoin = async function(reqData, options = {}){
     try{
         let side = null;
         const summary = {
@@ -1990,7 +2004,7 @@ exports.enterCoin = async function(reqData){
             return summary;
         }
 
-        const itemList = await loadSignalTargets(reqData, side);
+        const itemList = await loadSignalTargets(reqData, side, options);
         summary.matchedCount = itemList.length;
 
         for(let i=0;i<itemList.length;i++){
@@ -2149,6 +2163,14 @@ exports.enterCoin = async function(reqData){
             entryRejectedCount: 0,
         };
     }
+};
+
+exports.enterTestCoin = async function(reqData, options = {}){
+    return exports.enterCoin(reqData, {
+        ...options,
+        includeLive: false,
+        includeTest: true,
+    });
 };
 
 exports.startRuntime = async (options = {}) => {
