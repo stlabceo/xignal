@@ -17,7 +17,11 @@ const binanceWriteGuard = require("../binance-write-guard");
 const credentialSecrets = require("../credential-secrets");
 const signalStrategyIdentity = require("../signal-strategy-identity");
 const orderIntentQueue = require("../order-intent-queue");
-const { insertWebhookEventLog, insertWebhookEventTargetLogs } = require("../webhook-event-log");
+const {
+  insertWebhookEventLog,
+  updateWebhookEventLogOutcome,
+  insertWebhookEventTargetLogs,
+} = require("../webhook-event-log");
 
 const { validateRegister, validateRegister1, validateRegister2, validateLogin } = require('./validation');
 const fs = require("fs");
@@ -31,6 +35,8 @@ const getPolicyEngine = () => {
 
   return policyEngine;
 };
+
+const getGridEngine = () => require("../grid-engine");
 
 const coolsms = require('coolsms-node-sdk').default;
 const messageService = new coolsms(process.env.COOL_SMS_KEY, process.env.COOL_SMS_SECRET);
@@ -1124,32 +1130,11 @@ router.get('/api/account/readiness', auth.verifyToken, async (req, res) => {
   }));
   const member = await dbcon.DBOneCall(`CALL SP_A_MEMBER_GET(?)`, [userId]);
   const hasCredentials = Boolean(member?.appKey && member?.appSecret);
-
-  if (hasCredentials) {
-    runtimeHealth.apiValidation = await coin.validateMemberApiKeys(member.appKey, member.appSecret).catch((error) => ({
-      ok: false,
-      code: error?.code || "VALIDATION_ERROR",
-      message: error?.message || "Binance API validation failed.",
-    }));
-
-    if (runtimeHealth.apiValidation?.ok) {
-      const accountRisk = await coin.getBinanceAccountRiskCurrent(userId, {
-        persist: true,
-        force: true,
-      }).catch((error) => ({
-        errorCode: error?.code || "ACCOUNT_READ_ERROR",
-        message: error?.message || "Binance futures account read failed.",
-      }));
-
-      if (accountRisk && !accountRisk.errorCode) {
-        runtimeHealth.hedgeMode = accountRisk.hedgeMode;
-        runtimeHealth.lastHedgeMode = accountRisk.hedgeMode;
-      } else {
-        runtimeHealth.lastErrorCode = accountRisk?.errorCode || runtimeHealth.lastErrorCode;
-        runtimeHealth.lastErrorMessage = accountRisk?.message || runtimeHealth.lastErrorMessage;
-      }
-    }
-  }
+  runtimeHealth.hasCredentials = hasCredentials;
+  runtimeHealth.accountReadPolicy = "MANUAL_REFRESH_ONLY";
+  runtimeHealth.accountReadSkipReason = hasCredentials
+    ? "ACCOUNT_READINESS_BACKGROUND_PRIVATE_READ_DISABLED"
+    : "API_KEY_MISSING";
 
   const payload = await accountReadiness.getAccountReadiness(userId, { runtimeHealth });
   return res.send(payload);
@@ -1274,9 +1259,40 @@ router.post('/api/hook', async function(req, res){
     `[hook] accepted db_type=${reqData?.db_type} type=${reqData?.type} symbol=${reqData?.symbol} bunbong=${reqData?.bunbong} uuid=${reqData?.uuid}`
   );
 
-  const summary = await seon.enterCoin(reqData);
-  const outcome = buildSignalWebhookOutcome(summary);
   const webhookEventId = await insertWebhookEventLog({
+    ...baseWebhookLog,
+    status: 'RECEIVED',
+    resultCode: 'ACCEPTED',
+    matchedCount: 0,
+    processedCount: 0,
+    ignoredCount: 0,
+    httpStatus: 200,
+    note: 'signal-hook-accepted-before-processing',
+    responseBody: {
+      ok: true,
+      accepted: true,
+    },
+  });
+  const summary = await seon.enterCoin(reqData, {
+    sourceWebhookEventId: webhookEventId,
+  });
+  const outcome = buildSignalWebhookOutcome(summary);
+  if (webhookEventId) {
+    await updateWebhookEventLogOutcome(webhookEventId, {
+      status: outcome.status,
+      resultCode: outcome.resultCode,
+      matchedCount: outcome.matchedCount,
+      processedCount: outcome.processedCount,
+      ignoredCount: outcome.ignoredCount,
+      httpStatus: 200,
+      note: outcome.note,
+      responseBody: {
+        ok: true,
+        summary,
+      },
+    });
+  }
+  const resolvedWebhookEventId = webhookEventId || await insertWebhookEventLog({
     ...baseWebhookLog,
     status: outcome.status,
     resultCode: outcome.resultCode,
@@ -1290,7 +1306,22 @@ router.post('/api/hook', async function(req, res){
       summary,
     },
   });
-  await insertWebhookEventTargetLogs(webhookEventId, summary?.targetItems || []);
+  const targetInsert = await insertWebhookEventTargetLogs(
+    resolvedWebhookEventId,
+    summary?.targetItems || [],
+    { returnRows: true }
+  );
+  for (const targetRow of targetInsert.targetRows || []) {
+    const intentKey = targetRow?.item?.intentSummary?.intent?.intentKey || null;
+    if (!intentKey || !targetRow?.id) {
+      continue;
+    }
+    await orderIntentQueue.attachSignalMarketEntryWebhookTarget({
+      intentKey,
+      sourceWebhookEventId: resolvedWebhookEventId,
+      sourceWebhookTargetId: targetRow.id,
+    }).catch(() => {});
+  }
 
   return res.send(true);
   }catch(error){
@@ -1313,7 +1344,11 @@ router.post('/api/hook', async function(req, res){
 
 router.post('/api/grid/hook', async function(req, res){
   const rawPayload = req.body || {};
-  const validation = gridRuntime.validateGridWebhookPayload(req.body || {});
+  const isGridExitPolicyPayload = gridRuntime.isGridExitPolicyWebhookPayload(rawPayload);
+  const gridExitFeatureFlags = gridRuntime.getGridExitFeatureFlags();
+  const validation = isGridExitPolicyPayload
+    ? gridRuntime.validateGridExitWebhookPayload(rawPayload, { featureFlags: gridExitFeatureFlags })
+    : gridRuntime.validateGridWebhookPayload(rawPayload, { featureFlags: gridExitFeatureFlags });
   const clientIp = requestIp.getClientIp(req) || null;
   const normalizedPayload = validation.payload || {};
   const baseWebhookLog = {
@@ -1372,6 +1407,170 @@ router.post('/api/grid/hook', async function(req, res){
         responseBody: blockedResponse,
       });
       return res.send(blockedResponse);
+    }
+
+    if (isGridExitPolicyPayload) {
+      const previewResult = await gridRuntime.previewGridExitWebhook(payload, {
+        featureFlags: gridExitFeatureFlags,
+      });
+      const loggedTargetItems = previewResult?.targetItems || [];
+      const isLegacyCandleClose = !payload.explicitGridExit;
+      const auditResultCode = isLegacyCandleClose
+        ? 'GRID_CANDLE_CLOSE_LEGACY_DISABLED_AUDIT'
+        : 'GRID_EXIT_ALERT_AUDIT_ONLY';
+      const parentIntentSummary = isLegacyCandleClose
+        ? {
+            intentType: orderIntentQueue.INTENT_TYPE.GRID_EXIT_REQUEST,
+            mode: 'CANDLE_CLOSE_AUDIT_NO_PARENT',
+            requested: 0,
+            inserted: 0,
+            duplicate: 0,
+            candidates: [],
+          }
+        : orderIntentQueue.buildGridExitParentIntentCandidates({
+            payload,
+            previewResult,
+            routePath: '/user/api/grid/hook',
+            sourceEventId: null,
+          });
+      const childPlanMode = String(process.env.GRID_EXIT_CHILD_PLAN_MODE || 'OFF').trim().toUpperCase() === 'DRY_RUN'
+        ? 'DRY_RUN'
+        : 'OFF';
+      const childCancelPlans = (!isLegacyCandleClose && childPlanMode === 'DRY_RUN')
+        ? (parentIntentSummary.candidates || [])
+            .filter((candidate) => candidate.createParent === true)
+            .map((candidate) => orderIntentQueue.buildGridExitChildCancelPlan(candidate, {
+              uid: candidate.uid,
+              pid: candidate.pid,
+              gridRegimeKey: candidate.gridRegimeKey,
+              strategySignal: candidate.strategySignal,
+              symbol: candidate.symbol,
+              timeframe: candidate.timeframe,
+              enabled: true,
+              terminal: false,
+              legs: [],
+            }))
+        : [];
+      const queueJoinMode = String(process.env.GRID_EXIT_QUEUE_JOIN_MODE || 'OFF').trim().toUpperCase() === 'DRY_RUN'
+        ? 'DRY_RUN'
+        : 'OFF';
+      const queueJoinPlans = (!isLegacyCandleClose && queueJoinMode === 'DRY_RUN')
+        ? (parentIntentSummary.candidates || [])
+            .filter((candidate) => candidate.createParent === true)
+            .map((candidate, index) => orderIntentQueue.buildGridExitQueueJoinPlan({
+              parentCandidate: candidate,
+              childCancelPlan: childCancelPlans[index] || {
+                entryCancelCandidates: [],
+                protectionCancelCandidates: [],
+              },
+              existingIntentRows: [],
+              mode: 'DRY_RUN',
+            }))
+        : [];
+      const enqueueAdapterMode = String(process.env.GRID_EXIT_ENQUEUE_ADAPTER_MODE || 'OFF').trim().toUpperCase() === 'DRY_RUN'
+        ? 'DRY_RUN'
+        : 'OFF';
+      const enqueueAdapterPlans = (!isLegacyCandleClose && enqueueAdapterMode === 'DRY_RUN')
+        ? queueJoinPlans.map((queueJoinPlan) => orderIntentQueue.buildGridExitEnqueueAdapterPlan({
+          queueJoinPlan,
+          existingIntentRows: [],
+          mode: 'DRY_RUN',
+        }))
+        : [];
+      const responseBody = {
+        ok: true,
+        exitPolicy: payload.explicitGridExit ? 'GRID_EXIT_ALERT' : 'CANDLE_CLOSE_BREAKOUT',
+        mode: 'AUDIT_ONLY',
+        featureFlags: gridExitFeatureFlags,
+        strategySignal: payload.strategySignal,
+        symbol: payload.symbol,
+        bunbong: payload.bunbong,
+        gridRegimeKey: payload.gridRegimeKey || null,
+        matched: previewResult.matched,
+        requested: 0,
+        processed: 0,
+        skipped: previewResult.ignoredActive + previewResult.ignoredConflict + previewResult.ignoredSignal,
+        ignoredActive: previewResult.ignoredActive,
+        ignoredConflict: previewResult.ignoredConflict,
+        ignoredSignal: previewResult.ignoredSignal,
+        live: previewResult.live,
+        test: previewResult.test,
+        parentIntent: {
+          ...parentIntentSummary,
+          enqueueEnabled: false,
+          reason: gridExitFeatureFlags.GRID_EXIT_ORCHESTRATOR_ENABLED === '1'
+            ? 'GRID_EXIT_PARENT_INTENT_DRY_RUN_ONLY'
+            : 'GRID_EXIT_ORCHESTRATOR_DISABLED',
+        },
+        childCancelPlan: {
+          mode: childPlanMode,
+          dryRunOnly: true,
+          planCount: childCancelPlans.length,
+          plans: childCancelPlans,
+          enqueueEnabled: false,
+          cancelEnabled: false,
+          closeEnabled: false,
+          reason: childPlanMode === 'DRY_RUN'
+            ? 'GRID_EXIT_CHILD_CANCEL_PLAN_DRY_RUN_ONLY'
+            : 'GRID_EXIT_CHILD_PLAN_MODE_OFF',
+        },
+        queueJoin: {
+          mode: queueJoinMode,
+          dryRunOnly: true,
+          planCount: queueJoinPlans.length,
+          plans: queueJoinPlans,
+          enqueueEnabled: false,
+          dbInsertEnabled: false,
+          dbUpdateEnabled: false,
+          dbDeleteEnabled: false,
+          cancelEnabled: false,
+          closeEnabled: false,
+          reason: queueJoinMode === 'DRY_RUN'
+            ? 'GRID_EXIT_QUEUE_JOIN_DRY_RUN_ONLY'
+            : 'GRID_EXIT_QUEUE_JOIN_MODE_OFF',
+        },
+        enqueueAdapter: {
+          mode: enqueueAdapterMode,
+          dryRunOnly: true,
+          mockOnlyAllowedInRoute: false,
+          planCount: enqueueAdapterPlans.length,
+          plans: enqueueAdapterPlans,
+          enqueueEnabled: false,
+          dbInsertEnabled: false,
+          dbUpdateEnabled: false,
+          dbDeleteEnabled: false,
+          cancelEnabled: false,
+          closeEnabled: false,
+          reason: enqueueAdapterMode === 'DRY_RUN'
+            ? 'GRID_EXIT_ENQUEUE_ADAPTER_DRY_RUN_ONLY'
+            : 'GRID_EXIT_ENQUEUE_ADAPTER_MODE_OFF',
+        },
+      };
+      const outcome = {
+        status: 'IGNORED',
+        resultCode: auditResultCode,
+        matchedCount: previewResult.matched,
+        processedCount: 0,
+        ignoredCount: responseBody.skipped,
+        note: 'phase1-grid-exit-contract-audit-only',
+      };
+      const webhookEventId = await insertWebhookEventLog({
+        ...baseWebhookLog,
+        status: outcome.status,
+        resultCode: outcome.resultCode,
+        matchedCount: outcome.matchedCount,
+        processedCount: outcome.processedCount,
+        ignoredCount: outcome.ignoredCount,
+        httpStatus: 200,
+        note: outcome.note,
+        responseBody,
+      });
+      await insertWebhookEventTargetLogs(webhookEventId, loggedTargetItems);
+      return res.send({
+        ...responseBody,
+        eventId: webhookEventId,
+        outcome,
+      });
     }
 
     const previewResult = await gridRuntime.previewGridWebhook(payload);
