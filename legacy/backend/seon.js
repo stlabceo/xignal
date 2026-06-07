@@ -147,6 +147,11 @@ const isBootSafetyGateDisabled = () => (
     String(process.env.DISABLE_BOOT_SAFETY_GATE || '').trim() === '1'
 );
 
+const isTruthyEnv = (value) =>
+    ['1', 'true', 'y', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
+
+const isQaScopedGridRuntime = () => isTruthyEnv(process.env.QA_SCOPED_GRID_RUNTIME);
+
 const getBootSafetyExcludedUids = () => new Set(
     String(process.env.RUNTIME_EXCLUDED_UIDS || '')
         .split(',')
@@ -1275,6 +1280,16 @@ exports.charge = 0;
 exports.marketST = true;
 
 const runMain = async (st_ = false) => {
+    if(isQaScopedGridRuntime()){
+        logRunMainState('RUN_MAIN_SKIPPED_QA_SCOPED_GRID_RUNTIME', {
+            file: 'seon.js',
+            function: 'runMain',
+            ownerLabel: runtimeLoopHealth.runtimeOwnerLabel,
+            reason: 'QA_SCOPED_GRID_RUNTIME',
+        });
+        return;
+    }
+
     if(!exports.marketST && !st_){
         return
     }
@@ -2202,11 +2217,13 @@ exports.startRuntime = async (options = {}) => {
         console.log(`[SEON_RUNTIME] start owner:${ownerLabel}`);
         runtimeLoopHealth.runtimeStartedAt = new Date().toISOString();
         runtimeLoopHealth.runtimeOwnerLabel = ownerLabel;
+        const qaScopedGridRuntime = isQaScopedGridRuntime();
         logRunMainState('RUNTIME_START', {
             file: 'seon.js',
             function: 'startRuntime',
             ownerLabel,
             runtimeStartedAt: runtimeLoopHealth.runtimeStartedAt,
+            qaScopedGridRuntime,
         }, { force: true });
 
         const bootGate = await runBootSafetyGate(ownerLabel);
@@ -2230,17 +2247,24 @@ exports.startRuntime = async (options = {}) => {
         }
 
         await coin.init({
-            enablePublicFeeds: true,
+            enablePublicFeeds: !qaScopedGridRuntime,
             enableUserStreams: true,
-            enableAccountPolling: true,
+            enableAccountPolling: !qaScopedGridRuntime,
             enableSocket: true,
-            enableCandleSchedules: true,
+            enableCandleSchedules: !qaScopedGridRuntime,
         });
         runtimeLoopHealth.orderIntentWorker = orderIntentWorker.startOrderIntentWorker({
             ownerLabel,
         });
 
-        if(!runMainTimer){
+        if(qaScopedGridRuntime){
+            logRunMainState('RUN_MAIN_TIMER_SKIPPED_QA_SCOPED_GRID_RUNTIME', {
+                file: 'seon.js',
+                function: 'startRuntime',
+                ownerLabel,
+                reason: 'QA_SCOPED_GRID_RUNTIME',
+            }, { force: true });
+        }else if(!runMainTimer){
             runMainTimer = setInterval(runMain, 1 * 300);
         }
 
