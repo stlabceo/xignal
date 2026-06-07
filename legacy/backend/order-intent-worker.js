@@ -14,6 +14,7 @@ const signalStaleTime = require("./signal-stale-time");
 const gridLiveArmHydration = require("./grid-live-arm-hydration");
 const gridIntentHandlerGuards = require("./grid-intent-handler-guards");
 const signalEntryConvergence = require("./signal-entry-convergence");
+const gridExitSafeExchangeAdapter = require("./grid-exit-safe-exchange-adapter");
 
 const DEFAULT_POLL_MS = 500;
 const DEFAULT_STALE_SECONDS = 90;
@@ -3861,15 +3862,18 @@ const processGridExitChildCancelIntent = async (intent, options = {}) => {
     now: options.now || new Date(),
   });
   const executorResult = runtimeCancelMode === orderIntentQueue.GRID_EXIT_ACTUAL_CANCEL_MODE
-    ? orderIntentQueue.buildGridExitCancelExecutorDryRun({
-        childIntent: intent,
+    ? gridExitSafeExchangeAdapter.executeGridExitGateAActualCancel({
+        cancelIntent: intent,
+        cancelTarget: parseIntentJsonSafe(intent.payloadJson, intent.payload || {}),
         mode: orderIntentQueue.GRID_EXIT_ACTUAL_CANCEL_MODE,
-        mockBinanceClient: options.gridExitActualCancelClient ||
+        client: options.gridExitActualCancelClient ||
           options.mockCancelClient ||
           options.mockBinanceClient ||
           null,
-        env,
-        targetCount: options.gridExitActualCancelTargetCount || 1,
+        flags: {
+          ...env,
+          targetCount: options.gridExitActualCancelTargetCount || 1,
+        },
       })
     : runtimeCancelAdapter.cancel({ childIntent: intent });
   const reason = executorResult.result || GRID_EXIT_CHILD_CANCEL_QUEUE_STATE.BLOCKED_NOT_IMPLEMENTED;
@@ -3933,15 +3937,17 @@ const processGridExitMarketClosePlanIntent = async (intent, options = {}) => {
     env.GRID_EXIT_MARKET_CLOSE_EXECUTOR_MODE ||
     (options.mock === true ? "MOCK_BINANCE_ONLY" : (options.dryRun === true ? "DRY_RUN" : "OFF"))
   ).trim().toUpperCase();
-  const executorResult = orderIntentQueue.buildGridExitMarketCloseDryRun({
-    marketClosePlan,
+  const executorResult = gridExitSafeExchangeAdapter.executeGridExitGateBMarketClose({
+    closePlan: marketClosePlan,
     mode,
-    mockCloseClient: options.gridExitActualMarketCloseClient ||
+    client: options.gridExitActualMarketCloseClient ||
       options.mockCloseClient ||
       options.mockBinanceClient ||
       null,
-    env,
-    targetCount: options.gridExitActualMarketCloseTargetCount || 1,
+    flags: {
+      ...env,
+      targetCount: options.gridExitActualMarketCloseTargetCount || 1,
+    },
   });
   const reason = executorResult.result || GRID_EXIT_MARKET_CLOSE_PLAN_QUEUE_STATE.BLOCKED_NOT_EXECUTABLE;
   const result = buildBlockResult(reason, {

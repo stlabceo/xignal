@@ -7,10 +7,11 @@ const path = require("path");
 const repoRoot = path.resolve(__dirname, "../../..");
 const db = require(path.resolve(repoRoot, "backend/database/connect/config"));
 const queue = require(path.resolve(repoRoot, "backend/order-intent-queue"));
+const safeAdapter = require(path.resolve(repoRoot, "backend/grid-exit-safe-exchange-adapter"));
 
 const queueSource = fs.readFileSync(path.resolve(repoRoot, "backend/order-intent-queue.js"), "utf8");
 const workerSource = fs.readFileSync(path.resolve(repoRoot, "backend/order-intent-worker.js"), "utf8");
-const coinSource = fs.readFileSync(path.resolve(repoRoot, "backend/coin.js"), "utf8");
+const adapterSource = fs.readFileSync(path.resolve(repoRoot, "backend/grid-exit-safe-exchange-adapter.js"), "utf8");
 
 let tests = 0;
 const check = (label, fn) => {
@@ -229,7 +230,12 @@ const makeRollbackRepo = () => ({
     });
     check("fake Binance close client only", () => {
       const fake = { marketCloseRequests: [] };
-      const result = invokeActualMarketClose({}, { mockCloseClient: fake });
+      const result = safeAdapter.executeGridExitGateBMarketClose({
+        closePlan: planWithCandidate({}),
+        mode: queue.GRID_EXIT_ACTUAL_MARKET_CLOSE_MODE,
+        flags: actualEnv,
+        client: fake,
+      });
       assert.strictEqual(result.result, queue.GRID_EXIT_MARKET_CLOSE_EXECUTOR_STATE.ACTUAL_MARKET_CLOSE_FAKE_RECORDED);
       assert.strictEqual(fake.marketCloseRequests.length, 1);
       assert.strictEqual(result.actualBinanceWrite, false);
@@ -239,10 +245,9 @@ const makeRollbackRepo = () => ({
       const helperEnd = queueSource.indexOf("const GRID_STOP_EMERGENCY_BACKSTOP_ALLOWED_MODES", helperStart);
       const helperSource = queueSource.slice(helperStart, helperEnd);
       assert.strictEqual(/privateFutures|closeGridLegMarketOrder|futuresOrder|newOrder|marketCloseSubmit:\s*true/.test(helperSource), false);
-      assert.ok(coinSource.includes("executeGridExitGateBMarketClose"));
-      const start = coinSource.indexOf("exports.executeGridExitGateBMarketClose");
-      const end = coinSource.indexOf("exports.cancelGridOrders", start);
-      assert.strictEqual(coinSource.slice(start, end).includes("closeGridLegMarketOrder"), false);
+      assert.ok(adapterSource.includes("executeGridExitGateBMarketClose"));
+      assert.strictEqual(adapterSource.includes("closeGridLegMarketOrder"), false);
+      assert.ok(workerSource.includes("grid-exit-safe-exchange-adapter"));
     });
     check("close ACK not terminal", () => {
       const result = queue.classifyGridExitMarketCloseObservation({ marketClosePlan: buildPlan(), observedEvent: baseEvent({ orderStatus: "NEW" }) });
@@ -437,7 +442,7 @@ const makeRollbackRepo = () => ({
     check("node --check changed files source is static-safe", () => {
       assert.ok(queueSource.includes("GRID_EXIT_ACTUAL_MARKET_CLOSE_MODE"));
       assert.ok(workerSource.includes("GATE_B_ACTUAL_MARKET_CLOSE_BOUNDED_NON_TERMINAL"));
-      assert.ok(coinSource.includes("executeGridExitGateBMarketClose"));
+      assert.ok(adapterSource.includes("executeGridExitGateBMarketClose"));
     });
     check("git diff --check compatible source scope", () => {
       assert.ok(queueSource.includes("buildGridExitRestRecoveryPlan"));

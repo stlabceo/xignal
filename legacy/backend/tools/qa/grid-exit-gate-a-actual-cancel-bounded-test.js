@@ -7,10 +7,11 @@ const path = require("path");
 const repoRoot = path.resolve(__dirname, "../../..");
 const db = require(path.resolve(repoRoot, "backend/database/connect/config"));
 const queue = require(path.resolve(repoRoot, "backend/order-intent-queue"));
+const safeAdapter = require(path.resolve(repoRoot, "backend/grid-exit-safe-exchange-adapter"));
 
 const queueSource = fs.readFileSync(path.resolve(repoRoot, "backend/order-intent-queue.js"), "utf8");
 const workerSource = fs.readFileSync(path.resolve(repoRoot, "backend/order-intent-worker.js"), "utf8");
-const coinSource = fs.readFileSync(path.resolve(repoRoot, "backend/coin.js"), "utf8");
+const adapterSource = fs.readFileSync(path.resolve(repoRoot, "backend/grid-exit-safe-exchange-adapter.js"), "utf8");
 
 let tests = 0;
 const check = (label, fn) => {
@@ -211,7 +212,14 @@ const invokeActual = (intentType, overrides = {}, extra = {}) =>
     });
     check("ACTUAL_CANCEL with fake client only", () => {
       const fake = { requests: [] };
-      const result = invokeActual(queue.INTENT_TYPE.GRID_EXIT_ENTRY_CANCEL, {}, { mockBinanceClient: fake });
+      const intent = makeChildIntent(queue.INTENT_TYPE.GRID_EXIT_ENTRY_CANCEL);
+      const result = safeAdapter.executeGridExitGateAActualCancel({
+        cancelIntent: intent,
+        cancelTarget: intent.payload,
+        mode: queue.GRID_EXIT_ACTUAL_CANCEL_MODE,
+        flags: actualEnv,
+        client: fake,
+      });
       assert.strictEqual(result.result, queue.GRID_EXIT_CANCEL_EXECUTOR_STATE.ACTUAL_CANCEL_FAKE_RECORDED);
       assert.strictEqual(fake.requests.length, 1);
       assert.strictEqual(result.actualBinanceWrite, false);
@@ -272,13 +280,11 @@ const invokeActual = (intentType, overrides = {}, extra = {}) =>
       assert.strictEqual(queue.GRID_EXIT_ACTUAL_CANCEL_MODE, "ACTUAL_CANCEL");
       assert.ok(queue.GRID_EXIT_CANCEL_EXECUTOR_ALLOWED_MODES.includes("ACTUAL_CANCEL"));
     });
-    check("coin Gate A adapter exists without closeGridLegMarketOrder call", () => {
-      assert.ok(coinSource.includes("executeGridExitGateAActualCancel"));
-      const start = coinSource.indexOf("exports.executeGridExitGateAActualCancel");
-      const end = coinSource.indexOf("exports.cancelGridOrders", start);
-      const adapterSource = coinSource.slice(start, end);
+    check("safe Gate A adapter exists without coin cancel/close call", () => {
+      assert.ok(adapterSource.includes("executeGridExitGateAActualCancel"));
       assert.strictEqual(adapterSource.includes("closeGridLegMarketOrder"), false);
       assert.strictEqual(adapterSource.includes("cancelGridOrders({"), false);
+      assert.ok(workerSource.includes("grid-exit-safe-exchange-adapter"));
     });
 
     console.log(JSON.stringify({
