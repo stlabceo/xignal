@@ -108,4 +108,38 @@ This matrix is derived from:
 | track record completed trade uses fill units | performance record must be tied to ledger fill units | orderId has multiple sourceTradeIds and realizedPnl rows | ledger read only | snapshot read only | track record aggregates completed cycle without double counting expected-ignore | reservation read only | source is `live-ledger` or explicitly legacy-estimated | multiple tradeIds can contribute to one series while preserving fill-unit accounting |
 | revenue uses tradeId/sourceTradeId not order count | revenue must be fill-based, not order-count based | Binance runtime event log contains ORDER_TRADE_UPDATE TRADE rows, potentially multiple tradeIds under one orderId | no writes | no writes | revenue summary reports tradeCount and notional from deduped fill events | no writes | source says `binance-runtime-event-log-trade-units` | total notional/fee/estimated revenue are labeled as actual/estimated with data availability |
 | admin expected-ignore is INFO not abnormal | Operations Console abnormal cards must exclude expected no-ops | expected-ignore lifecycle rows are present with INFO/EXPECTED | no writes | no writes | admin summary cards count WARN/CRITICAL, not expected INFO | no writes | severity split remains visible | expected-ignore does not increase abnormal cards while true critical states remain critical |
+
+## Gate 0A Grid Exit Release Contract Additions
+
+These cases are docs-only acceptance additions for the explicit `GRID_EXIT`
+contract. Runtime source enforcement is not active until PM approves the source
+patch gate.
+
+| Test ID | Scenario | Expected evidence | PASS criteria | Document position |
+|---|---|---|---|---|
+| GRID_EXIT_01 | `GRID_EXIT` missing `gridRegimeKey` reject | validation reason for missing key; no target | no close, cancel, market order, or mutation | `docs/release/GRID_TRADINGVIEW_PAYLOAD_CONTRACT.md` |
+| GRID_EXIT_02 | wrong `gridRegimeKey` no target | `GRID_EXIT_KEY_MISMATCH` or equivalent audit | unrelated active Grid row untouched | `docs/release/GRID_TRADINGVIEW_PAYLOAD_CONTRACT.md` |
+| GRID_EXIT_03 | same-key multi-PID target, unrelated PID untouched | matched rows share key, strategySignal, symbol, timeframe | each matched PID converges independently; unrelated PID untouched | `docs/architecture/order-lifecycle/grid-exit-state-machine.md` |
+| GRID_EXIT_04 | no filled leg cancels resting entries only | no filled leg; entries canceled/terminal; no owner open | no market close and no exit ledger | `GRID_EXIT_NO_FILLED_LEG_ENTRIES_CANCELLED` |
+| GRID_EXIT_05 | one LONG filled close convergence | LONG owner/snapshot open; protection cancel; market close fill | exit ledger, owner release, snapshot close, reservation terminal | `GRID_EXIT_MARKET_CLOSE_FILLED_CONFIRMED` |
+| GRID_EXIT_06 | one SHORT filled close convergence | SHORT owner/snapshot open; protection cancel; market close fill | exit ledger, owner release, snapshot close, reservation terminal | `GRID_EXIT_MARKET_CLOSE_FILLED_CONFIRMED` |
+| GRID_EXIT_07 | dual-side independent close | LONG and SHORT PID-owned exposures exist | each leg closes by own qty; no cross-leg or cross-PID over-close | `GRID_EXIT_REMAINING_EXPOSURE_DETECTED` |
+| GRID_EXIT_08 | TP fill during protection cancel | TP fill sourceTradeId appears while cancel in-flight | race fill recovered; no duplicate market close | `GRID_EXIT_CANCEL_RACE_FILL_DETECTED` |
+| GRID_EXIT_09 | STOP fill during protection cancel | STOP fill sourceTradeId appears while cancel in-flight | emergency/race recovery; no double close | `GRID_EMERGENCY_STOP_TRIGGERED` |
+| GRID_EXIT_10 | entry fill during cancel | entry fill appears after entry cancel request | fill applied, owner/snapshot open, close child proceeds if needed | `GRID_EXIT_CANCEL_RACE_RECOVERED` |
+| GRID_EXIT_11 | market close ACK only is not complete | market close submit accepted without fill | parent stays fill-tracking, not DONE | `GRID_EXIT_MARKET_CLOSE_ACCEPTED` |
+| GRID_EXIT_12 | market close partial then filled socket | partial close trade then final socket fill | all tradeIds applied; final convergence | `GRID_EXIT_MARKET_CLOSE_PARTIAL_OBSERVED` |
+| GRID_EXIT_13 | market close partial then REST recovery | partial socket then missing final socket; REST has fills | REST recovery applies missing fill once | `GRID_EXIT_MARKET_CLOSE_REST_RECOVERY_PENDING` |
+| GRID_EXIT_14 | market close filled socket missing, REST recovery | no socket fill but REST allOrders/userTrades prove fill | close ledger and convergence from REST evidence | `GRID_EXIT_MARKET_CLOSE_REST_RECOVERY_PENDING` |
+| GRID_EXIT_15 | duplicate `GRID_EXIT` while close in-flight idempotent | second same key exit received during parent active | existing parent reused or no-op audit; no duplicate children | `GRID_EXIT_REQUESTED` |
+| GRID_EXIT_16 | duplicate `GRID_EXIT` after converged no-op audit | same key exit after convergence | no mutation; audit only | `GRID_EXIT_CONVERGED` |
+| GRID_STOP_17 | STOP emergency backstop fill | STOP fill event with sourceTradeId | emergency close convergence or USER_ACTION_REQUIRED | `GRID_EMERGENCY_STOP_TRIGGERED` |
+| GRID_STOP_18 | STOP fill and `GRID_EXIT` race no over-close | STOP fill and exit request overlap | one fill lifecycle; remaining qty bounded | `STOP / GRID_EXIT Race Policy` |
+| GRID_PAYLOAD_19 | `signalPrice` rejected in Grid payload | validation reason for forbidden field | no target and no mutation | `docs/release/GRID_TRADINGVIEW_PAYLOAD_CONTRACT.md` |
+| GRID_PAYLOAD_20 | arbitrary `strategySignal` accepted | non-SQZ Grid strategySignal normalized | strategy matched by actual name; no hardcode | `docs/release/GRID_TRADINGVIEW_PAYLOAD_CONTRACT.md` |
+| GRID_LEGACY_21 | legacy `GRID_CANDLE_CLOSE_BREAKOUT` no-op audit | `GRID_CANDLE_CLOSE_LEGACY_DISABLED_AUDIT` | no close, cancel, market order, or target mutation | `docs/release/GRID_TRADINGVIEW_PAYLOAD_CONTRACT.md` |
+| GRID_KEYLESS_22 | active keyless regime cannot broad-close | active row lacks stored key | USER_ACTION_REQUIRED or LEGACY_CONTAINED; no auto-close | `docs/runbooks/grid-exit-readonly-blockers.md` |
+| GRID_FILL_23 | `sourceTradeId` dedupe for exit market close | duplicate socket/REST observation with same tradeId | one ledger application only | `GRID_EXIT_LEDGER_APPLIED` |
+| GRID_OWNER_24 | same symbol/side other PID untouched | sibling PID has same symbol/side exposure | sibling owner/snapshot/reservation unchanged | `GRID_EXIT_REMAINING_EXPOSURE_DETECTED` |
+| GRID_QTY_25 | PID-owned close qty guard | requested close qty exceeds PID-owned remaining qty | close blocked or clamped; no sibling exposure consumed | `GRID_EXIT_MARKET_CLOSE_REQUESTED` |
 | admin critical state remains critical | user-friendly filtering must not hide real trading risk from admin | open without protection, Binance/local mismatch, terminal with fill no ledger, missing physical row | no writes | no writes | admin lifecycle classifier returns CRITICAL/ABNORMAL | no writes | nextAction/systemAction is visible | admin console still surfaces canonical risk even if user UI stays simple |

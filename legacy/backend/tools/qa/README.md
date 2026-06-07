@@ -19,6 +19,18 @@ The harness is split into three rails:
 - Data replay uses temp rows only.
 - Live read-only only reads Binance and local DB state.
 - Live execution in this phase is preflight and observation only.
+- No-mutation work must not run QA scripts directly. Use the wrapper first:
+
+```powershell
+$env:NO_MUTATION_MODE='1'
+node .\legacy\backend\tools\qa\no-mutation-runner.js --check-only .\legacy\backend\tools\qa\<script>.js
+```
+
+- Scripts classified as `DB_MUTATION_UNSAFE`, `READ_ONLY_DB`, or `UNKNOWN_UNSAFE` are blocked in no-mutation work.
+- A `static-test` filename is not enough. If the file imports DB helpers or calls queue/ledger writers, treat it as unsafe for no-mutation tasks.
+- Direct `node .\legacy\backend\tools\qa\<script>.js` execution is forbidden during no-mutation work.
+- The wrapper defaults to check-only; workload execution requires `--execute` and is only for scripts classified as `PURE_STATIC_SAFE` or `MOCK_SAFE_IF_NO_DB_IMPORT`.
+- DB read-only scripts need a separate read-only audit task/runner. They are blocked by the strict no-mutation wrapper.
 
 ## Files
 
