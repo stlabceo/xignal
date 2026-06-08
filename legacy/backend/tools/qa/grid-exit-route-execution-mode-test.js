@@ -373,6 +373,13 @@ const makeHarness = ({
     assert.ok(source.includes("GRID_EXIT_ROUTE_EXECUTION_DIRECT_EXACT_SCOPE"));
   });
 
+  check("recovery source does not count blocked applyExitFill as applied", () => {
+    const source = fs.readFileSync(path.join(__dirname, "../../coin.js"), "utf8");
+    assert.ok(source.includes("const applyResult = await pidPositionLedger.applyExitFill"));
+    assert.ok(source.includes("GRID_RESERVATION_EXIT_RECOVERY_APPLY_BLOCKED"));
+    assert.ok(source.includes("Number(applyResult?.appliedQty || 0) <= 0"));
+  });
+
   console.log(JSON.stringify({ ok: true, tests, dbMutation: 0, binanceWrite: 0 }, null, 2));
   process.exit(0);
 })().catch((error) => {

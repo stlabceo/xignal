@@ -5341,7 +5341,7 @@ exports.recoverGridExitFillFromExchange = async ({
                 continue;
             }
 
-            await pidPositionLedger.applyExitFill({
+            const applyResult = await pidPositionLedger.applyExitFill({
                 uid,
                 pid: row.id,
                 strategyCategory: 'grid',
@@ -5358,6 +5358,24 @@ exports.recoverGridExitFillFromExchange = async ({
                 eventType: 'GRID_EXCHANGE_RECONCILED_EXIT_FILL',
                 note: 'exchange-close-reconcile',
             });
+            if(!applyResult?.ok || Number(applyResult?.appliedQty || 0) <= 0){
+                logOrderRuntimeTrace('GRID_RESERVATION_EXIT_RECOVERY_APPLY_BLOCKED', {
+                    uid,
+                    pid: row.id,
+                    symbol: row.symbol,
+                    positionSide: normalizedLeg,
+                    reservationId,
+                    clientOrderId: fill.clientOrderId,
+                    orderId: fill.orderId,
+                    tradeId: fill.tradeId || null,
+                    qty: Number(fill.qty || 0),
+                    price: Number(fill.price || 0),
+                    reason: applyResult?.reason || 'APPLY_EXIT_FILL_NOT_APPLIED',
+                    blocked: applyResult?.blocked === true,
+                    appliedQty: Number(applyResult?.appliedQty || 0),
+                });
+                continue;
+            }
             appliedFillCount += 1;
             reservationRecovered = true;
             logOrderRuntimeTrace('GRID_RESERVATION_EXIT_RECOVERY_APPLY_FILL', {
