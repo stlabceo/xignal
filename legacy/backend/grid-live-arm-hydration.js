@@ -5,7 +5,12 @@ const toNumber = (value, fallback = 0) => {
   return Number.isFinite(numeric) ? numeric : fallback;
 };
 
-const normalizeSymbol = (value) => String(value || "").trim().toUpperCase();
+const normalizeSymbol = (value) =>
+  String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/^[A-Z0-9_]+:/, "")
+    .replace(/\.P$/i, "");
 
 const pick = (...values) => {
   for (const value of values) {

@@ -10,6 +10,7 @@ const gridPairAtomicity = require("./grid-pair-atomicity");
 const gridProtectionGuarantee = require("./grid-protection-guarantee");
 const gridPriceSource = require("./grid-price-source");
 const gridReentrySlPolicy = require("./grid-reentry-sl-policy");
+const gridLiveArmHydration = require("./grid-live-arm-hydration");
 const liveWriteSafetyGate = require("./live-write-safety-gate");
 const orderIntentQueue = require("./order-intent-queue");
 
@@ -2488,6 +2489,227 @@ const isOneSidedEntryArmWithoutOppositeContext = (row) => {
   return !hasOpenLegContext && !gridPairAtomicity.hasAnyGridEntryOrderRef(row);
 };
 
+const GRID_LIVE_ARM_PAIR_PRIMING_STATES = new Set(["", "WAITING_WEBHOOK", "QA_ARM_READY"]);
+
+const normalizeGridArmSymbol = (value) =>
+  String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/^[A-Z0-9_]+:/, "")
+    .replace(/\.P$/i, "");
+
+const pickFirstNonEmpty = (...values) => {
+  for (const value of values) {
+    if (value !== undefined && value !== null && String(value).trim() !== "") {
+      return value;
+    }
+  }
+  return null;
+};
+
+const toMysqlDate = (value) => {
+  if (!value) {
+    return new Date();
+  }
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? new Date() : date;
+};
+
+const getTargetGridPayload = (targetItem = {}) => {
+  if (targetItem.gridPayload && typeof targetItem.gridPayload === "object") {
+    return targetItem.gridPayload;
+  }
+  return targetItem;
+};
+
+const getTargetGridRegimeKey = (targetItem = {}) => {
+  const payload = getTargetGridPayload(targetItem);
+  return pickFirstNonEmpty(
+    targetItem.gridRegimeKey,
+    targetItem.regimeKey,
+    payload.gridRegimeKey,
+    payload.regimeKey,
+    payload.rawPayload?.gridRegimeKey,
+    payload.rawPayload?.regimeKey
+  );
+};
+
+const buildGridArmLastPayloadJson = (targetItem = {}, plan = {}) => {
+  const payload = getTargetGridPayload(targetItem);
+  const rawPayload = payload.rawPayload && typeof payload.rawPayload === "object"
+    ? payload.rawPayload
+    : {};
+  return JSON.stringify({
+    ...rawPayload,
+    ...payload,
+    gridRegimeKey: plan.gridRegimeKey,
+    supportPrice: plan.supportPrice,
+    resistancePrice: plan.resistancePrice,
+    triggerPrice: plan.triggerPrice,
+    signalTime: plan.signalTime,
+    pairPrimingSource: "GRID_LIVE_ARM_WORKER_TARGET",
+  });
+};
+
+const buildLiveGridArmPairPrimingPlan = ({ row = {}, targetItem = {} } = {}) => {
+  if (!row?.id || !row?.uid) {
+    return { ok: false, reason: "GRID_LIVE_ARM_ROW_MISSING" };
+  }
+  if (!isGridControlEnabled(row)) {
+    return { ok: false, reason: "GRID_LIVE_ARM_ROW_DISABLED" };
+  }
+
+  const currentState = String(row.regimeStatus || "").trim().toUpperCase();
+  if (!GRID_LIVE_ARM_PAIR_PRIMING_STATES.has(currentState)) {
+    return {
+      ok: false,
+      reason: "GRID_LIVE_ARM_ROW_STATE_NOT_PRIMEABLE",
+      regimeStatus: row.regimeStatus || null,
+    };
+  }
+  if (
+    hasOpenPosition(row) ||
+    hasAnyEntryArmed(row) ||
+    gridPairAtomicity.hasAnyGridEntryOrderRef(row)
+  ) {
+    return { ok: false, reason: "GRID_LIVE_ARM_EXISTING_LEG_CONTEXT" };
+  }
+
+  const rowSymbol = normalizeGridArmSymbol(row.symbol);
+  const targetSymbol = normalizeGridArmSymbol(
+    pickFirstNonEmpty(targetItem.symbol, getTargetGridPayload(targetItem).symbol)
+  );
+  if (rowSymbol && targetSymbol && rowSymbol !== targetSymbol) {
+    return {
+      ok: false,
+      reason: "GRID_LIVE_ARM_SYMBOL_MISMATCH",
+      rowSymbol,
+      targetSymbol,
+    };
+  }
+
+  const hydration = gridLiveArmHydration.hydrateGridLiveArmRowForPairPriming({
+    row,
+    targetItem,
+  });
+  if (!hydration.ok) {
+    return { ok: false, reason: hydration.reason || "GRID_LIVE_ARM_PAIR_CONTEXT_MISSING" };
+  }
+
+  const hydratedRow = hydration.row;
+  const gridRegimeKey = getTargetGridRegimeKey(targetItem);
+  if (!gridRegimeKey) {
+    return { ok: false, reason: "GRID_LIVE_ARM_REGIME_KEY_MISSING" };
+  }
+
+  const supportPrice = toNumber(hydratedRow.supportPrice);
+  const resistancePrice = toNumber(hydratedRow.resistancePrice);
+  const triggerPrice = toNumber(hydratedRow.triggerPrice);
+  if (!(supportPrice > 0) || !(resistancePrice > 0) || !(triggerPrice > 0)) {
+    return { ok: false, reason: "GRID_LIVE_ARM_PRICE_CONTEXT_MISSING" };
+  }
+  if (!(supportPrice < triggerPrice && triggerPrice < resistancePrice)) {
+    return { ok: false, reason: "GRID_LIVE_ARM_PRICE_CONTEXT_INVALID" };
+  }
+
+  const tradeValue = getTradeValue(hydratedRow);
+  const qty = computeGridEntryQty(hydratedRow, triggerPrice);
+  if (!(tradeValue > 0) || !(qty > 0)) {
+    return { ok: false, reason: "GRID_LIVE_ARM_NOTIONAL_MISSING" };
+  }
+
+  if (!isInitialGridEntryPairCandidate(hydratedRow)) {
+    return { ok: false, reason: "GRID_LIVE_ARM_PAIR_CONTEXT_NOT_INITIAL_PAIR" };
+  }
+
+  const signalTime = pickFirstNonEmpty(
+    targetItem.signalTime,
+    getTargetGridPayload(targetItem).signalTime,
+    getTargetGridPayload(targetItem).rawPayload?.signalTime,
+    hydratedRow.signalTime
+  );
+
+  return {
+    ok: true,
+    reason: null,
+    row: hydratedRow,
+    pairPrimingPatch: hydratedRow.__gridLiveArmPairPrimingPatch || {},
+    gridRegimeKey,
+    supportPrice,
+    resistancePrice,
+    triggerPrice,
+    signalTime: signalTime || null,
+    qty,
+    notional: qty * triggerPrice,
+    tradeValue,
+    legs: GRID_ENTRY_PAIR_LEGS.map((leg) => ({
+      leg,
+      orderType: "LIMIT",
+      side: getLegMeta(leg).signalSide,
+      positionSide: getLegPositionSide(leg),
+      triggerPrice,
+      qty,
+      clientOrderId: gridPairAtomicity.buildGridPairClientOrderId(hydratedRow, leg),
+    })),
+  };
+};
+
+const applyLiveGridArmPairPrimingPatch = async (row, targetItem, plan) => {
+  if (!row?.id || !row?.uid || !plan?.ok) {
+    return null;
+  }
+
+  const signalTime = toMysqlDate(plan.signalTime);
+  const payloadJson = buildGridArmLastPayloadJson(targetItem, plan);
+  const [result] = await db.query(
+    `UPDATE live_grid_strategy_list
+        SET regimeStatus = 'ACTIVE',
+            regimeEndReason = NULL,
+            regimeReceivedAt = NOW(),
+            signalTime = ?,
+            supportPrice = ?,
+            resistancePrice = ?,
+            triggerPrice = ?,
+            longLegStatus = 'ENTRY_ARMED',
+            longEntryOrderId = NULL,
+            longExitOrderId = NULL,
+            longStopOrderId = NULL,
+            longQty = 0,
+            longEntryPrice = NULL,
+            longTakeProfitPrice = NULL,
+            longStopPrice = NULL,
+            shortLegStatus = 'ENTRY_ARMED',
+            shortEntryOrderId = NULL,
+            shortExitOrderId = NULL,
+            shortStopOrderId = NULL,
+            shortQty = 0,
+            shortEntryPrice = NULL,
+            shortTakeProfitPrice = NULL,
+            shortStopPrice = NULL,
+            lastWebhookPayloadJson = ?,
+            updatedAt = NOW()
+      WHERE id = ?
+        AND uid = ?
+        AND enabled = 'Y'
+        AND (regimeStatus IS NULL OR regimeStatus = '' OR regimeStatus IN ('WAITING_WEBHOOK', 'QA_ARM_READY'))
+      LIMIT 1`,
+    [
+      signalTime,
+      plan.supportPrice,
+      plan.resistancePrice,
+      plan.triggerPrice,
+      payloadJson,
+      row.id,
+      row.uid,
+    ]
+  );
+
+  if (result?.affectedRows !== 1) {
+    return null;
+  }
+  return (await loadGridItem("LIVE", row.id)) || null;
+};
+
 const markGridPairArmFailed = async (row, reason, message) => {
   const patch = {
     regimeStatus: gridPairAtomicity.GRID_PAIR_STATE.FAILED,
@@ -3797,9 +4019,31 @@ const primeLiveEntriesForTargetItems = async (targetItems = []) => {
         return false;
       }
 
-      const changed = await armMissingLiveEntries(row);
+      const plan = buildLiveGridArmPairPrimingPlan({ row, targetItem: item });
+      if (!plan.ok) {
+        await appendGridRuntimeLog(
+          row,
+          "gridLiveArm",
+          plan.reason || "PAIR_PRIMING_PLAN_BLOCKED",
+          `pid:${pid}, reason:${plan.reason || "UNKNOWN"}`
+        );
+        return false;
+      }
+
+      const primingRow = await applyLiveGridArmPairPrimingPatch(row, item, plan);
+      if (!primingRow) {
+        await appendGridRuntimeLog(
+          row,
+          "gridLiveArm",
+          "GRID_LIVE_ARM_PAIR_PRIMING_PATCH_CONFLICT",
+          `pid:${pid}, status:${row.regimeStatus || "UNKNOWN"}`
+        );
+        return false;
+      }
+
+      const changed = await armMissingLiveEntries(primingRow);
       if (changed) {
-        primed += 1;
+        primed += Number(plan.legs?.length || 1);
       }
       return changed;
     });
@@ -4381,6 +4625,7 @@ const handleLiveOrderTradeUpdate = async (uid, data) => {
 
 module.exports = {
   parseGridClientOrderId,
+  buildLiveGridArmPairPrimingPlan,
   runLive: () => runMode("LIVE"),
   runTest: () => runMode("TEST"),
   primeLiveEntriesForTargetItems,
