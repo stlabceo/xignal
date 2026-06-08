@@ -2558,6 +2558,7 @@ const getGridCloseDispatcher = (options = {}) =>
           leg: payload.positionSide || payload.leg,
           qty: closeQty,
           actualDispatchGate,
+          gridRegimeKey: payload.gridRegimeKey || payload.regimeKey || null,
         });
       };
 

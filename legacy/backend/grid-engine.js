@@ -642,6 +642,18 @@ const getLegPatchForEntryArmed = (leg, entryOrderId = null) => {
 
 const getLegPatchForClosed = (leg) => getLegPatchForReset(leg);
 
+const extractGridRegimeKeyFromLastPayload = (payloadJson = null) => {
+  if (!payloadJson) {
+    return null;
+  }
+  try {
+    const payload = typeof payloadJson === "string" ? JSON.parse(payloadJson) : payloadJson;
+    return String(payload?.gridRegimeKey || payload?.regimeKey || "").trim() || null;
+  } catch (error) {
+    return null;
+  }
+};
+
 const buildResetRegimePatch = (reason = null) => ({
   regimeStatus: "WAITING_WEBHOOK",
   regimeEndReason: reason,
@@ -1047,6 +1059,7 @@ const enqueueLiveGridCloseIntent = async (row, leg, qty, reason = "CONTROLLED_CL
       sourceOrderId: options.sourceOrderId || null,
       sourceTradeId: options.sourceTradeId || null,
       sourceClientOrderId: options.sourceClientOrderId || null,
+      gridRegimeKey: row.gridRegimeKey || options.gridRegimeKey || extractGridRegimeKeyFromLastPayload(row.lastWebhookPayloadJson) || null,
       closeClientOrderId,
     },
   });
@@ -3282,6 +3295,90 @@ const handleGridPairArmFailure = async (row, placements, reservedSlots, ownershi
   return true;
 };
 
+const recoverImmediateLiveArmFillsAfterPairAck = async (row, placements = {}) => {
+  if (!row?.uid || !row?.id || !row?.symbol) {
+    return { recoveredCount: 0, results: [] };
+  }
+
+  const coin = getCoin();
+  const results = [];
+  for (const leg of GRID_ENTRY_PAIR_LEGS) {
+    const placement = placements[leg] || {};
+    if (!placement?.ok || !placement?.clientOrderId) {
+      continue;
+    }
+
+    const exchangeOrder = placement.exchangeOrder || await findGridEntryOrderForLeg(row, leg, {
+      orderId: placement.orderId || null,
+      clientOrderId: placement.clientOrderId,
+    });
+    if (!gridPairAtomicity.isOrderFilledOrPartiallyFilled(exchangeOrder || {})) {
+      results.push({
+        leg,
+        clientOrderId: placement.clientOrderId,
+        recovered: false,
+        reason: "ORDER_NOT_FILLED_AFTER_ACK",
+        status: exchangeOrder?.status || null,
+      });
+      continue;
+    }
+
+    const prefix = getLegFieldPrefix(leg);
+    const rowWithEntry = {
+      ...row,
+      [`${prefix}EntryOrderId`]: placement.clientOrderId,
+      regimeStatus: row.regimeStatus || "ACTIVE",
+    };
+    const execution = await coin.recoverGridEntryFillFromExchange({
+      uid: row.uid,
+      row: rowWithEntry,
+      leg,
+      issue: {
+        issues: [
+          "GRID_LIVE_ARM_IMMEDIATE_FILL_RECOVERY",
+          `status:${exchangeOrder?.status || "UNKNOWN"}`,
+        ],
+      },
+    });
+    const restored = execution
+      ? await restoreLiveGridLegAfterRecoveredEntryFill(
+          rowWithEntry,
+          leg,
+          execution,
+          {
+            issues: [
+              "GRID_LIVE_ARM_IMMEDIATE_FILL_RECOVERY",
+              `status:${exchangeOrder?.status || "UNKNOWN"}`,
+            ],
+          }
+        )
+      : false;
+    await appendGridRuntimeLog(
+      row,
+      "gridLiveArm",
+      restored
+        ? "GRID_LIVE_ARM_IMMEDIATE_FILL_RECOVERED"
+        : "GRID_LIVE_ARM_IMMEDIATE_FILL_RECOVERY_FAILED",
+      `leg:${leg}, clientOrderId:${placement.clientOrderId}, orderId:${placement.orderId || exchangeOrder?.orderId || "NONE"}, status:${exchangeOrder?.status || "UNKNOWN"}, restored:${restored ? "Y" : "N"}`,
+      leg
+    );
+    results.push({
+      leg,
+      clientOrderId: placement.clientOrderId,
+      orderId: placement.orderId || exchangeOrder?.orderId || null,
+      status: exchangeOrder?.status || null,
+      recovered: Boolean(execution),
+      restored: Boolean(restored),
+    });
+  }
+
+  return {
+    recoveredCount: results.filter((item) => item.recovered).length,
+    restoredCount: results.filter((item) => item.restored).length,
+    results,
+  };
+};
+
 const armInitialLiveEntryPair = async (row) => {
   const current = (await loadGridItem("LIVE", row.id)) || row;
   if (!isInitialGridEntryPairCandidate(current)) {
@@ -3354,6 +3451,21 @@ const armInitialLiveEntryPair = async (row) => {
         "ENTRY_PAIR_ARMED",
         `long:${placements.LONG.clientOrderId}, short:${placements.SHORT.clientOrderId}`
       );
+      const armedRow = (await loadGridItem("LIVE", current.id)) || {
+        ...current,
+        longEntryOrderId: placements.LONG.clientOrderId,
+        shortEntryOrderId: placements.SHORT.clientOrderId,
+        regimeStatus: "ACTIVE",
+      };
+      const immediateRecovery = await recoverImmediateLiveArmFillsAfterPairAck(armedRow, placements);
+      if (immediateRecovery.recoveredCount > 0) {
+        await appendGridRuntimeLog(
+          armedRow,
+          "gridLiveArm",
+          "GRID_LIVE_ARM_IMMEDIATE_FILL_RECOVERY_SUMMARY",
+          `recovered:${immediateRecovery.recoveredCount}, restored:${immediateRecovery.restoredCount}`,
+        );
+      }
       return true;
     }
 

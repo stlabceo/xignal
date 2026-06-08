@@ -129,6 +129,95 @@ const createBinanceApiClient = (appKey, appSecret) => new Binance().options({
 
 const isQaTempMarker = (value) => String(value || '').trim().toUpperCase().startsWith('QA_');
 const isQaReplayMockBinanceClient = (uid) => Boolean(binance?.[uid]?.__qaMockBinanceClient);
+const normalizeQaScopedGridSymbol = (value = '') => String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\.P$/i, '');
+
+const isTruthyEnv = (value) =>
+    ['1', 'true', 'y', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
+
+const getQaScopedGridCloseContext = () => {
+    const pid = Number(process.env.LIVE_QA_ALLOWED_PID || 0);
+    const symbol = normalizeQaScopedGridSymbol(process.env.LIVE_QA_SYMBOL || '');
+    const gridRegimeKey = String(process.env.LIVE_QA_GRID_REGIME_KEY || '').trim();
+    return {
+        enabled: (
+            isTruthyEnv(process.env.QA_SCOPED_GRID_RUNTIME)
+            && isTruthyEnv(process.env.LIVE_QA_ALLOW_SCOPED_EXIT_RESCUE)
+            && Number.isInteger(pid)
+            && pid > 0
+            && Boolean(symbol)
+        ),
+        pid,
+        symbol,
+        gridRegimeKey: gridRegimeKey || null,
+    };
+};
+
+const extractGridRegimeKeyFromGridRow = (row = {}) => {
+    const direct = String(row.gridRegimeKey || row.regimeKey || '').trim();
+    if(direct){
+        return direct;
+    }
+    const payloadJson = row.lastWebhookPayloadJson || row.last_webhook_payload_json || null;
+    if(!payloadJson){
+        return null;
+    }
+    try{
+        const payload = typeof payloadJson === 'string' ? JSON.parse(payloadJson) : payloadJson;
+        return String(payload?.gridRegimeKey || payload?.regimeKey || '').trim() || null;
+    }catch(error){
+        return null;
+    }
+};
+
+const getDispatchGridRegimeKey = ({ actualDispatchGate = null, gridRegimeKey = null } = {}) => {
+    const direct = String(gridRegimeKey || '').trim();
+    if(direct){
+        return direct;
+    }
+    const gate = actualDispatchGate || {};
+    return String(
+        gate.gridRegimeKey ||
+        gate.payload?.gridRegimeKey ||
+        gate.intentPayload?.gridRegimeKey ||
+        gate.context?.gridRegimeKey ||
+        ''
+    ).trim() || null;
+};
+
+const isScopedGridExitQaCloseAllowed = ({
+    uid,
+    pid,
+    symbol,
+    row,
+    actualDispatchGate = null,
+    gridRegimeKey = null,
+} = {}) => {
+    const context = getQaScopedGridCloseContext();
+    if(!context.enabled){
+        return false;
+    }
+    if(Number(pid || 0) !== context.pid){
+        return false;
+    }
+    if(normalizeQaScopedGridSymbol(symbol || row?.symbol || '') !== context.symbol){
+        return false;
+    }
+    if(row && Number(row.uid || 0) !== Number(uid || 0)){
+        return false;
+    }
+    const expectedRegimeKey = context.gridRegimeKey || extractGridRegimeKeyFromGridRow(row);
+    const providedRegimeKey = getDispatchGridRegimeKey({ actualDispatchGate, gridRegimeKey });
+    if(expectedRegimeKey && providedRegimeKey && expectedRegimeKey !== providedRegimeKey){
+        return false;
+    }
+    if(context.gridRegimeKey && !providedRegimeKey){
+        return false;
+    }
+    return true;
+};
 
 const loadLiveGridWriteGuardRow = async (uid, pid) => {
     if(!uid || !pid){
@@ -137,7 +226,7 @@ const loadLiveGridWriteGuardRow = async (uid, pid) => {
 
     try{
         const [rows] = await db.query(
-            `SELECT id, uid, a_name, symbol, enabled, regimeStatus
+            `SELECT id, uid, a_name, symbol, enabled, regimeStatus, lastWebhookPayloadJson
                FROM live_grid_strategy_list
               WHERE uid = ?
                 AND id = ?
@@ -150,7 +239,13 @@ const loadLiveGridWriteGuardRow = async (uid, pid) => {
     }
 };
 
-const shouldBlockGridCloseBinanceWrite = async ({ uid, pid, symbol } = {}) => {
+const shouldBlockGridCloseBinanceWrite = async ({
+    uid,
+    pid,
+    symbol,
+    actualDispatchGate = null,
+    gridRegimeKey = null,
+} = {}) => {
     const allowQaMockClient = isQaReplayMode() && isQaReplayMockBinanceClient(uid);
     if(isQaReplayMode() && !allowQaMockClient){
         return {
@@ -162,6 +257,14 @@ const shouldBlockGridCloseBinanceWrite = async ({ uid, pid, symbol } = {}) => {
 
     const row = await loadLiveGridWriteGuardRow(uid, pid);
     if(!allowQaMockClient && row && (isQaTempMarker(row.a_name) || isQaTempMarker(row.symbol))){
+        if(isScopedGridExitQaCloseAllowed({ uid, pid, symbol, row, actualDispatchGate, gridRegimeKey })){
+            return {
+                blocked: false,
+                reason: null,
+                row,
+                scopedQaGridCloseAllowed: true,
+            };
+        }
         return {
             blocked: true,
             reason: 'QA_TEMP_STRATEGY_BINANCE_WRITE_BLOCKED',
@@ -170,6 +273,14 @@ const shouldBlockGridCloseBinanceWrite = async ({ uid, pid, symbol } = {}) => {
     }
 
     if(!allowQaMockClient && isQaTempMarker(symbol)){
+        if(isScopedGridExitQaCloseAllowed({ uid, pid, symbol, row, actualDispatchGate, gridRegimeKey })){
+            return {
+                blocked: false,
+                reason: null,
+                row,
+                scopedQaGridCloseAllowed: true,
+            };
+        }
         return {
             blocked: true,
             reason: 'QA_SYMBOL_BINANCE_WRITE_BLOCKED',
@@ -5900,12 +6011,20 @@ exports.closeGridLegMarketOrder = async ({
     symbol,
     leg,
     qty = 0,
+    actualDispatchGate = null,
+    gridRegimeKey = null,
 } = {}) => {
     if(!symbol || !leg){
         return null;
     }
 
-    const writeGuard = await shouldBlockGridCloseBinanceWrite({ uid, pid, symbol });
+    const writeGuard = await shouldBlockGridCloseBinanceWrite({
+        uid,
+        pid,
+        symbol,
+        actualDispatchGate,
+        gridRegimeKey,
+    });
     if(writeGuard.blocked){
         await logBlockedGridCloseBinanceWrite({
             uid,

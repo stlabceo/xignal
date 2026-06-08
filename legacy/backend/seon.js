@@ -152,6 +152,33 @@ const isTruthyEnv = (value) =>
 
 const isQaScopedGridRuntime = () => isTruthyEnv(process.env.QA_SCOPED_GRID_RUNTIME);
 
+const normalizeLiveQaRuntimeSymbol = (value = '') => String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\.P$/i, '');
+
+const getLiveQaAllowedPid = () => {
+    const value = Number(process.env.LIVE_QA_ALLOWED_PID || 0);
+    return Number.isInteger(value) && value > 0 ? value : null;
+};
+
+const getLiveQaScopedSymbol = () => {
+    const symbol = normalizeLiveQaRuntimeSymbol(process.env.LIVE_QA_SYMBOL || '');
+    return symbol || null;
+};
+
+const getQaScopedGridExitRescueContext = () => {
+    const pid = getLiveQaAllowedPid();
+    const symbol = getLiveQaScopedSymbol();
+    const enabled = (
+        isQaScopedGridRuntime()
+        && isTruthyEnv(process.env.LIVE_QA_ALLOW_SCOPED_EXIT_RESCUE)
+        && Boolean(pid)
+        && Boolean(symbol)
+    );
+    return { enabled, pid, symbol };
+};
+
 const getBootSafetyExcludedUids = () => new Set(
     String(process.env.RUNTIME_EXCLUDED_UIDS || '')
         .split(',')
@@ -2228,7 +2255,8 @@ exports.startRuntime = async (options = {}) => {
 
         const bootGate = await runBootSafetyGate(ownerLabel);
         runtimeLoopHealth.bootSafetyGate = bootGate;
-        if(!bootGate.ok){
+        const scopedExitRescue = getQaScopedGridExitRescueContext();
+        if(!bootGate.ok && !scopedExitRescue.enabled){
             logRunMainState('BOOT_SAFETY_GATE_BLOCKED', {
                 file: 'seon.js',
                 function: 'startRuntime',
@@ -2244,6 +2272,16 @@ exports.startRuntime = async (options = {}) => {
                 reason: 'BOOT_SAFETY_GATE_BLOCKED',
                 bootGate,
             };
+        }
+        if(!bootGate.ok && scopedExitRescue.enabled){
+            logRunMainState('BOOT_SAFETY_GATE_SCOPED_RESCUE_ALLOWED', {
+                file: 'seon.js',
+                function: 'startRuntime',
+                ownerLabel,
+                bootGate,
+                scopedExitRescue,
+                action: 'start-order-intent-worker-only-for-scoped-grid-exit-rescue',
+            }, { force: true });
         }
 
         await coin.init({
