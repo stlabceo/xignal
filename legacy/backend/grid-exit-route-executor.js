@@ -1,6 +1,7 @@
 "use strict";
 
 const defaultDb = require("./database/connect/config");
+const positionOwnership = require("./position-ownership");
 
 const normalizeSymbol = (value) =>
   String(value || "")
@@ -181,8 +182,25 @@ const loadPidLocalExitState = async ({ db, uid, pid, symbol }) => {
   }
 
   const activeReservationCount = reservations.filter((row) =>
-    ["ACTIVE", "PENDING", "RUNNING", "RETRY"].includes(normalizeUpper(row.status))
+    [
+      "ACTIVE",
+      "PARTIAL",
+      "PENDING",
+      "RUNNING",
+      "RETRY",
+      "CANCEL_REQUESTED",
+      "CANCEL_PENDING",
+      "UNKNOWN_CANCEL_STATE",
+    ].includes(normalizeUpper(row.status))
   ).length;
+  const ownerResidueCount = owners.filter((row) => {
+    if (toNumber(row.ownedQty) > 0 || toNumber(row.reservedCloseQty) > 0) {
+      return true;
+    }
+    const state = normalizeUpper(row.ownerState);
+    const status = normalizeUpper(row.status);
+    return Boolean(state || status) && state !== "RELEASED" && status !== "CLOSED";
+  }).length;
 
   return {
     owners,
@@ -191,6 +209,7 @@ const loadPidLocalExitState = async ({ db, uid, pid, symbol }) => {
     ownerOpenQtyByLeg,
     snapshotOpenQtyByLeg,
     activeReservationCount,
+    ownerResidueCount,
     ownerNonzeroCount: owners.filter((row) => toNumber(row.ownedQty) > 0 || toNumber(row.reservedCloseQty) > 0).length,
     snapshotOpenCount: snapshots.filter((row) => toNumber(row.openQty) > 0 || normalizeUpper(row.status) === "OPEN").length,
   };
@@ -214,6 +233,7 @@ const finalizeGridExitIfConverged = async ({ db, row, payload, finalState }) => 
     longExchangeQty <= 0 &&
     shortExchangeQty <= 0 &&
     finalState.local.ownerNonzeroCount === 0 &&
+    finalState.local.ownerResidueCount === 0 &&
     finalState.local.snapshotOpenCount === 0 &&
     finalState.local.activeReservationCount === 0;
 
@@ -260,6 +280,7 @@ const executeGridExitForRoute = async ({
   db = defaultDb,
   coin = require("./coin"),
   gridEngine = require("./grid-engine"),
+  positionOwnershipApi = positionOwnership,
 } = {}) => {
   const executionGate = isGridExitRouteExecutionEnabled({ env, featureFlags });
   const targetPlan = collectEligibleExitTargets({
@@ -369,6 +390,22 @@ const executeGridExitForRoute = async ({
     synced = await gridEngine.truthSyncLiveGridRow({ row });
   }
 
+  const postCloseExchange = {
+    LONG: await readExchangeLegQty({ coin, uid: row.uid, symbol: row.symbol, leg: "LONG" }),
+    SHORT: await readExchangeLegQty({ coin, uid: row.uid, symbol: row.symbol, leg: "SHORT" }),
+  };
+  if (toNumber(postCloseExchange.LONG) <= 0 && toNumber(postCloseExchange.SHORT) <= 0) {
+    if (positionOwnershipApi && typeof positionOwnershipApi.releaseAllPositionBucketOwnersByPid === "function") {
+      await positionOwnershipApi.releaseAllPositionBucketOwnersByPid({
+        ownerPid: row.id,
+        ownerStrategyCategory: "grid",
+      });
+    }
+    if (typeof gridEngine.truthSyncLiveGridRow === "function") {
+      synced = await gridEngine.truthSyncLiveGridRow({ row });
+    }
+  }
+
   const finalLocal = await loadPidLocalExitState({ db, uid: row.uid, pid: row.id, symbol: row.symbol });
   const finalExchange = {
     LONG: await readExchangeLegQty({ coin, uid: row.uid, symbol: row.symbol, leg: "LONG" }),
@@ -389,6 +426,7 @@ const executeGridExitForRoute = async ({
     toNumber(finalExchange.LONG) <= 0 &&
     toNumber(finalExchange.SHORT) <= 0 &&
     finalLocal.ownerNonzeroCount === 0 &&
+    finalLocal.ownerResidueCount === 0 &&
     finalLocal.snapshotOpenCount === 0 &&
     finalLocal.activeReservationCount === 0;
 
@@ -412,6 +450,7 @@ const executeGridExitForRoute = async ({
     truthSync: synced,
     finalLocal: {
       ownerNonzeroCount: finalLocal.ownerNonzeroCount,
+      ownerResidueCount: finalLocal.ownerResidueCount,
       snapshotOpenCount: finalLocal.snapshotOpenCount,
       activeReservationCount: finalLocal.activeReservationCount,
     },

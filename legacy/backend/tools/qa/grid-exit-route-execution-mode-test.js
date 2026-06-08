@@ -53,7 +53,14 @@ const actualEnv = {
   GRID_EXIT_ROUTE_EXECUTION_MAX_TARGETS: "1",
 };
 
-const makeHarness = ({ storedKey = payload.gridRegimeKey, openQty = 5, finalClean = true } = {}) => {
+const makeHarness = ({
+  storedKey = payload.gridRegimeKey,
+  openQty = 5,
+  finalClean = true,
+  owners = null,
+  snapshots = null,
+  reservations = [],
+} = {}) => {
   const state = {
     row: {
       id: 204,
@@ -67,16 +74,17 @@ const makeHarness = ({ storedKey = payload.gridRegimeKey, openQty = 5, finalClea
       lastWebhookPayloadJson: JSON.stringify({ gridRegimeKey: storedKey }),
     },
     exchange: { LONG: 0, SHORT: openQty },
-    owners: openQty > 0
+    owners: owners || (openQty > 0
       ? [{ positionSide: "SHORT", status: "OPEN", ownerState: "OPEN", ownedQty: openQty, reservedCloseQty: 0 }]
-      : [],
-    snapshots: openQty > 0
+      : []),
+    snapshots: snapshots || (openQty > 0
       ? [{ positionSide: "SHORT", status: "OPEN", openQty }]
-      : [],
-    reservations: [],
+      : []),
+    reservations,
     updates: [],
     cancels: [],
     closes: [],
+    ownerReleases: 0,
   };
 
   const db = {
@@ -133,7 +141,17 @@ const makeHarness = ({ storedKey = payload.gridRegimeKey, openQty = 5, finalClea
     truthSyncLiveGridRow: async () => ({ repairs: [] }),
   };
 
-  return { state, db, coin, gridEngine };
+  const positionOwnershipApi = {
+    releaseAllPositionBucketOwnersByPid: async (request) => {
+      state.ownerReleases += 1;
+      if (finalClean) {
+        state.owners = [];
+      }
+      return 1;
+    },
+  };
+
+  return { state, db, coin, gridEngine, positionOwnershipApi };
 };
 
 (async () => {
@@ -216,6 +234,7 @@ const makeHarness = ({ storedKey = payload.gridRegimeKey, openQty = 5, finalClea
     db: harness.db,
     coin: harness.coin,
     gridEngine: harness.gridEngine,
+    positionOwnershipApi: harness.positionOwnershipApi,
   });
 
   check("live QA execution mode does not return AUDIT_ONLY", () => {
@@ -265,6 +284,7 @@ const makeHarness = ({ storedKey = payload.gridRegimeKey, openQty = 5, finalClea
     db: mismatch.db,
     coin: mismatch.coin,
     gridEngine: mismatch.gridEngine,
+    positionOwnershipApi: mismatch.positionOwnershipApi,
   });
   check("GRID_EXIT wrong key rejected", () => {
     assert.strictEqual(mismatchResult.requested, 0);
@@ -280,11 +300,66 @@ const makeHarness = ({ storedKey = payload.gridRegimeKey, openQty = 5, finalClea
     db: notClean.db,
     coin: notClean.coin,
     gridEngine: notClean.gridEngine,
+    positionOwnershipApi: notClean.positionOwnershipApi,
   });
   check("close ACK non-terminal and final convergence required", () => {
     assert.strictEqual(pendingResult.finalConverged, false);
     assert.strictEqual(pendingResult.processed, 0);
     assert.strictEqual(pendingResult.resultCode, "GRID_EXIT_EXECUTED_CONVERGENCE_PENDING");
+  });
+
+  const pendingReservation = makeHarness({
+    openQty: 0,
+    finalClean: true,
+    reservations: [{
+      positionSide: "SHORT",
+      status: "CANCEL_PENDING",
+      reservedQty: 5,
+      filledQty: 0,
+      clientOrderId: "GMANUAL_S_156_204_PENDING",
+    }],
+  });
+  const pendingReservationResult = await executor.executeGridExitForRoute({
+    payload,
+    previewResult: activePreview,
+    featureFlags: actualEnv,
+    env: actualEnv,
+    db: pendingReservation.db,
+    coin: pendingReservation.coin,
+    gridEngine: pendingReservation.gridEngine,
+    positionOwnershipApi: pendingReservation.positionOwnershipApi,
+  });
+  check("CANCEL_PENDING reservation blocks final convergence", () => {
+    assert.strictEqual(pendingReservationResult.finalConverged, false);
+    assert.strictEqual(pendingReservationResult.finalLocal.activeReservationCount, 1);
+    assert.strictEqual(pendingReservationResult.processed, 0);
+  });
+
+  const zeroQtyOwnerResidue = makeHarness({
+    openQty: 0,
+    finalClean: false,
+    owners: [{
+      positionSide: "LONG",
+      status: "RESERVED",
+      ownerState: "ENTRY_ARMED",
+      ownedQty: 0,
+      reservedCloseQty: 0,
+    }],
+  });
+  const zeroQtyOwnerResidueResult = await executor.executeGridExitForRoute({
+    payload,
+    previewResult: activePreview,
+    featureFlags: actualEnv,
+    env: actualEnv,
+    db: zeroQtyOwnerResidue.db,
+    coin: zeroQtyOwnerResidue.coin,
+    gridEngine: zeroQtyOwnerResidue.gridEngine,
+    positionOwnershipApi: zeroQtyOwnerResidue.positionOwnershipApi,
+  });
+  check("zero-qty nonterminal owner residue blocks final convergence", () => {
+    assert.strictEqual(zeroQtyOwnerResidueResult.finalConverged, false);
+    assert.strictEqual(zeroQtyOwnerResidueResult.finalLocal.ownerResidueCount, 1);
+    assert.strictEqual(zeroQtyOwnerResidueResult.processed, 0);
   });
 
   check("safety close not strategy success by route source contract", () => {

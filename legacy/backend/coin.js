@@ -3832,8 +3832,81 @@ const isGridExitReservationRecoveryCandidate = (reservation = null) => {
 
     const reservationKind = String(reservation?.reservationKind || '').trim().toUpperCase();
     const clientOrderId = String(reservation?.clientOrderId || '').trim();
-    return ['GRID_TP', 'GRID_STOP', 'GRID_MANUAL_OFF'].includes(reservationKind)
+    return ['GRID_TP', 'GRID_STOP', 'GRID_MANUAL_OFF', 'GRID_EXIT_MARKET_CLOSE'].includes(reservationKind)
         || /^(GTP|GSTOP|GMANUAL)_/.test(clientOrderId);
+}
+
+const loadGridExitOrderByReservation = async ({
+    uid,
+    symbol,
+    leg,
+    closeSide,
+    reservation,
+} = {}) => {
+    if(!uid || !symbol || !reservation){
+        return null;
+    }
+
+    const normalizedLeg = String(leg || '').trim().toUpperCase();
+    const attempts = [];
+    const clientOrderId = String(reservation?.clientOrderId || '').trim();
+    const actualOrderId = reservation?.actualOrderId == null || reservation?.actualOrderId === ''
+        ? null
+        : String(reservation.actualOrderId).trim();
+    const sourceOrderId = reservation?.sourceOrderId == null || reservation?.sourceOrderId === ''
+        ? null
+        : String(reservation.sourceOrderId).trim();
+
+    if(clientOrderId){
+        attempts.push({ origClientOrderId: clientOrderId });
+    }
+    if(actualOrderId){
+        attempts.push({ orderId: actualOrderId });
+    }
+    if(sourceOrderId && sourceOrderId !== actualOrderId){
+        attempts.push({ orderId: sourceOrderId });
+    }
+
+    for(const params of attempts){
+        try{
+            const order = await privateFuturesSignedRequest(
+                uid,
+                '/fapi/v1/order',
+                {
+                    symbol,
+                    ...params,
+                },
+                'GET'
+            );
+            const status = String(order?.status || '').trim().toUpperCase();
+            const orderSide = String(order?.side || '').trim().toUpperCase();
+            const orderPositionSide = String(order?.positionSide || '').trim().toUpperCase();
+            if(!isRecoverableFillOrderStatus(status)){
+                continue;
+            }
+            if(closeSide && orderSide !== closeSide){
+                continue;
+            }
+            if(orderPositionSide && normalizedLeg && orderPositionSide !== normalizedLeg){
+                continue;
+            }
+            return order;
+        }catch(error){
+            logOrderRuntimeTrace('GRID_RESERVATION_EXIT_RECOVERY_DIRECT_ORDER_LOOKUP_FAILED', {
+                uid,
+                symbol,
+                positionSide: normalizedLeg || null,
+                clientOrderId: clientOrderId || null,
+                actualOrderId: actualOrderId || null,
+                sourceOrderId: sourceOrderId || null,
+                lookupBy: params.origClientOrderId ? 'origClientOrderId' : 'orderId',
+                code: error?.response?.data?.code || error?.code || null,
+                message: error?.response?.data?.msg || error?.message || String(error),
+            });
+        }
+    }
+
+    return null;
 }
 
 const loadGridReservationOwnedExitExecutionsFromExchange = async ({
@@ -3894,7 +3967,7 @@ const loadGridReservationOwnedExitExecutionsFromExchange = async ({
 
     const recoveries = [];
     for(const reservation of normalizedReservations){
-        const candidates = (exchangeOrders || [])
+        let candidates = (exchangeOrders || [])
             .filter((order) => {
                 const clientOrderId = String(order?.clientOrderId || '').trim();
                 const status = String(order?.status || '').trim().toUpperCase();
@@ -3927,6 +4000,31 @@ const loadGridReservationOwnedExitExecutionsFromExchange = async ({
             .sort((left, right) =>
                 Number(right?.updateTime || right?.time || 0) - Number(left?.updateTime || left?.time || 0)
             );
+
+        if(candidates.length === 0){
+            const directOrder = await loadGridExitOrderByReservation({
+                uid,
+                symbol,
+                leg: normalizedLeg,
+                closeSide,
+                reservation,
+            });
+            if(directOrder){
+                candidates = [directOrder];
+                logOrderRuntimeTrace('GRID_RESERVATION_EXIT_RECOVERY_DIRECT_ORDER_FOUND', {
+                    uid,
+                    pid,
+                    symbol,
+                    positionSide: normalizedLeg,
+                    reservationId: Number(reservation?.id || 0) || null,
+                    clientOrderId: reservation.clientOrderId || null,
+                    actualOrderId: reservation.actualOrderId || null,
+                    sourceOrderId: reservation.sourceOrderId || null,
+                    orderId: directOrder?.orderId || null,
+                    status: directOrder?.status || null,
+                });
+            }
+        }
 
         if(candidates.length === 0){
             recoveries.push({
