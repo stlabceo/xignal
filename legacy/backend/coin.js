@@ -3825,8 +3825,21 @@ const loadRecentGridCloseExecutionFromExchange = async ({
     };
 }
 
+const GRID_EXIT_RECOVERY_ACTIVE_RESERVATION_STATUSES = new Set([
+    'ACTIVE',
+    'PARTIAL',
+    'CANCEL_REQUESTED',
+    'CANCEL_PENDING',
+    'UNKNOWN_CANCEL_STATE',
+]);
+
 const isGridExitReservationRecoveryCandidate = (reservation = null) => {
     if(!reservation){
+        return false;
+    }
+
+    const status = String(reservation?.status || '').trim().toUpperCase();
+    if(!GRID_EXIT_RECOVERY_ACTIVE_RESERVATION_STATUSES.has(status)){
         return false;
     }
 

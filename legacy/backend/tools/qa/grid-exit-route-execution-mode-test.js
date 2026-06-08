@@ -397,6 +397,14 @@ const makeHarness = ({
     assert.ok(source.includes("qtyMatchesReservation"));
   });
 
+  check("filled terminal reservations are not exit recovery candidates", () => {
+    const source = fs.readFileSync(path.join(__dirname, "../../coin.js"), "utf8");
+    assert.ok(source.includes("GRID_EXIT_RECOVERY_ACTIVE_RESERVATION_STATUSES"));
+    assert.ok(source.includes("if(!GRID_EXIT_RECOVERY_ACTIVE_RESERVATION_STATUSES.has(status))"));
+    assert.ok(source.includes("return false;"));
+    assert.strictEqual(source.includes("GRID_EXIT_RECOVERY_ACTIVE_RESERVATION_STATUSES.add('FILLED')"), false);
+  });
+
   console.log(JSON.stringify({ ok: true, tests, dbMutation: 0, binanceWrite: 0 }, null, 2));
   process.exit(0);
 })().catch((error) => {
