@@ -1205,8 +1205,45 @@ const convergeLiveGridLegToExchangeFlat = async (
   const localProtectionClientIds = protectionBefore.activeReservations
     .map((item) => String(item.clientOrderId || "").trim())
     .filter(Boolean);
+  const localRowProjectionOpen =
+    toNumber(current?.[`${prefix}Qty`]) > 0 ||
+    current?.[`${prefix}LegStatus`] === "OPEN" ||
+    Boolean(current?.[`${prefix}EntryOrderId`]);
 
   if (!recoveredExecution && snapshotBeforeState.qty <= 0 && localProtectionClientIds.length === 0) {
+    if (allowLocalFlatten && localRowProjectionOpen) {
+      const synced = await syncLiveGridRowFromPidState(current, {
+        regimeStatus: "ENDED",
+        regimeEndReason: current.regimeEndReason || fallbackReason,
+        clearOpenLegOrderRefs: true,
+      });
+      const finalized = await finalizeEndedGridRegimeIfIdle(
+        "LIVE",
+        synced || current,
+        (synced || current)?.regimeEndReason || fallbackReason
+      );
+      await appendGridRuntimeLog(
+        synced || current,
+        logScope,
+        "GRID_ROW_PROJECTION_STALE_FLATTENED",
+        `${message}, leg:${leg}, exchangeQty:${exchangeQty}, snapshotOpenQty:${snapshotBeforeState.qty}, activeProtectionBefore:${protectionBefore.activeReservationCount}, reason:ROW_PROJECTION_ONLY_STALE, finalized:${finalized}`,
+        leg
+      );
+      logGridRuntimeTrace("GRID_ROW_PROJECTION_STALE_FLATTENED", {
+        uid: current.uid,
+        pid: current.id,
+        symbol: current.symbol,
+        positionSide: leg,
+        regimeStatusBefore: current.regimeStatus || null,
+        legStatusBefore: current?.[`${prefix}LegStatus`] || null,
+        rowQtyBefore: toNumber(current?.[`${prefix}Qty`]),
+        snapshotOpenQtyBefore: snapshotBeforeState.qty,
+        exchangePositionQty: exchangeQty,
+        activeProtectionCountBefore: protectionBefore.activeReservationCount,
+        finalized,
+      });
+      return true;
+    }
     return false;
   }
 

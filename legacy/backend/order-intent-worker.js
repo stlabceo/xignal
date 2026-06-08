@@ -283,6 +283,17 @@ const updateGridProtectionProjection = async ({ payload = {}, outcome = {}, stat
   if (!(rowId > 0)) {
     return false;
   }
+  const terminalGuard = await shouldPreserveTerminalGridProjection({
+    payload,
+    projectionType: "GRID_PROTECTION_PROJECTION",
+  });
+  if (terminalGuard.preserve) {
+    return {
+      skipped: true,
+      reason: terminalGuard.reason,
+      current: terminalGuard.current,
+    };
+  }
 
   const leg = String(payload.positionSide || payload.leg || "").toUpperCase();
   const prefix = getLegPrefix(leg);
@@ -349,6 +360,42 @@ const syncProtectionReservationsForIntent = async ({ payload = {}, result = {}, 
   });
 };
 
+const loadLiveGridProjectionRow = async (payload = {}) => {
+  const rowId = Number(payload.gridRowId || payload.regimeId || payload.pid || 0);
+  const uid = Number(payload.uid || 0);
+  if (!(rowId > 0) || !(uid > 0)) {
+    return null;
+  }
+  const [rows] = await db.query(
+    `SELECT id, uid, enabled, regimeStatus, regimeEndReason,
+            longLegStatus, shortLegStatus, longQty, shortQty,
+            longEntryOrderId, shortEntryOrderId, longExitOrderId, shortExitOrderId,
+            longStopOrderId, shortStopOrderId
+       FROM live_grid_strategy_list
+      WHERE id = ?
+        AND uid = ?
+      LIMIT 1`,
+    [rowId, uid]
+  );
+  return rows?.[0] || null;
+};
+
+const shouldPreserveTerminalGridProjection = async ({ payload = {}, projectionType = "GRID_PROJECTION" } = {}) => {
+  const current = await loadLiveGridProjectionRow(payload).catch(() => null);
+  if (!current) {
+    return { preserve: false, current: null };
+  }
+  const regimeStatus = String(current.regimeStatus || "").trim().toUpperCase();
+  if (regimeStatus !== "ENDED") {
+    return { preserve: false, current };
+  }
+  return {
+    preserve: true,
+    current,
+    reason: `${projectionType}_TERMINAL_ROW_PRESERVED`,
+  };
+};
+
 const updateGridReentryProjection = async ({ payload = {}, state, clientOrderId = null, reason = null } = {}) => {
   const rowId = Number(payload.gridRowId || payload.regimeId || payload.pid || 0);
   if (!(rowId > 0)) {
@@ -386,6 +433,17 @@ const updateGridCancelProjection = async ({ payload = {}, state, reason = null }
   const rowId = Number(payload.gridRowId || payload.regimeId || payload.pid || 0);
   if (!(rowId > 0) || !payload.uid) {
     return false;
+  }
+  const terminalGuard = await shouldPreserveTerminalGridProjection({
+    payload,
+    projectionType: "GRID_CANCEL_PROJECTION",
+  });
+  if (terminalGuard.preserve) {
+    return {
+      skipped: true,
+      reason: terminalGuard.reason,
+      current: terminalGuard.current,
+    };
   }
   await db.query(
     `UPDATE live_grid_strategy_list
