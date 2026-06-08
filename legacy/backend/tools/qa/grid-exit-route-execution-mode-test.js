@@ -380,6 +380,23 @@ const makeHarness = ({
     assert.ok(source.includes("Number(applyResult?.appliedQty || 0) <= 0"));
   });
 
+  check("FILLED close evidence can terminalize exact GRID_EXIT_MARKET_CLOSE reservation", () => {
+    const source = fs.readFileSync(path.join(__dirname, "../../coin.js"), "utf8");
+    assert.ok(source.includes("GRID_RESERVATION_EXIT_RECOVERY_RESERVATION_TERMINALIZED_WITH_FILL_EVIDENCE"));
+    assert.ok(source.includes("pidPositionLedger.markReservationFilledFromExchangeEvidence"));
+    assert.ok(source.includes("strategyCategory: 'grid'"));
+    assert.ok(source.includes("positionSide: normalizedLeg"));
+  });
+
+  check("reservation terminal evidence requires exact order/trade/qty match", () => {
+    const source = fs.readFileSync(path.join(__dirname, "../../coin.js"), "utf8");
+    assert.ok(source.includes("orderStatus === 'FILLED'"));
+    assert.ok(source.includes("String(fill.clientOrderId || '').trim() === reservationClientOrderId"));
+    assert.ok(source.includes("String(fill.orderId || '').trim() === String(targetOrderId || '')"));
+    assert.ok(source.includes("String(fill.tradeId || '').trim()"));
+    assert.ok(source.includes("qtyMatchesReservation"));
+  });
+
   console.log(JSON.stringify({ ok: true, tests, dbMutation: 0, binanceWrite: 0 }, null, 2));
   process.exit(0);
 })().catch((error) => {

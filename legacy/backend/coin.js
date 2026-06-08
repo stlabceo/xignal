@@ -5206,6 +5206,7 @@ exports.recoverGridExitFillFromExchange = async ({
     let appliedFillCount = 0;
     let duplicateFillCount = 0;
     let finalizedReservationCount = 0;
+    let evidenceTerminalizedReservationCount = 0;
     let primaryExecution = null;
     const matchedReservationClientOrderIds = new Set();
 
@@ -5374,6 +5375,54 @@ exports.recoverGridExitFillFromExchange = async ({
                     blocked: applyResult?.blocked === true,
                     appliedQty: Number(applyResult?.appliedQty || 0),
                 });
+                const filledOrderQty = Number(execution?.qty || targetOrder?.executedQty || 0);
+                const reservedQty = Number(reservation?.reservedQty || 0);
+                const qtyMatchesReservation = reservedQty > 0
+                    ? Math.abs(filledOrderQty - reservedQty) <= 1e-9
+                    : filledOrderQty > 0;
+                const exactFilledCloseEvidence =
+                    orderStatus === 'FILLED'
+                    && reservationClientOrderId
+                    && String(fill.clientOrderId || '').trim() === reservationClientOrderId
+                    && String(fill.orderId || '').trim() === String(targetOrderId || '')
+                    && String(fill.tradeId || '').trim()
+                    && Number(fill.qty || 0) > 0
+                    && filledOrderQty > 0
+                    && qtyMatchesReservation;
+                if(exactFilledCloseEvidence){
+                    const terminalized = await pidPositionLedger.markReservationFilledFromExchangeEvidence(
+                        reservationClientOrderId,
+                        {
+                            actualOrderId: targetOrderId,
+                            filledQty: filledOrderQty,
+                            status: orderStatus,
+                            note: `exchange-filled-after-local-close tradeId:${fill.tradeId}`,
+                        },
+                        {
+                            uid,
+                            pid: row.id,
+                            strategyCategory: 'grid',
+                            positionSide: normalizedLeg,
+                        }
+                    );
+                    if(terminalized?.ok){
+                        evidenceTerminalizedReservationCount += Number(terminalized?.affectedRows || 0);
+                        reservationRecovered = true;
+                        logOrderRuntimeTrace('GRID_RESERVATION_EXIT_RECOVERY_RESERVATION_TERMINALIZED_WITH_FILL_EVIDENCE', {
+                            uid,
+                            pid: row.id,
+                            symbol: row.symbol,
+                            positionSide: normalizedLeg,
+                            reservationId,
+                            clientOrderId: reservationClientOrderId,
+                            orderId: targetOrderId,
+                            tradeId: fill.tradeId || null,
+                            filledQty: filledOrderQty,
+                            reservedQty,
+                            reason: applyResult?.reason || 'APPLY_EXIT_FILL_NOT_APPLIED',
+                        });
+                    }
+                }
                 continue;
             }
             appliedFillCount += 1;
@@ -5440,6 +5489,16 @@ exports.recoverGridExitFillFromExchange = async ({
             includeEntries: false,
             includeExits: true,
         });
+    }else if(evidenceTerminalizedReservationCount > 0){
+        logOrderRuntimeTrace('GRID_RESERVATION_EXIT_RECOVERY_EVIDENCE_TERMINALIZED_NO_SIBLING_CANCEL', {
+            uid,
+            pid: row.id,
+            symbol: row.symbol,
+            positionSide: normalizedLeg,
+            matchedReservationClientOrderIds: Array.from(matchedReservationClientOrderIds),
+            evidenceTerminalizedReservationCount,
+            reason: 'filled-close-evidence-terminalized-reservation-without-new-ledger-apply',
+        });
     }else if(duplicateFillCount > 0){
         logOrderRuntimeTrace('GRID_RESERVATION_EXIT_RECOVERY_DUPLICATE_NO_SIBLING_CANCEL', {
             uid,
@@ -5473,6 +5532,7 @@ exports.recoverGridExitFillFromExchange = async ({
         recoveredReservationClientOrderIds: Array.from(matchedReservationClientOrderIds),
         appliedFillCount,
         duplicateFillCount,
+        evidenceTerminalizedReservationCount,
     };
 }
 
