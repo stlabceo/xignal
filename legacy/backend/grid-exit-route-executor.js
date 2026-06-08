@@ -332,6 +332,8 @@ const executeGridExitForRoute = async ({
     };
   }
 
+  const preCancelLocal = await loadPidLocalExitState({ db, uid: row.uid, pid: row.id, symbol: row.symbol });
+
   await db.query(
     `UPDATE live_grid_strategy_list
         SET regimeStatus = 'CANCEL_INTENT_PENDING',
@@ -364,7 +366,9 @@ const executeGridExitForRoute = async ({
   for (const leg of ["LONG", "SHORT"]) {
     const localQty = Math.max(
       toNumber(afterCancelLocal.snapshotOpenQtyByLeg[leg]),
-      toNumber(afterCancelLocal.ownerOpenQtyByLeg[leg])
+      toNumber(afterCancelLocal.ownerOpenQtyByLeg[leg]),
+      toNumber(preCancelLocal.snapshotOpenQtyByLeg[leg]),
+      toNumber(preCancelLocal.ownerOpenQtyByLeg[leg])
     );
     const exchangeQty = await readExchangeLegQty({ coin, uid: row.uid, symbol: row.symbol, leg });
     const closeQty = Math.min(Math.max(localQty, 0), Math.max(exchangeQty, 0));
@@ -447,6 +451,12 @@ const executeGridExitForRoute = async ({
     },
     cancelCount,
     closeResults,
+    closeDecisionLocal: {
+      preCancelOwnerOpenQtyByLeg: preCancelLocal.ownerOpenQtyByLeg,
+      preCancelSnapshotOpenQtyByLeg: preCancelLocal.snapshotOpenQtyByLeg,
+      afterCancelOwnerOpenQtyByLeg: afterCancelLocal.ownerOpenQtyByLeg,
+      afterCancelSnapshotOpenQtyByLeg: afterCancelLocal.snapshotOpenQtyByLeg,
+    },
     truthSync: synced,
     finalLocal: {
       ownerNonzeroCount: finalLocal.ownerNonzeroCount,
