@@ -4309,6 +4309,7 @@ const loadRecentGridEntryExecutionFromExchange = async ({
     symbol,
     leg,
     candidateClientOrderIds = [],
+    requireCandidateClientOrderId = false,
 }) => {
     if(!uid || !pid || !symbol || !leg || !(await ensureBinanceApiClient(uid))){
         return null;
@@ -4326,6 +4327,7 @@ const loadRecentGridEntryExecutionFromExchange = async ({
             .map((item) => String(item || '').trim())
             .filter(Boolean)
     );
+    const requireExactCandidate = requireCandidateClientOrderId === true && clientOrderIdSet.size > 0;
     const pidNeedle = `_${uid}_${pid}_`;
 
     let exchangeOrders = [];
@@ -4358,6 +4360,10 @@ const loadRecentGridEntryExecutionFromExchange = async ({
 
             if(!/^(GENTRY)_/.test(clientOrderId)){
                 return false;
+            }
+
+            if(requireExactCandidate){
+                return clientOrderIdSet.has(clientOrderId);
             }
 
             return clientOrderIdSet.has(clientOrderId) || clientOrderId.includes(pidNeedle);
@@ -5359,6 +5365,8 @@ exports.recoverGridEntryFillFromExchange = async ({
     row,
     leg,
     issue = null,
+    candidateClientOrderIds = [],
+    requireCandidateClientOrderId = false,
 }) => {
     if(!uid || !row?.id || !row?.symbol || !leg){
         return null;
@@ -5375,7 +5383,8 @@ exports.recoverGridEntryFillFromExchange = async ({
         pid: row.id,
         symbol: row.symbol,
         leg: normalizedLeg,
-        candidateClientOrderIds: [row?.[`${prefix}EntryOrderId`] || null],
+        candidateClientOrderIds: [row?.[`${prefix}EntryOrderId`] || null].concat(candidateClientOrderIds || []),
+        requireCandidateClientOrderId,
     });
     if(!execution){
         return null;

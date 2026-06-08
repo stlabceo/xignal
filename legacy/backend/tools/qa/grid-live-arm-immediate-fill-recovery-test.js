@@ -6,6 +6,7 @@ const path = require("path");
 
 const repoRoot = path.resolve(__dirname, "../../..");
 const gridEngineSource = fs.readFileSync(path.resolve(repoRoot, "backend/grid-engine.js"), "utf8");
+const coinSource = fs.readFileSync(path.resolve(repoRoot, "backend/coin.js"), "utf8");
 
 let tests = 0;
 const check = (label, fn) => {
@@ -27,6 +28,14 @@ check("immediate fill recovery reads exchange order status after ACK", () => {
 check("immediate fill recovery uses canonical exchange fill recovery", () => {
   assert(gridEngineSource.includes("coin.recoverGridEntryFillFromExchange"));
   assert(gridEngineSource.includes("GRID_LIVE_ARM_IMMEDIATE_FILL_RECOVERY"));
+});
+
+check("immediate fill recovery requires exact current clientOrderId", () => {
+  assert(gridEngineSource.includes("candidateClientOrderIds: [placement.clientOrderId]"));
+  assert(gridEngineSource.includes("requireCandidateClientOrderId: true"));
+  assert(coinSource.includes("requireCandidateClientOrderId = false"));
+  assert(coinSource.includes("if(requireExactCandidate)"));
+  assert(coinSource.includes("return clientOrderIdSet.has(clientOrderId);"));
 });
 
 check("immediate fill recovery restores ledger owner snapshot and protection path", () => {

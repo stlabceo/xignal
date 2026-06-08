@@ -3333,6 +3333,8 @@ const recoverImmediateLiveArmFillsAfterPairAck = async (row, placements = {}) =>
       uid: row.uid,
       row: rowWithEntry,
       leg,
+      candidateClientOrderIds: [placement.clientOrderId],
+      requireCandidateClientOrderId: true,
       issue: {
         issues: [
           "GRID_LIVE_ARM_IMMEDIATE_FILL_RECOVERY",
