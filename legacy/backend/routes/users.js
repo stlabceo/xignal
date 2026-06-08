@@ -17,6 +17,7 @@ const binanceWriteGuard = require("../binance-write-guard");
 const credentialSecrets = require("../credential-secrets");
 const signalStrategyIdentity = require("../signal-strategy-identity");
 const orderIntentQueue = require("../order-intent-queue");
+const gridExitRouteExecutor = require("../grid-exit-route-executor");
 const {
   insertWebhookEventLog,
   updateWebhookEventLogOutcome,
@@ -1477,30 +1478,64 @@ router.post('/api/grid/hook', async function(req, res){
           mode: 'DRY_RUN',
         }))
         : [];
+      const routeExecution = !isLegacyCandleClose
+        ? await gridExitRouteExecutor.executeGridExitForRoute({
+            payload,
+            previewResult,
+            featureFlags: gridExitFeatureFlags,
+            env: process.env,
+          })
+        : {
+            mode: 'AUDIT_ONLY',
+            requested: 0,
+            processed: 0,
+            ignoredActive: previewResult.ignoredActive,
+            resultCode: auditResultCode,
+          };
+      const routeExecutionEnabled = routeExecution.mode === 'ACTUAL';
+      const routeExecutionSkipped =
+        routeExecutionEnabled && routeExecution.ignoredActive === 0
+          ? previewResult.ignoredConflict + previewResult.ignoredSignal
+          : previewResult.ignoredActive + previewResult.ignoredConflict + previewResult.ignoredSignal;
       const responseBody = {
         ok: true,
         exitPolicy: payload.explicitGridExit ? 'GRID_EXIT_ALERT' : 'CANDLE_CLOSE_BREAKOUT',
-        mode: 'AUDIT_ONLY',
+        mode: routeExecution.mode || 'AUDIT_ONLY',
         featureFlags: gridExitFeatureFlags,
         strategySignal: payload.strategySignal,
         symbol: payload.symbol,
         bunbong: payload.bunbong,
         gridRegimeKey: payload.gridRegimeKey || null,
         matched: previewResult.matched,
-        requested: 0,
-        processed: 0,
-        skipped: previewResult.ignoredActive + previewResult.ignoredConflict + previewResult.ignoredSignal,
-        ignoredActive: previewResult.ignoredActive,
+        requested: Number(routeExecution.requested || 0),
+        processed: Number(routeExecution.processed || 0),
+        skipped: routeExecutionSkipped,
+        ignoredActive: Number(routeExecution.ignoredActive ?? previewResult.ignoredActive),
         ignoredConflict: previewResult.ignoredConflict,
         ignoredSignal: previewResult.ignoredSignal,
         live: previewResult.live,
         test: previewResult.test,
+        routeExecution: {
+          mode: routeExecution.mode || 'AUDIT_ONLY',
+          resultCode: routeExecution.resultCode || auditResultCode,
+          requested: Number(routeExecution.requested || 0),
+          processed: Number(routeExecution.processed || 0),
+          cancelCount: Number(routeExecution.cancelCount || 0),
+          closeCount: Array.isArray(routeExecution.closeResults) ? routeExecution.closeResults.length : 0,
+          finalConverged: routeExecution.finalConverged === true,
+          terminalized: routeExecution.terminalize?.terminalized === true,
+          finalLocal: routeExecution.finalLocal || null,
+          finalExchange: routeExecution.finalExchange || null,
+          blockers: routeExecution.executionGate?.blockers || routeExecution.targetPlan?.blockers || [],
+        },
         parentIntent: {
           ...parentIntentSummary,
           enqueueEnabled: false,
-          reason: gridExitFeatureFlags.GRID_EXIT_ORCHESTRATOR_ENABLED === '1'
-            ? 'GRID_EXIT_PARENT_INTENT_DRY_RUN_ONLY'
-            : 'GRID_EXIT_ORCHESTRATOR_DISABLED',
+          reason: routeExecutionEnabled
+            ? 'GRID_EXIT_ROUTE_EXECUTION_DIRECT_EXACT_SCOPE'
+            : gridExitFeatureFlags.GRID_EXIT_ORCHESTRATOR_ENABLED === '1'
+              ? 'GRID_EXIT_PARENT_INTENT_DRY_RUN_ONLY'
+              : 'GRID_EXIT_ORCHESTRATOR_DISABLED',
         },
         childCancelPlan: {
           mode: childPlanMode,
@@ -1547,12 +1582,14 @@ router.post('/api/grid/hook', async function(req, res){
         },
       };
       const outcome = {
-        status: 'IGNORED',
-        resultCode: auditResultCode,
+        status: routeExecutionEnabled && Number(routeExecution.processed || 0) > 0 ? 'PROCESSED' : 'IGNORED',
+        resultCode: routeExecution.resultCode || auditResultCode,
         matchedCount: previewResult.matched,
-        processedCount: 0,
+        processedCount: Number(routeExecution.processed || 0),
         ignoredCount: responseBody.skipped,
-        note: 'phase1-grid-exit-contract-audit-only',
+        note: routeExecutionEnabled
+          ? 'grid-exit-route-execution-exact-scope'
+          : 'phase1-grid-exit-contract-audit-only',
       };
       const webhookEventId = await insertWebhookEventLog({
         ...baseWebhookLog,

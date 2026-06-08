@@ -6022,6 +6022,9 @@ exports.closeGridLegMarketOrder = async ({
     qty = 0,
     actualDispatchGate = null,
     gridRegimeKey = null,
+    closeReason = 'GRID_MANUAL_CLOSE',
+    reservationKind = 'GRID_MANUAL_OFF',
+    closeNote = 'grid-manual-close-dispatch',
 } = {}) => {
     if(!symbol || !leg){
         return null;
@@ -6114,6 +6117,9 @@ exports.closeGridLegMarketOrder = async ({
     }
 
     const side = leg === 'LONG' ? 'SELL' : 'BUY';
+    const normalizedCloseReason = String(closeReason || 'GRID_MANUAL_CLOSE').trim().toUpperCase();
+    const normalizedReservationKind = String(reservationKind || 'GRID_MANUAL_OFF').trim().toUpperCase();
+    const normalizedCloseNote = String(closeNote || 'grid-manual-close-dispatch').trim();
     const clientOrderId = `GMANUAL_${leg === 'LONG' ? 'L' : 'S'}_${uid}_${pid}_${Date.now().toString().slice(-8)}`;
     const ownershipCloseReservation = await positionOwnership.reserveCloseQty({
         uid,
@@ -6124,7 +6130,7 @@ exports.closeGridLegMarketOrder = async ({
         qty: normalizedQty,
         sourceClientOrderId: clientOrderId,
         ownerState: 'CLOSE_RESERVED',
-        note: 'grid-manual-close-dispatch',
+        note: normalizedCloseNote,
     });
     if(!ownershipCloseReservation.ok){
         logOrderRuntimeTrace('GRID_MANUAL_CLOSE_OWNERSHIP_RESERVATION_BLOCKED', {
@@ -6155,6 +6161,8 @@ exports.closeGridLegMarketOrder = async ({
         note: 'about to submit grid market reduce-only close',
         payload: {
             callsite: 'coin.closeGridLegMarketOrder',
+            closeReason: normalizedCloseReason,
+            reservationKind: normalizedReservationKind,
             requestedQty,
             positionQty,
             finalCloseQty: closeQty,
@@ -6210,6 +6218,8 @@ exports.closeGridLegMarketOrder = async ({
         note: 'submitted grid market reduce-only close',
         payload: {
             callsite: 'coin.closeGridLegMarketOrder',
+            closeReason: normalizedCloseReason,
+            reservationKind: normalizedReservationKind,
             order,
         },
     });
@@ -6224,9 +6234,9 @@ exports.closeGridLegMarketOrder = async ({
             {
                 clientOrderId,
                 sourceOrderId: order?.orderId || null,
-                reservationKind: 'GRID_MANUAL_OFF',
+                reservationKind: normalizedReservationKind,
                 reservedQty: normalizedQty,
-                note: `grid-manual-close pid:${pid}, leg:${leg}`,
+                note: `${normalizedCloseReason} pid:${pid}, leg:${leg}`,
             },
         ],
     });

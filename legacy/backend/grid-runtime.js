@@ -282,6 +282,7 @@ const findForbiddenGridWebhookTargetIdentityField = (payload = {}) => {
 const normalizeGridExitAction = (payload = {}) =>
   String(
     payload?.gridAction ||
+      payload?.exitAction ||
       payload?.action ||
       payload?.eventType ||
       payload?.alertType ||
@@ -805,6 +806,7 @@ const normalizeGridWebhookPayload = (payload = {}) => {
 
 const normalizeGridExitWebhookPayload = (payload = {}) => {
   const base = normalizeGridWebhookPayload(payload);
+  const exitAction = normalizeGridExitAction(payload);
   const candle = payload?.candle && typeof payload.candle === "object" ? payload.candle : {};
   const candleClosePrice = parseGridPrice(
     payload?.candleClosePrice ??
@@ -824,8 +826,8 @@ const normalizeGridExitWebhookPayload = (payload = {}) => {
 
   return {
     ...base,
-    exitAction: normalizeGridExitAction(payload),
-    explicitGridExit: isGridExitWebhookPayload(payload),
+    exitAction,
+    explicitGridExit: payload?.explicitGridExit === true || isGridExitWebhookPayload(payload),
     candleClosePrice,
     candleClosed,
     candleCloseTime:
