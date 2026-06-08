@@ -1,3 +1,4 @@
+const db = require("./database/connect/config");
 const pidPositionLedger = require("./pid-position-ledger");
 
 const SIGNAL_RUNTIME_LABELS = {
@@ -23,6 +24,47 @@ const toNumber = (value) => {
   return Number.isFinite(numeric) ? numeric : 0;
 };
 
+const GRID_TERMINAL_SAFE_CLASSIFICATION = "DISABLED_NO_EXPOSURE";
+const GRID_TERMINAL_SAFE_EXCHANGE_UNKNOWN = "EXCHANGE_EVIDENCE_NOT_PROVIDED";
+
+const GRID_TERMINAL_LEG_STATES = new Set([
+  "",
+  "IDLE",
+  "CLOSED",
+  "ENDED",
+  "CANCELED",
+  "CANCELLED",
+  "CANCEL_VERIFIED_GONE",
+  "EXPIRED",
+  "REJECTED",
+]);
+
+const GRID_ORDER_REF_FIELDS = [
+  "longEntryOrderId",
+  "shortEntryOrderId",
+  "longExitOrderId",
+  "shortExitOrderId",
+  "longStopOrderId",
+  "shortStopOrderId",
+  "longEntryClientOrderId",
+  "shortEntryClientOrderId",
+  "longExitClientOrderId",
+  "shortExitClientOrderId",
+  "longStopClientOrderId",
+  "shortStopClientOrderId",
+];
+
+const GRID_ACTIVE_RESERVATION_STATES = new Set([
+  "ACTIVE",
+  "PARTIAL",
+  "CANCEL_REQUESTED",
+  "CANCEL_PENDING",
+  "UNKNOWN_CANCEL_STATE",
+  "PENDING",
+  "RUNNING",
+  "RETRY",
+]);
+
 const normalizeSignalType = (value) =>
   String(value || "")
     .trim()
@@ -33,6 +75,106 @@ const hasOpenSnapshotRows = (rows = []) =>
 
 const hasActiveReservations = (rows = []) =>
   rows.some((row) => ["ACTIVE", "PARTIAL"].includes(normalizeStatus(row?.status)));
+
+const hasOrderRefValue = (value) => {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  const raw = String(value).trim();
+  return Boolean(raw && raw !== "0");
+};
+
+const getGridExchangeOrderCount = (exchangeEvidence = {}, field) => {
+  const direct = exchangeEvidence?.[`${field}Count`];
+  if (direct !== undefined && direct !== null) {
+    return toNumber(direct);
+  }
+  const rows = exchangeEvidence?.[field];
+  return Array.isArray(rows) ? rows.length : 0;
+};
+
+const getGridExchangeOpenQty = (exchangeEvidence = {}) => {
+  const directLong = exchangeEvidence.longPositionAmt ?? exchangeEvidence.longQty;
+  const directShort = exchangeEvidence.shortPositionAmt ?? exchangeEvidence.shortQty;
+  if (directLong !== undefined || directShort !== undefined) {
+    return Math.abs(toNumber(directLong)) + Math.abs(toNumber(directShort));
+  }
+  const positions = exchangeEvidence.positions || exchangeEvidence.positionRisk || [];
+  return (Array.isArray(positions) ? positions : []).reduce(
+    (sum, row) => sum + Math.abs(toNumber(row?.positionAmt ?? row?.openQty ?? row?.qty)),
+    0
+  );
+};
+
+const hasProvidedExchangeEvidence = (exchangeEvidence) =>
+  exchangeEvidence && typeof exchangeEvidence === "object";
+
+const classifyGridTerminalSafeProjection = (item = {}, options = {}) => {
+  const snapshots = options.snapshots || item.pidSnapshots || [];
+  const reservations = options.reservations || item.pidReservations || [];
+  const ownerRows = options.ownerRows || item.pidOwners || item.ownerRows || [];
+  const exchangeEvidence = options.exchangeEvidence || item.exchangeEvidence || null;
+  const requireExchange = options.requireExchange === true;
+  const blockers = [];
+
+  if (getItemEnabled(item)) {
+    blockers.push("ENABLED");
+  }
+
+  const longLegStatus = normalizeStatus(item.longLegStatus);
+  const shortLegStatus = normalizeStatus(item.shortLegStatus);
+  if (!GRID_TERMINAL_LEG_STATES.has(longLegStatus)) {
+    blockers.push("LONG_LEG_NONTERMINAL");
+  }
+  if (!GRID_TERMINAL_LEG_STATES.has(shortLegStatus)) {
+    blockers.push("SHORT_LEG_NONTERMINAL");
+  }
+
+  if (toNumber(item.longQty) !== 0) {
+    blockers.push("LONG_QTY_NONZERO");
+  }
+  if (toNumber(item.shortQty) !== 0) {
+    blockers.push("SHORT_QTY_NONZERO");
+  }
+
+  if (GRID_ORDER_REF_FIELDS.some((field) => hasOrderRefValue(item?.[field]))) {
+    blockers.push("ORDER_REF_PRESENT");
+  }
+
+  if ((ownerRows || []).some((row) => toNumber(row?.ownedQty) !== 0 || toNumber(row?.reservedCloseQty) !== 0)) {
+    blockers.push("OWNER_NONZERO");
+  }
+
+  if ((snapshots || []).some((row) => normalizeStatus(row?.status) === "OPEN" || toNumber(row?.openQty) !== 0)) {
+    blockers.push("SNAPSHOT_OPEN");
+  }
+
+  if ((reservations || []).some((row) => GRID_ACTIVE_RESERVATION_STATES.has(normalizeStatus(row?.status)))) {
+    blockers.push("ACTIVE_RESERVATION");
+  }
+
+  if (hasProvidedExchangeEvidence(exchangeEvidence)) {
+    if (getGridExchangeOpenQty(exchangeEvidence) !== 0) {
+      blockers.push("EXCHANGE_POSITION_OPEN");
+    }
+    if (getGridExchangeOrderCount(exchangeEvidence, "openOrders") !== 0) {
+      blockers.push("OPEN_ORDERS_PRESENT");
+    }
+    if (getGridExchangeOrderCount(exchangeEvidence, "openAlgoOrders") !== 0) {
+      blockers.push("OPEN_ALGO_ORDERS_PRESENT");
+    }
+  } else if (requireExchange) {
+    blockers.push(GRID_TERMINAL_SAFE_EXCHANGE_UNKNOWN);
+  }
+
+  const terminalSafe = blockers.length === 0;
+  return {
+    terminalSafe,
+    classification: terminalSafe ? GRID_TERMINAL_SAFE_CLASSIFICATION : null,
+    blockers,
+    exchangeVerified: hasProvidedExchangeEvidence(exchangeEvidence),
+  };
+};
 
 const sumSnapshotField = (rows = [], field) =>
   (rows || []).reduce((sum, row) => sum + toNumber(row?.[field]), 0);
@@ -93,6 +235,8 @@ const toPidIndexMap = (rows = []) => {
   });
   return map;
 };
+
+const getItemPid = (item = {}) => Number(item?.id || item?.pid || item?.playId || 0);
 
 const getItemEnabled = (item = {}) => {
   if (typeof item.enabled === "boolean") {
@@ -293,6 +437,7 @@ const decorateGridItemSync = (item = {}, options = {}) => {
   const regimeStatus = normalizeStatus(item?.regimeStatus);
   const gridProtectionCritical = GRID_CRITICAL_REGIME_STATES.has(regimeStatus);
   const snapshots = options.snapshots || item.pidSnapshots || [];
+  const terminalSafeProjection = classifyGridTerminalSafeProjection(item, options);
   const longOpen = snapshots.some(
     (row) => normalizeStatus(row?.positionSide) === "LONG" && toNumber(row?.openQty) > 0
   );
@@ -328,8 +473,20 @@ const decorateGridItemSync = (item = {}, options = {}) => {
     legacyRegimeStatus: item.regimeStatus || null,
     gridProtectionState: gridProtectionCritical ? regimeStatus : null,
     gridProtectionCritical,
+    terminalSafeDisplay: terminalSafeProjection.terminalSafe,
+    terminalSafeClassification: terminalSafeProjection.classification,
+    terminalSafeBlockers: terminalSafeProjection.blockers,
+    terminalSafeExchangeVerified: terminalSafeProjection.exchangeVerified,
+    displayRegimeStatus: terminalSafeProjection.terminalSafe
+      ? terminalSafeProjection.classification
+      : item.regimeStatus || item.status || null,
+    status: terminalSafeProjection.terminalSafe
+      ? terminalSafeProjection.classification
+      : item.status,
     userOverallStatusLabel: deriveGridUserStatusLabel({ enabled, runtimeState, longOpen, shortOpen }),
-    displayStatus: deriveGridUserStatusLabel({ enabled, runtimeState, longOpen, shortOpen }),
+    displayStatus: terminalSafeProjection.terminalSafe
+      ? terminalSafeProjection.classification
+      : deriveGridUserStatusLabel({ enabled, runtimeState, longOpen, shortOpen }),
   };
 };
 
@@ -339,8 +496,8 @@ const decorateSignalCollectionSync = (items = [], context = {}) => {
 
   return (items || []).map((item) =>
     decorateSignalItemSync(item, {
-      snapshots: snapshotMap.get(Number(item?.id || 0)) || [],
-      reservations: reservationMap.get(Number(item?.id || 0)) || [],
+      snapshots: snapshotMap.get(getItemPid(item)) || [],
+      reservations: reservationMap.get(getItemPid(item)) || [],
     })
   );
 };
@@ -348,35 +505,59 @@ const decorateSignalCollectionSync = (items = [], context = {}) => {
 const decorateGridCollectionSync = (items = [], context = {}) => {
   const snapshotMap = context.snapshotMap || new Map();
   const reservationMap = context.reservationMap || new Map();
+  const ownerMap = context.ownerMap || new Map();
 
   return (items || []).map((item) =>
     decorateGridItemSync(item, {
-      snapshots: snapshotMap.get(Number(item?.id || 0)) || [],
-      reservations: reservationMap.get(Number(item?.id || 0)) || [],
+      snapshots: snapshotMap.get(getItemPid(item)) || [],
+      reservations: reservationMap.get(getItemPid(item)) || [],
+      ownerRows: ownerMap.get(getItemPid(item)) || [],
     })
   );
 };
 
+const loadGridOwnerRowsByPids = async ({ uid, pids = [] } = {}) => {
+  if (!uid || !Array.isArray(pids) || pids.length === 0) {
+    return [];
+  }
+  const placeholders = pids.map(() => "?").join(",");
+  const [rows] = await db.query(
+    `SELECT ownerPid AS pid, positionSide, ownerState, status, ownedQty, reservedCloseQty
+       FROM live_position_bucket_owner
+      WHERE uid = ?
+        AND ownerStrategyCategory = 'grid'
+        AND ownerPid IN (${placeholders})`,
+    [uid, ...pids]
+  );
+  return rows || [];
+};
+
 const loadStrategyContext = async ({ uid, strategyCategory, items = [] } = {}) => {
   const pids = (items || [])
-    .map((item) => Number(item?.id || 0))
+    .map((item) => getItemPid(item))
     .filter((pid) => pid > 0);
 
   if (!uid || !strategyCategory || pids.length === 0) {
     return {
       snapshotMap: new Map(),
       reservationMap: new Map(),
+      ownerMap: new Map(),
     };
   }
 
-  const [snapshotRows, reservationRows] = await Promise.all([
+  const normalizedStrategyCategory = String(strategyCategory || "").trim().toLowerCase();
+  const [snapshotRows, reservationRows, ownerRows] = await Promise.all([
     pidPositionLedger.loadSnapshotsByPids({ uid, strategyCategory, pids }),
     pidPositionLedger.loadActiveReservationsByPids({ uid, strategyCategory, pids }),
+    normalizedStrategyCategory === "grid"
+      ? loadGridOwnerRowsByPids({ uid, pids })
+      : Promise.resolve([]),
   ]);
 
   return {
     snapshotMap: toPidIndexMap(snapshotRows),
     reservationMap: toPidIndexMap(reservationRows),
+    ownerMap: toPidIndexMap(ownerRows),
   };
 };
 
@@ -412,7 +593,9 @@ module.exports = {
   CONTROL_STATE_LABELS,
   SIGNAL_RUNTIME_LABELS,
   GRID_RUNTIME_LABELS,
+  GRID_TERMINAL_SAFE_CLASSIFICATION,
   getItemEnabled,
+  classifyGridTerminalSafeProjection,
   deriveSignalRuntimeState,
   deriveGridRuntimeState,
   decorateSignalItemSync,
