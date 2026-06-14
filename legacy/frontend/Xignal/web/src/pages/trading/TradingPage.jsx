@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { trading } from '../../services/trading';
 import { useAuthStore } from '../../store/authState';
 import { filterTakeProfitRows, normalizeQbtStats, qbtStatsFixture } from '../../data/takeProfitSearchData';
+import BotSetupModal from './BotSetupModal';
 
 const MODE = {
 	TEST: 'TEST',
@@ -509,6 +510,7 @@ const TradingPage = () => {
 	const [selectedBot, setSelectedBot] = useState(null);
 	const [trackModalOpen, setTrackModalOpen] = useState(false);
 	const [actionMessage, setActionMessage] = useState('');
+	const [isBotSetupOpen, setIsBotSetupOpen] = useState(false);
 
 	useEffect(() => {
 		let canceled = false;
@@ -633,10 +635,15 @@ const TradingPage = () => {
 						<h1 className="text-[28px] font-bold leading-tight">대시보드</h1>
 						<p className="mt-2 text-sm text-[#64748B]">기존 캐노니컬/API projection을 사용자 화면에 맞게 간결하게 표시합니다.</p>
 					</div>
-					<div className="flex rounded-full border border-[#E2E8F0] bg-white p-1">
-						{[MODE.TEST, MODE.LIVE].map((item) => (
-							<button key={item} type="button" onClick={() => setMode(item)} className={`h-9 rounded-full px-4 text-sm font-semibold transition ${mode === item ? 'bg-[#2563EB] text-white' : 'text-[#64748B] hover:text-[#0F172A]'}`}>{MODE_LABEL[item]}</button>
-						))}
+					<div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+						<button type="button" onClick={() => setIsBotSetupOpen(true)} className="h-10 rounded-xl bg-[#2563EB] px-4 text-sm font-bold text-white">
+							+ Bot 추가
+						</button>
+						<div className="flex rounded-full border border-[#E2E8F0] bg-white p-1">
+							{[MODE.TEST, MODE.LIVE].map((item) => (
+								<button key={item} type="button" onClick={() => setMode(item)} className={`h-9 rounded-full px-4 text-sm font-semibold transition ${mode === item ? 'bg-[#2563EB] text-white' : 'text-[#64748B] hover:text-[#0F172A]'}`}>{MODE_LABEL[item]}</button>
+							))}
+						</div>
 					</div>
 				</header>
 
@@ -724,6 +731,7 @@ const TradingPage = () => {
 			{kpiModalTab ? <KpiModal activeTab={kpiModalTab} onClose={() => setKpiModalTab(null)} rows={kpiHistoryRows} /> : null}
 			<BotDetailModal bot={selectedBot} trackRows={trackRows} onClose={() => setSelectedBot(null)} />
 			{trackModalOpen ? <TrackRecordModal rows={trackRows} onClose={() => setTrackModalOpen(false)} /> : null}
+			<BotSetupModal isOpen={isBotSetupOpen} onClose={() => setIsBotSetupOpen(false)} source="dashboard" />
 		</div>
 	);
 };
