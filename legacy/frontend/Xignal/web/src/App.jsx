@@ -10,6 +10,7 @@ import ForgotPassword from './pages/authpage/ForgotPassword.jsx';
 import LoginPage from './pages/auth/LoginPage.jsx';
 import RegisterPage from './pages/auth/RegisterPage.jsx';
 import LegalPlaceholderPage from './pages/auth/LegalPlaceholderPage.jsx';
+import VerifyEmailCodePage from './pages/auth/VerifyEmailCodePage.jsx';
 import { useAuthStore } from './store/authState';
 import { auth } from './services/auth';
 import { MessageModalProvider } from './providers/MessageModalProvider.jsx';
@@ -155,6 +156,22 @@ function App() {
 							element={
 								<>
 									<RegisterPage />
+								</>
+							}
+						/>
+						<Route
+							path="/verify-email"
+							element={
+								<>
+									<VerifyEmailCodePage />
+								</>
+							}
+						/>
+						<Route
+							path="/verify-email-code"
+							element={
+								<>
+									<VerifyEmailCodePage />
 								</>
 							}
 						/>

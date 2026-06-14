@@ -63,6 +63,20 @@ router.get('/verify-email', async (req, res) => {
   }
 });
 
+router.post('/verify-email-code', async (req, res) => {
+  try {
+    const result = await authService.verifyEmailCode(req.body || {});
+    return sendResult(res, result);
+  } catch (error) {
+    return sendResult(res, {
+      ok: false,
+      status: 500,
+      code: 'AUTH_EMAIL_CODE_VERIFY_FAILED',
+      messageKo: '이메일 인증번호 확인 중 오류가 발생했습니다.',
+    });
+  }
+});
+
 router.post('/resend-verification', async (req, res) => {
   try {
     const result = await authService.resendVerification(req.body || {});
@@ -73,6 +87,20 @@ router.post('/resend-verification', async (req, res) => {
       status: 500,
       code: 'AUTH_RESEND_FAILED',
       messageKo: '인증 메일 재발송 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+router.post('/resend-verification-code', async (req, res) => {
+  try {
+    const result = await authService.resendVerificationCode(req.body || {});
+    return sendResult(res, result);
+  } catch (error) {
+    return sendResult(res, {
+      ok: false,
+      status: 500,
+      code: 'AUTH_RESEND_CODE_FAILED',
+      messageKo: '인증번호 다시 보내기 중 오류가 발생했습니다.',
     });
   }
 });

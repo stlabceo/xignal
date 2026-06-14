@@ -38,6 +38,12 @@ const LoginPage = () => {
 		const result = await authMvp.login(form);
 		setSubmitting(false);
 		if (!result?.ok) {
+			if (result?.code === 'EMAIL_NOT_VERIFIED') {
+				const email = form.email.trim().toLowerCase();
+				sessionStorage.setItem('pendingEmailVerification', email);
+				navigate(`/verify-email-code?email=${encodeURIComponent(email)}`);
+				return;
+			}
 			setError(result?.messageKo || '이메일 또는 비밀번호를 확인해 주세요.');
 			return;
 		}

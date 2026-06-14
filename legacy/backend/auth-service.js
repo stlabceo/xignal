@@ -11,6 +11,9 @@ const DEFAULT_GOOGLE_CLIENT_ID =
 const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
 const hashSha256 = (value) => crypto.createHash('sha256').update(String(value), 'utf8').digest('hex');
 const makeToken = () => crypto.randomBytes(32).toString('base64url');
+const makeEmailCode = () => String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+const normalizeEmailCode = (value) => String(value || '').trim();
+const hashEmailCode = (userId, code) => hashSha256(`${userId}:${normalizeEmailCode(code)}`);
 
 const publicUser = (row = {}) => ({
   id: String(row.id),
@@ -59,9 +62,17 @@ const getAuthSchemaState = async () => {
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = 'auth_email_verification_tokens'`
   );
+  const [verificationColumns] = await db.query(
+    `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'auth_email_verification_tokens'`
+  );
 
   const requiredColumns = ['email_verified', 'auth_provider', 'google_sub', 'status', 'updated_at'];
   const missingColumns = requiredColumns.filter((column) => !columnMap.has(column));
+  const verificationColumnSet = new Set(verificationColumns.map((row) => row.COLUMN_NAME));
+  const missingVerificationColumns = ['attempt_count'].filter((column) => !verificationColumnSet.has(column));
   const memIdLength = Number(columnMap.get('mem_id')?.CHARACTER_MAXIMUM_LENGTH || 0);
   const emailLength = Number(columnMap.get('email')?.CHARACTER_MAXIMUM_LENGTH || 0);
   const passwordLength = Number(columnMap.get('password')?.CHARACTER_MAXIMUM_LENGTH || 0);
@@ -69,8 +80,9 @@ const getAuthSchemaState = async () => {
   const lengthReady = memIdLength >= 254 && emailLength >= 254 && passwordLength >= 255;
 
   return {
-    ready: missingColumns.length === 0 && hasVerificationTable && lengthReady,
+    ready: missingColumns.length === 0 && hasVerificationTable && missingVerificationColumns.length === 0 && lengthReady,
     missingColumns,
+    missingVerificationColumns,
     hasVerificationTable,
     lengths: {
       memId: memIdLength,
@@ -125,6 +137,27 @@ const createVerificationToken = async (connection, userId) => {
   return rawToken;
 };
 
+const createVerificationCode = async (connection, userId) => {
+  const code = makeEmailCode();
+  const codeHash = hashEmailCode(userId, code);
+
+  await connection.query(
+    `UPDATE auth_email_verification_tokens
+        SET used_at = NOW()
+      WHERE user_id = ?
+        AND used_at IS NULL`,
+    [userId]
+  );
+  await connection.query(
+    `INSERT INTO auth_email_verification_tokens
+       (user_id, token_hash, expires_at, attempt_count)
+     VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 10 MINUTE), 0)`,
+    [userId, codeHash]
+  );
+
+  return code;
+};
+
 const buildVerifyUrl = (token) => {
   const apiBaseUrl = String(process.env.API_BASE_URL || 'http://localhost:3079').replace(/\/+$/, '');
   return `${apiBaseUrl}/api/auth/verify-email?token=${encodeURIComponent(token)}`;
@@ -132,6 +165,10 @@ const buildVerifyUrl = (token) => {
 
 const exposeDevVerificationUrl = () =>
   process.env.AUTH_DEV_EXPOSE_VERIFICATION_LINK === '1' &&
+  !['production', 'prod'].includes(String(process.env.NODE_ENV || '').toLowerCase());
+
+const exposeDevEmailCode = () =>
+  process.env.AUTH_DEV_EXPOSE_EMAIL_CODE === '1' &&
   !['production', 'prod'].includes(String(process.env.NODE_ENV || '').toLowerCase());
 
 const sendVerificationEmail = async ({ email, token }) => {
@@ -172,6 +209,55 @@ const sendVerificationEmail = async ({ email, token }) => {
   return { sent: true, skipped: false, reason: null, verifyUrl };
 };
 
+const sendVerificationCodeEmail = async ({ email, code }) => {
+  if (String(process.env.MAIL_PROVIDER || '').toLowerCase() !== 'resend') {
+    return { sent: false, skipped: true, reason: 'MAIL_PROVIDER_NOT_RESEND' };
+  }
+
+  if (!process.env.RESEND_API_KEY) {
+    return { sent: false, skipped: true, reason: 'RESEND_API_KEY_MISSING' };
+  }
+
+  const from = process.env.MAIL_FROM || 'no-reply@quantu.co.kr';
+  const html = [
+    '<h1>QUANTU 이메일 인증</h1>',
+    '<p>아래 인증번호를 입력해 이메일 인증을 완료하세요.</p>',
+    `<p style="font-size:28px;font-weight:700;letter-spacing:6px;">${code}</p>`,
+    '<p>이 인증번호는 10분 후 만료됩니다.</p>',
+    '<p>본인이 요청하지 않았다면 이 메일을 무시하세요.</p>',
+  ].join('');
+
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from,
+      to: email,
+      subject: 'QUANTU 이메일 인증번호',
+      html,
+      text: [
+        'QUANTU 이메일 인증',
+        '',
+        '아래 인증번호를 입력해 이메일 인증을 완료하세요.',
+        '',
+        `인증번호: ${code}`,
+        '',
+        '이 인증번호는 10분 후 만료됩니다.',
+        '본인이 요청하지 않았다면 이 메일을 무시하세요.',
+      ].join('\n'),
+    }),
+  });
+
+  if (!response.ok) {
+    return { sent: false, skipped: false, reason: `RESEND_HTTP_${response.status}` };
+  }
+
+  return { sent: true, skipped: false, reason: null };
+};
+
 const registerLocalUser = async (input = {}) => {
   const validation = validateEmailPasswordInput(input);
   if (!validation.ok) return validation;
@@ -205,12 +291,12 @@ const registerLocalUser = async (input = {}) => {
       [validation.email, validation.email, '00000000000', passwordHash, validation.email]
     );
     const userId = result.insertId;
-    const token = await createVerificationToken(connection, userId);
+    const code = await createVerificationCode(connection, userId);
     await connection.commit();
 
-    const emailResult = await sendVerificationEmail({
+    const emailResult = await sendVerificationCodeEmail({
       email: validation.email,
-      token,
+      code,
     });
 
     const emailPayload = {
@@ -218,12 +304,14 @@ const registerLocalUser = async (input = {}) => {
       skipped: Boolean(emailResult.skipped),
       reason: emailResult.reason,
     };
-    if (exposeDevVerificationUrl()) {
-      emailPayload.devVerificationUrl = emailResult.verifyUrl;
+    if (exposeDevEmailCode()) {
+      emailPayload.devCode = code;
     }
 
     return {
       ok: true,
+      requiresEmailVerification: true,
+      email: validation.email,
       user: {
         id: String(userId),
         email: validation.email,
@@ -282,7 +370,102 @@ const verifyEmailToken = async (token) => {
   }
 };
 
+const verifyEmailCode = async ({ email, code } = {}) => {
+  const schema = await requireAuthSchemaReady();
+  if (!schema.ok) return schema;
+
+  const normalizedEmail = normalizeEmail(email);
+  const normalizedCode = normalizeEmailCode(code);
+
+  if (!EMAIL_RE.test(normalizedEmail) || !/^\d{6}$/.test(normalizedCode)) {
+    return errorResult(400, 'INVALID_CODE', '인증번호를 확인해 주세요.');
+  }
+
+  const member = await findMemberByEmail(normalizedEmail);
+  if (!member) {
+    return errorResult(400, 'INVALID_CODE', '인증번호를 확인해 주세요.');
+  }
+
+  if (Number(member.email_verified || 0) === 1) {
+    return errorResult(409, 'EMAIL_ALREADY_VERIFIED', '이미 인증된 이메일입니다.');
+  }
+
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [rows] = await connection.query(
+      `SELECT id, user_id, token_hash, expires_at, attempt_count
+         FROM auth_email_verification_tokens
+        WHERE user_id = ?
+          AND used_at IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+        FOR UPDATE`,
+      [member.id]
+    );
+
+    if (rows.length === 0) {
+      await connection.rollback();
+      return errorResult(400, 'INVALID_CODE', '인증번호를 확인해 주세요.');
+    }
+
+    const tokenRow = rows[0];
+    if (Number(tokenRow.attempt_count || 0) >= 5) {
+      await connection.rollback();
+      return errorResult(429, 'TOO_MANY_ATTEMPTS', '인증번호 입력 횟수가 초과되었습니다. 다시 보내기를 이용해 주세요.');
+    }
+
+    const [timeRows] = await connection.query(`SELECT NOW() AS nowTime`);
+    const nowTime = new Date(timeRows[0].nowTime).getTime();
+    const expiresAt = new Date(tokenRow.expires_at).getTime();
+    if (expiresAt <= nowTime) {
+      await connection.rollback();
+      return errorResult(400, 'EXPIRED_CODE', '인증번호가 만료되었습니다. 다시 보내기를 이용해 주세요.');
+    }
+
+    const expectedHash = hashEmailCode(member.id, normalizedCode);
+    if (tokenRow.token_hash !== expectedHash) {
+      const nextAttempt = Number(tokenRow.attempt_count || 0) + 1;
+      await connection.query(
+        `UPDATE auth_email_verification_tokens
+            SET attempt_count = ?
+          WHERE id = ?`,
+        [nextAttempt, tokenRow.id]
+      );
+      await connection.commit();
+      if (nextAttempt >= 5) {
+        return errorResult(429, 'TOO_MANY_ATTEMPTS', '인증번호 입력 횟수가 초과되었습니다. 다시 보내기를 이용해 주세요.');
+      }
+      return errorResult(400, 'INVALID_CODE', '인증번호를 확인해 주세요.');
+    }
+
+    await connection.query(`UPDATE auth_email_verification_tokens SET used_at = NOW() WHERE id = ?`, [tokenRow.id]);
+    await connection.query(
+      `UPDATE admin_member
+          SET email_verified = 1,
+              status = 'ACTIVE'
+        WHERE id = ?`,
+      [member.id]
+    );
+    await connection.commit();
+    return {
+      ok: true,
+      email: normalizedEmail,
+      emailVerified: true,
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+};
+
 const resendVerification = async ({ email } = {}) => {
+  return resendVerificationCode({ email });
+};
+
+const resendVerificationCode = async ({ email } = {}) => {
   const schema = await requireAuthSchemaReady();
   if (!schema.ok) return schema;
 
@@ -311,16 +494,16 @@ const resendVerification = async ({ email } = {}) => {
   const connection = await db.getConnection();
   try {
     await connection.beginTransaction();
-    const token = await createVerificationToken(connection, member.id);
+    const code = await createVerificationCode(connection, member.id);
     await connection.commit();
-    const emailResult = await sendVerificationEmail({ email: normalizeEmail(member.email), token });
+    const emailResult = await sendVerificationCodeEmail({ email: normalizeEmail(member.email), code });
     const emailPayload = {
       sent: Boolean(emailResult.sent),
       skipped: Boolean(emailResult.skipped),
       reason: emailResult.reason,
     };
-    if (exposeDevVerificationUrl()) {
-      emailPayload.devVerificationUrl = emailResult.verifyUrl;
+    if (exposeDevEmailCode()) {
+      emailPayload.devCode = code;
     }
     return {
       ok: true,
@@ -479,7 +662,9 @@ module.exports = {
   logout,
   getMe,
   registerLocalUser,
+  resendVerificationCode,
   resendVerification,
   validateEmailPasswordInput,
+  verifyEmailCode,
   verifyEmailToken,
 };

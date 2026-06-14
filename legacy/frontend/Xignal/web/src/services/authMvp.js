@@ -38,6 +38,20 @@ export const authMvp = {
 			return normalizeAuthError(error, '인증 메일 재발송 중 오류가 발생했습니다.');
 		}
 	},
+	async verifyEmailCode(body) {
+		try {
+			return await api.post('/api/auth/verify-email-code', body);
+		} catch (error) {
+			return normalizeAuthError(error, '인증번호를 확인해 주세요.');
+		}
+	},
+	async resendVerificationCode(body) {
+		try {
+			return await api.post('/api/auth/resend-verification-code', body);
+		} catch (error) {
+			return normalizeAuthError(error, '인증번호 다시 보내기 중 오류가 발생했습니다.');
+		}
+	},
 	async login(body) {
 		try {
 			const payload = await api.post('/api/auth/login', body);

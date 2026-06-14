@@ -20,6 +20,7 @@ CREATE TABLE auth_email_verification_tokens (
   token_hash CHAR(64) NOT NULL,
   expires_at DATETIME NOT NULL,
   used_at DATETIME NULL,
+  attempt_count INT UNSIGNED NOT NULL DEFAULT 0,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uq_auth_email_verification_token_hash (token_hash),
