@@ -1,14 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, useNavigate } from 'react-router';
 import AppLayout from './layout/AppLayout';
 import TradingPage from './pages/trading/TradingPage';
 import TestTradingPage from './pages/trading/TestTradingPage';
 import { ScrollToTop } from './components/common/ScrollToTop';
 import Mypage from './pages/mypage/Mypage';
-import SignIn from './pages/authpage/SignIn';
 import AdminSignIn from './pages/authpage/AdminSignIn';
-import SignUp from './pages/authpage/SignUp';
 import ForgotPassword from './pages/authpage/ForgotPassword.jsx';
+import LoginPage from './pages/auth/LoginPage.jsx';
+import RegisterPage from './pages/auth/RegisterPage.jsx';
+import LegalPlaceholderPage from './pages/auth/LegalPlaceholderPage.jsx';
 import { useAuthStore } from './store/authState';
 import { auth } from './services/auth';
 import { MessageModalProvider } from './providers/MessageModalProvider.jsx';
@@ -36,14 +37,14 @@ function App() {
 				clearSessionAuth('user');
 				setIsLoggedIn(false);
 				setIsAdminSession(false);
-				navigate('/signin');
+				navigate('/login');
 			} else {
 				auth.member((res) => {
 					if (!res || res.errors) {
 						clearSessionAuth('user');
 						setIsLoggedIn(false);
 						setIsAdminSession(false);
-						navigate('/signin');
+						navigate('/login');
 						return;
 					}
 
@@ -118,10 +119,18 @@ function App() {
 					<Routes>
 						{/* Dashboard Layout */}
 						<Route
+							path="/login"
+							element={
+								<>
+									<LoginPage />
+								</>
+							}
+						/>
+						<Route
 							path="/signin"
 							element={
 								<>
-									<SignIn />
+									<LoginPage />
 								</>
 							}
 						/>
@@ -142,10 +151,34 @@ function App() {
 							}
 						/>
 						<Route
+							path="/register"
+							element={
+								<>
+									<RegisterPage />
+								</>
+							}
+						/>
+						<Route
+							path="/terms"
+							element={
+								<>
+									<LegalPlaceholderPage type="terms" />
+								</>
+							}
+						/>
+						<Route
+							path="/privacy"
+							element={
+								<>
+									<LegalPlaceholderPage type="privacy" />
+								</>
+							}
+						/>
+						<Route
 							path="/signup"
 							element={
 								<>
-									<SignUp />
+									<RegisterPage />
 								</>
 							}
 						/>
@@ -160,6 +193,14 @@ function App() {
 						<Route element={<AppLayout />}>
 							<Route
 								path="/"
+								element={
+									<ProtectedRoute>
+										<TradingPage />
+									</ProtectedRoute>
+								}
+							/>
+							<Route
+								path="/dashboard"
 								element={
 									<ProtectedRoute>
 										<TradingPage />
@@ -195,23 +236,6 @@ function App() {
 								element={
 									<ProtectedRoute>
 										<TestTradeHistoryPage />
-									</ProtectedRoute>
-								}
-							/>
-							<Route
-								path="/test/trade-history/:id"
-								element={
-									<ProtectedRoute>
-										<TestTradeHistoryDetailPage />
-									</ProtectedRoute>
-								}
-							/>
-
-							<Route
-								path="/mypage"
-								element={
-									<ProtectedRoute>
-										<Mypage />
 									</ProtectedRoute>
 								}
 							/>

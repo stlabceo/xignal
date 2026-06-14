@@ -9,6 +9,7 @@ const auth = require('./middleware/auth');
 require("dotenv").config();
 
 var adminRouter = require('./routes/admin');
+var authRouter = require('./routes/auth');
 var usersRouter = require('./routes/users');
 var statsRouter = require('./routes/stats');
 
@@ -68,6 +69,7 @@ const restrictUserTradingRoute = (req, res, next) => {
 
 app.use('/admin/stats', auth.verifyToken, statsRouter);
 app.use('/admin',auth.verifyToken, adminRouter);
+app.use('/api/auth', authRouter);
 app.use('/user/api/stats', statsRouter);
 app.use('/user/api/trading', auth.verifyToken, restrictUserTradingRoute, adminRouter);
 app.use('/user', usersRouter);
