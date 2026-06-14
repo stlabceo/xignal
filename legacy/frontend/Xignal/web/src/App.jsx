@@ -21,6 +21,8 @@ import TradeHistoryDetailPage from './pages/tradingHistory/TradeHistoryDetailPag
 import TestTradeHistoryDetailPage from './pages/tradingHistory/TestTradeHistoryDetailPage.jsx';
 import SignUpComplete from './pages/authpage/SignUpComplete.jsx';
 import AdminConsole from './pages/admin/AdminConsole.jsx';
+import MenuPlaceholderPage from './pages/placeholder/MenuPlaceholderPage.jsx';
+import TakeProfitSearchPage from './pages/takeProfitSearch/TakeProfitSearchPage.jsx';
 import { clearSessionAuth, getSessionSnapshot } from './utils/sessionAuth.js';
 
 function App() {
@@ -253,6 +255,50 @@ function App() {
 								element={
 									<ProtectedRoute>
 										<TestTradeHistoryPage />
+									</ProtectedRoute>
+								}
+							/>
+							<Route
+								path="/test/trade-history/:id"
+								element={
+									<ProtectedRoute>
+										<TestTradeHistoryDetailPage />
+									</ProtectedRoute>
+								}
+							/>
+
+							<Route
+								path="/mypage"
+								element={
+									<ProtectedRoute>
+										<Mypage />
+									</ProtectedRoute>
+								}
+							/>
+							<Route
+								path="/take-profit-search"
+								element={
+									<ProtectedRoute>
+										<TakeProfitSearchPage />
+									</ProtectedRoute>
+								}
+							/>
+							<Route
+								path="/tp-search"
+								element={
+									<ProtectedRoute>
+										<TakeProfitSearchPage />
+									</ProtectedRoute>
+								}
+							/>
+							<Route
+								path="/realtime-data"
+								element={
+									<ProtectedRoute>
+										<MenuPlaceholderPage
+											title="실시간데이터"
+											description="실시간 데이터 화면은 대시보드와 섞지 않고 별도 메뉴로 준비합니다."
+										/>
 									</ProtectedRoute>
 								}
 							/>

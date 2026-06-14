@@ -4,10 +4,10 @@ import AppSidebar from './AppSidebar';
 import AppFooter from './AppFooter';
 
 const LayoutContent = () => {
-	const [isDesktopSidebarOpen, setIsDesktopSidebarOpen] = useState(false);
+	const [isDesktopSidebarOpen, setIsDesktopSidebarOpen] = useState(true);
 
 	return (
-		<div className="min-h-screen bg-[#0F0F0F] text-white">
+		<div className="min-h-screen bg-[#F8FAFC] text-[#0F172A]">
 			<AppSidebar
 				isDesktopSidebarOpen={isDesktopSidebarOpen}
 				setIsDesktopSidebarOpen={setIsDesktopSidebarOpen}
