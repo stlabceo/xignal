@@ -55,6 +55,15 @@ const formatNumber = (value, digits = 2) => {
 	});
 };
 
+const formatCompactNumber = (value) => {
+	const numeric = Number(value);
+	if (!Number.isFinite(numeric)) return '-';
+	return numeric.toLocaleString('ko-KR', {
+		minimumFractionDigits: Number.isInteger(numeric) ? 0 : 2,
+		maximumFractionDigits: 2
+	});
+};
+
 const normalizeSymbol = (value) =>
 	String(value || '')
 		.trim()
@@ -79,11 +88,15 @@ const buildStrategyOptions = (catalogItems, category) => {
 	return rows.map((item) => ({
 		value: item.strategyCode || item.signalName,
 		label: formatCatalogStrategyLabel(item),
-		item
+		item,
+		category
 	}));
 };
 
-const getStrategyItem = (strategyOptions, value) => strategyOptions.find((option) => option.value === value)?.item || strategyOptions[0]?.item || null;
+const getStrategyOption = (strategyOptions, category, value) =>
+	strategyOptions.find((option) => option.category === category && option.value === value) || strategyOptions[0] || null;
+
+const encodeStrategyOption = (option) => `${option.category}:${option.value}`;
 
 const buildInitialForm = (prefill = {}) => {
 	const category = resolveCategoryFromPrefill(prefill);
@@ -191,13 +204,22 @@ const BotSetupModal = ({ isOpen, onClose, prefill = null, source = 'dashboard' }
 		};
 	}, [isOpen]);
 
-	const strategyOptions = useMemo(() => buildStrategyOptions(catalogByCategory[form.category] || [], form.category), [catalogByCategory, form.category]);
-	const strategyItem = useMemo(() => getStrategyItem(strategyOptions, form.strategySignal), [strategyOptions, form.strategySignal]);
+	const strategyOptions = useMemo(
+		() => [
+			...buildStrategyOptions(catalogByCategory.algorithm || [], 'algorithm'),
+			...buildStrategyOptions(catalogByCategory.grid || [], 'grid')
+		],
+		[catalogByCategory]
+	);
+	const selectedStrategyOption = useMemo(() => getStrategyOption(strategyOptions, form.category, form.strategySignal), [form.category, form.strategySignal, strategyOptions]);
+	const strategyItem = selectedStrategyOption?.item || null;
+	const strategySelectValue = selectedStrategyOption ? encodeStrategyOption(selectedStrategyOption) : `${form.category}:${form.strategySignal}`;
 	const symbolOptions = strategyItem?.allowedSymbols?.length ? strategyItem.allowedSymbols : buildFallbackCatalog(form.category)[0]?.allowedSymbols || [];
 	const timeframeOptions = strategyItem?.allowedTimeframes?.length ? strategyItem.allowedTimeframes : buildFallbackCatalog(form.category)[0]?.allowedTimeframes || [];
 
 	const isGrid = form.category === 'grid';
 	const orderAmount = toNumber(form.margin) * toNumber(form.leverage);
+	const orderAmountLabel = `${formatCompactNumber(form.margin)}$ X ${formatCompactNumber(form.leverage)} = ${formatNumber(orderAmount)} USDT`;
 	const backtestRows = useMemo(() => {
 		const strategyId = isGrid ? 'NY_QUIET_CLOSE_ASIA_BOX' : 'ATF_VIXFIX';
 		return filterTakeProfitRows(normalizeQbtStats(qbtStatsFixture), {
@@ -218,16 +240,20 @@ const BotSetupModal = ({ isOpen, onClose, prefill = null, source = 'dashboard' }
 		setForm((prev) => ({ ...prev, [key]: value }));
 	};
 
-	const switchCategory = (category) => {
+	const handleStrategyChange = (value) => {
+		const [category, ...strategyParts] = value.split(':');
+		const strategySignal = strategyParts.join(':');
 		const fallback = DEFAULTS[category];
+		const option = strategyOptions.find((item) => item.category === category && item.value === strategySignal);
+		const allowedSymbols = option?.item?.allowedSymbols || [];
+		const allowedTimeframes = option?.item?.allowedTimeframes || [];
 		setForm((prev) => ({
 			...prev,
 			category,
-			botName: prev.botName || fallback.displayName,
-			strategySignal: fallback.strategySignal,
+			strategySignal,
 			direction: category === 'grid' ? 'BOTH' : prev.direction === 'BOTH' ? 'BUY' : prev.direction,
-			symbol: prev.symbol || fallback.symbol,
-			bunbong: prev.bunbong || fallback.bunbong,
+			symbol: allowedSymbols.includes(prev.symbol) ? prev.symbol : allowedSymbols[0] || prev.symbol || fallback.symbol,
+			bunbong: allowedTimeframes.includes(prev.bunbong) ? prev.bunbong : allowedTimeframes[0] || prev.bunbong || fallback.bunbong,
 			stopLoss: category === 'grid' ? '' : prev.stopLoss,
 			stopLossReverseEnabled: category === 'grid' ? false : prev.stopLossReverseEnabled,
 			stopLossTimeEnabled: category === 'grid' ? false : prev.stopLossTimeEnabled,
@@ -257,21 +283,6 @@ const BotSetupModal = ({ isOpen, onClose, prefill = null, source = 'dashboard' }
 				</header>
 
 				<section className="mt-5 rounded-[18px] border border-[#E2E8F0] p-4">
-					<div className="mb-4 flex rounded-full bg-[#F1F5F9] p-1">
-						{[
-							['algorithm', 'Algorithm'],
-							['grid', 'Grid']
-						].map(([value, label]) => (
-							<button
-								key={value}
-								type="button"
-								onClick={() => switchCategory(value)}
-								className={`h-9 flex-1 rounded-full text-sm font-bold ${form.category === value ? 'bg-[#2563EB] text-white' : 'text-[#64748B]'}`}
-							>
-								{label}
-							</button>
-						))}
-					</div>
 					<h3 className="text-base font-bold text-[#0F172A]">기본 정보</h3>
 					<div className="mt-4 grid gap-4 sm:grid-cols-2">
 						<FormField label="Bot 이름">
@@ -280,11 +291,11 @@ const BotSetupModal = ({ isOpen, onClose, prefill = null, source = 'dashboard' }
 						<FormField label="전략">
 							<select
 								className={inputClass}
-								value={form.strategySignal}
-								onChange={(event) => updateForm('strategySignal', event.target.value)}
+								value={strategySelectValue}
+								onChange={(event) => handleStrategyChange(event.target.value)}
 							>
 								{strategyOptions.map((option) => (
-									<option key={option.value} value={option.value}>
+									<option key={`${option.category}-${option.value}`} value={encodeStrategyOption(option)}>
 										{option.label}
 									</option>
 								))}
@@ -336,7 +347,7 @@ const BotSetupModal = ({ isOpen, onClose, prefill = null, source = 'dashboard' }
 							<input className={inputClass} value={form.leverage} onChange={(event) => updateForm('leverage', event.target.value)} placeholder="예: 1" inputMode="numeric" />
 						</FormField>
 						<FormField label="거래금액" helper="read-only 계산값입니다.">
-							<input className={readOnlyClass} value={`${formatNumber(orderAmount)} USDT`} readOnly />
+							<input className={readOnlyClass} value={orderAmountLabel} readOnly />
 						</FormField>
 					</div>
 				</section>
@@ -399,6 +410,13 @@ const BotSetupModal = ({ isOpen, onClose, prefill = null, source = 'dashboard' }
 							</div>
 						)}
 					</div>
+				</section>
+
+				<section className="mt-4 rounded-[18px] border border-[#E2E8F0] p-4">
+					<h3 className="text-base font-bold text-[#0F172A]">설치 확인</h3>
+					<p className="mt-2 text-sm text-[#64748B]">
+						현재 모달은 기존 주문 설정 구조로 전송 가능한 payload를 확인하는 UI입니다. 안전한 Bot 설치 API 연결 전까지 직접 DB insert, live PID mutation, order queue write는 수행하지 않습니다.
+					</p>
 				</section>
 
 				<footer className="mt-5 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">

@@ -61,6 +61,15 @@ const formatAmount = (value, suffix = '') => {
 	})}${suffix}`;
 };
 
+const formatCompactAmount = (value) => {
+	const numeric = toNumberOrNull(value);
+	if (numeric === null) return EMPTY_TEXT;
+	return numeric.toLocaleString('ko-KR', {
+		minimumFractionDigits: Number.isInteger(numeric) ? 0 : 2,
+		maximumFractionDigits: 2
+	});
+};
+
 const formatSignedAmount = (value, suffix = '') => {
 	const numeric = toNumberOrNull(value);
 	if (numeric === null) return EMPTY_TEXT;
@@ -125,7 +134,7 @@ const normalizeTradeAmount = (row = {}) => {
 	const leverage = getLeverage(row);
 	if (margin === null) return { label: EMPTY_TEXT, margin: null, leverage };
 	return {
-		label: `${formatAmount(margin, ' USDT')}\n(마진 ${formatAmount(margin)} × 레버리지 ${formatAmount(leverage)})`,
+		label: `${formatCompactAmount(margin)}$ X ${formatCompactAmount(leverage)}`,
 		margin,
 		leverage
 	};
@@ -181,7 +190,7 @@ const buildBotRows = ({ signalRows = [], gridRows = [], mode, publicPrices = {} 
 			winRateNumber: normalizeWinRateNumber(row),
 			profitRateNumber: normalizeProfitRateNumber(row),
 			position,
-			recentEvent: position ? `${position.label}\n${formatSignedAmount(position.pnl, ' USDT')}` : 'Ready'
+			recentEvent: position ? formatSignedAmount(position.pnl, ' USDT') : 'Ready'
 		};
 	}),
 	...gridRows.map((row) => {
@@ -202,7 +211,7 @@ const buildBotRows = ({ signalRows = [], gridRows = [], mode, publicPrices = {} 
 			winRateNumber: normalizeWinRateNumber(row),
 			profitRateNumber: normalizeProfitRateNumber(row),
 			position,
-			recentEvent: position ? `${position.label}\n${formatSignedAmount(position.pnl, ' USDT')}` : 'Ready'
+			recentEvent: position ? formatSignedAmount(position.pnl, ' USDT') : 'Ready'
 		};
 	})
 ];
@@ -674,8 +683,8 @@ const TradingPage = () => {
 									<th className="border-b border-[#E2E8F0] px-4 py-3 text-left"><SortHeader label="거래금액" active={sort.key === 'tradeAmount'} direction={sort.direction} onClick={() => toggleSort('tradeAmount')} /></th>
 									<th className="border-b border-[#E2E8F0] px-4 py-3 text-left"><SortHeader label="승률" active={sort.key === 'winRateNumber'} direction={sort.direction} onClick={() => toggleSort('winRateNumber')} /></th>
 									<th className="border-b border-[#E2E8F0] px-4 py-3 text-left"><SortHeader label="수익률" active={sort.key === 'profitRateNumber'} direction={sort.direction} onClick={() => toggleSort('profitRateNumber')} /></th>
-									<th className="border-b border-[#E2E8F0] px-4 py-3 text-left text-xs font-semibold text-[#64748B]">최근 이벤트</th>
-									<th className="border-b border-[#E2E8F0] px-4 py-3 text-left text-xs font-semibold text-[#64748B]">관리</th>
+									<th className="border-b border-[#E2E8F0] px-4 py-3 text-left text-xs font-semibold text-[#64748B]">실시간 손익</th>
+									<th className="border-b border-[#E2E8F0] px-4 py-3 text-left text-xs font-semibold text-[#64748B]">On/Off</th>
 								</tr>
 							</thead>
 							<tbody>
@@ -692,8 +701,8 @@ const TradingPage = () => {
 										<td className="whitespace-pre-line px-4 py-3 text-sm text-[#475569]">{row.recentEvent}</td>
 										<td className="px-4 py-3" onClick={(event) => event.stopPropagation()}>
 											<div className="flex items-center gap-3">
-												<button type="button" onClick={() => setActionMessage('ON/OFF는 이번 화면에서 실제 mutation을 호출하지 않았습니다. 안전 API 연결이 필요합니다.')}><ToggleSwitch active={row.enabled} /></button>
-												{!row.enabled ? <button type="button" onClick={() => setActionMessage('삭제는 이번 화면에서 실제 mutation을 호출하지 않았습니다. 안전 API 연결이 필요합니다.')} className="text-sm font-semibold text-[#DC2626]">삭제</button> : null}
+												<button type="button" aria-label={`${row.name} On/Off`} onClick={() => setActionMessage('ON/OFF는 이번 화면에서 실제 mutation을 호출하지 않았습니다. 안전 API 연결이 필요합니다.')}><ToggleSwitch active={row.enabled} /></button>
+												{!row.enabled ? <button type="button" onClick={() => setActionMessage('삭제는 이번 화면에서 실제 mutation을 호출하지 않았습니다. 안전 API 연결이 필요합니다.')} className="rounded-md px-1 text-xs font-semibold text-[#DC2626] hover:bg-[#FEF2F2]">삭제</button> : null}
 											</div>
 										</td>
 									</tr>
@@ -712,7 +721,7 @@ const TradingPage = () => {
 								<div className="mt-4 grid grid-cols-2 gap-3 text-sm">
 									<div><p className="text-[#94A3B8]">거래금액</p><p className="whitespace-pre-line font-semibold">{row.tradeAmount.label}</p></div>
 									<div><p className="text-[#94A3B8]">승률 / 수익률</p><p className="font-semibold">{formatPercent(row.winRateNumber)} / {formatPercent(row.profitRateNumber)}</p></div>
-									<div className="col-span-2"><p className="text-[#94A3B8]">최근 이벤트</p><p className="whitespace-pre-line font-semibold">{row.recentEvent}</p></div>
+									<div className="col-span-2"><p className="text-[#94A3B8]">실시간 손익</p><p className="whitespace-pre-line font-semibold">{row.recentEvent}</p></div>
 								</div>
 							</div>
 						))}

@@ -29,8 +29,17 @@ check(!modalSource.includes('GRID_LIVE_ARM'), 'modal does not reference GRID_LIV
 check(modalSource.includes('Grid 전략은 별도 손절값을 입력하지 않습니다'), 'Grid branch explains no stop-loss input');
 check(modalSource.includes('분할 익절 설정'), 'Algorithm branch exposes split take profit');
 check(modalSource.includes('시간 경과 손절'), 'Algorithm branch exposes time stop');
+check(modalSource.includes('orderAmountLabel'), 'modal shows margin x leverage order amount label');
+check(!modalSource.includes('switchCategory'), 'modal does not expose broad Grid/Algorithm category tabs');
+check(modalSource.includes('handleStrategyChange'), 'modal derives category from strategy selection');
+check(modalSource.includes('설치 확인'), 'modal includes install confirmation section');
 check(dashboardSource.includes('<BotSetupModal'), 'dashboard reuses common modal');
 check(searchSource.includes('<BotSetupModal'), 'TP search reuses common modal');
 check(!searchSource.includes('const AddBotModal'), 'TP search removed duplicate add modal');
+check(dashboardSource.includes('실시간 손익'), 'dashboard renames recent event column to live PnL');
+check(dashboardSource.includes('On/Off'), 'dashboard renames management column to On/Off');
+check(dashboardSource.includes('formatCompactAmount(margin)}$ X ${formatCompactAmount(leverage)'), 'dashboard formats trade amount as margin x leverage');
+check(dashboardSource.includes("recentEvent: position ? formatSignedAmount(position.pnl, ' USDT') : 'Ready'"), 'dashboard live PnL omits LONG/SHORT position text');
+check(!dashboardSource.includes('최근 이벤트'), 'dashboard no longer labels live PnL as recent event');
 
 console.log(JSON.stringify({ status: 'PASS', tests }));
