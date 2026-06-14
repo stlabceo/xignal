@@ -4,6 +4,12 @@ import { authMvp } from '../../services/authMvp';
 import AuthGoogleButton from './AuthGoogleButton';
 import AuthLayout, { AuthDivider, AuthField, AuthMessage, PrimaryAuthButton } from './AuthLayout';
 
+const resolveRegisteredEmail = (result, fallbackEmail) => {
+	const candidates = [result?.email, result?.user?.email, fallbackEmail];
+	const email = candidates.find((value) => typeof value === 'string' && value.trim());
+	return (email || '').trim().toLowerCase();
+};
+
 const RegisterPage = () => {
 	const navigate = useNavigate();
 	const [form, setForm] = useState({ email: '', password: '' });
@@ -35,7 +41,7 @@ const RegisterPage = () => {
 			setError(result?.messageKo || '회원가입 처리 중 오류가 발생했습니다.');
 			return;
 		}
-		const email = result.email || result.user?.email || form.email;
+		const email = resolveRegisteredEmail(result, form.email);
 		sessionStorage.setItem('pendingEmailVerification', email);
 		navigate(`/verify-email-code?email=${encodeURIComponent(email)}`);
 	};

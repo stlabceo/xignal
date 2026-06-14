@@ -3,6 +3,15 @@ import { useEffect, useRef, useState } from 'react';
 const GOOGLE_CLIENT_ID =
 	import.meta.env.VITE_GOOGLE_CLIENT_ID ||
 	'318325527196-1h1d65s069ot50qrr3b6mled1a6gtpks.apps.googleusercontent.com';
+const GOOGLE_AUTH_ORIGIN = import.meta.env.VITE_GOOGLE_AUTH_ORIGIN || 'http://localhost:5174';
+
+const shouldSwitchLocalGoogleOrigin = () =>
+	typeof window !== 'undefined' &&
+	window.location.origin === 'http://127.0.0.1:5174' &&
+	GOOGLE_AUTH_ORIGIN &&
+	GOOGLE_AUTH_ORIGIN !== window.location.origin;
+
+const buildGoogleOriginUrl = () => `${GOOGLE_AUTH_ORIGIN}${window.location.pathname}${window.location.search}`;
 
 const loadGoogleScript = () =>
 	new Promise((resolve, reject) => {
@@ -30,9 +39,16 @@ const loadGoogleScript = () =>
 const AuthGoogleButton = ({ onCredential, onError }) => {
 	const containerRef = useRef(null);
 	const [fallbackVisible, setFallbackVisible] = useState(false);
+	const [originSwitchVisible, setOriginSwitchVisible] = useState(false);
 
 	useEffect(() => {
 		let disposed = false;
+		if (shouldSwitchLocalGoogleOrigin()) {
+			setOriginSwitchVisible(true);
+			return () => {
+				disposed = true;
+			};
+		}
 		loadGoogleScript()
 			.then(() => {
 				if (disposed || !containerRef.current || !window.google?.accounts?.id) return;
@@ -63,6 +79,20 @@ const AuthGoogleButton = ({ onCredential, onError }) => {
 			disposed = true;
 		};
 	}, [onCredential, onError]);
+
+	if (originSwitchVisible) {
+		return (
+			<button
+				type="button"
+				onClick={() => {
+					window.location.href = buildGoogleOriginUrl();
+				}}
+				className="flex h-12 w-full items-center justify-center rounded-xl border border-[#CBD5E1] bg-white text-[15px] font-semibold text-[#0F172A] transition hover:bg-[#F8FAFC]"
+			>
+				Google 로그인을 위해 localhost로 열기
+			</button>
+		);
+	}
 
 	if (fallbackVisible) {
 		return (

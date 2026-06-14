@@ -318,7 +318,7 @@ const registerLocalUser = async (input = {}) => {
         emailVerified: false,
         authProvider: 'local',
       },
-      email: emailPayload,
+      emailDelivery: emailPayload,
     };
   } catch (error) {
     await connection.rollback();
@@ -507,7 +507,7 @@ const resendVerificationCode = async ({ email } = {}) => {
     }
     return {
       ok: true,
-      email: emailPayload,
+      emailDelivery: emailPayload,
     };
   } catch (error) {
     await connection.rollback();

@@ -10,6 +10,7 @@ const authRouteSource = read('backend/routes/auth.js');
 const authServiceSource = read('backend/auth-service.js');
 const registerSource = read('frontend/Xignal/web/src/pages/auth/RegisterPage.jsx');
 const loginSource = read('frontend/Xignal/web/src/pages/auth/LoginPage.jsx');
+const googleButtonSource = read('frontend/Xignal/web/src/pages/auth/AuthGoogleButton.jsx');
 const verifyEmailCodeSource = read('frontend/Xignal/web/src/pages/auth/VerifyEmailCodePage.jsx');
 const authMvpSource = read('frontend/Xignal/web/src/services/authMvp.js');
 const appFrontendSource = read('frontend/Xignal/web/src/App.jsx');
@@ -48,6 +49,8 @@ assert.ok(authRouteSource.includes("router.post('/logout'"), 'logout endpoint ex
 assert.ok(!registerSource.includes('label="ID"'), 'register does not expose ID field');
 assert.ok(registerSource.includes('label="E-mail"'), 'register has E-mail field');
 assert.ok(registerSource.includes('label="PW"'), 'register has PW field');
+assert.ok(registerSource.includes('resolveRegisteredEmail'), 'register normalizes returned email string');
+assert.ok(registerSource.includes("typeof value === 'string'"), 'register rejects object email payloads');
 assert.ok(!registerSource.includes('label="이름"'), 'register does not collect name');
 assert.ok(!registerSource.includes('label="전화번호"'), 'register does not collect phone');
 assert.ok(!registerSource.includes('label="SMS"'), 'register does not collect SMS');
@@ -72,6 +75,8 @@ assert.ok(authMvpSource.includes('/api/auth/resend-verification-code'), 'fronten
 
 assert.ok(registerSource.includes('AuthGoogleButton'), 'register shows Google button');
 assert.ok(loginSource.includes('AuthGoogleButton'), 'login shows Google button');
+assert.ok(googleButtonSource.includes('VITE_GOOGLE_AUTH_ORIGIN'), 'Google button supports configured auth origin');
+assert.ok(googleButtonSource.includes('127.0.0.1:5174'), 'Google button avoids local 127 origin mismatch');
 assert.ok(appFrontendSource.includes('path="/register"'), 'frontend has /register route');
 assert.ok(appFrontendSource.includes('path="/login"'), 'frontend has /login route');
 assert.ok(appFrontendSource.includes('path="/verify-email"'), 'frontend has /verify-email route');
@@ -106,13 +111,15 @@ assert.ok(authServiceSource.includes('TOO_MANY_ATTEMPTS'), 'auth service limits 
 assert.ok(authServiceSource.includes('EXPIRED_CODE'), 'auth service distinguishes expired codes');
 assert.ok(authServiceSource.includes('AUTH_DEV_EXPOSE_EMAIL_CODE'), 'dev code exposure is explicitly gated');
 assert.ok(!authServiceSource.includes('devVerificationUrl = emailResult.verifyUrl'), 'register no longer exposes verification link');
+assert.ok(authServiceSource.includes('emailDelivery: emailPayload'), 'register separates email string from delivery payload');
+assert.ok(!authServiceSource.includes('email: emailPayload'), 'register must not overwrite email with delivery payload');
 assert.ok(!authServiceSource.includes('console.log(process.env.RESEND_API_KEY)'), 'Resend secret is not logged');
 assert.ok(!authServiceSource.includes('GOOGLE_CLIENT_SECRET'), 'Google client secret is not used in auth source');
 
 console.log(
   JSON.stringify({
     status: 'PASS',
-    tests: 61,
+    tests: 66,
     tradingImports: 0,
     bannedRegisterFields: 0,
     idFields: 0,
