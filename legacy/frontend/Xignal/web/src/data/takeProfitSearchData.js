@@ -2,7 +2,7 @@ const PERIODS = ['2w', '1m', '2m', '3m', '6m', '1y', 'all'];
 
 const STRATEGY_LABELS = {
 	ATF_VIXFIX: 'ATF+VIXFIX',
-	NY_QUIET_CLOSE_ASIA_BOX: 'NYBOX Grid'
+	NY_QUIET_CLOSE_ASIA_BOX: 'NY Quiet Close Asia Box Grid'
 };
 
 const DIRECTION_LABELS = {

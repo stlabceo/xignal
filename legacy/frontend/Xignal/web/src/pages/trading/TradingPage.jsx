@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { trading } from '../../services/trading';
 import { useAuthStore } from '../../store/authState';
-import { filterTakeProfitRows, normalizeQbtStats, qbtStatsFixture } from '../../data/takeProfitSearchData';
 import BotSetupModal from './BotSetupModal';
 
 const MODE = {
@@ -82,6 +81,12 @@ const formatPercent = (value) => {
 	return `${numeric > 0 ? '+' : ''}${numeric.toFixed(2)}%`;
 };
 
+const formatPlainPercent = (value) => {
+	const numeric = toNumberOrNull(value);
+	if (numeric === null) return EMPTY_TEXT;
+	return `${numeric.toFixed(2)}%`;
+};
+
 const formatDateTime = (value) => {
 	if (!value) return EMPTY_TEXT;
 	const date = new Date(value);
@@ -128,6 +133,46 @@ const normalizeProfitRateNumber = (row = {}) =>
 
 const getMargin = (row = {}) => toNumberOrNull(firstValue(row.margin, row.tradeValue, row.orderSize, row.assignedAmount, row.seedMoney));
 const getLeverage = (row = {}) => toNumberOrNull(firstValue(row.leverage, row.marginLeverage)) ?? 1;
+
+const STRATEGY_NAME_MAP = {
+	ATF_VIXFIX: 'ATF+VIXFIX',
+	'ATF+VIXFIX': 'ATF+VIXFIX',
+	NYBOX: 'NY Quiet Close Asia Box Grid',
+	NY_QUIET_CLOSE_ASIA_BOX: 'NY Quiet Close Asia Box Grid',
+	SQZ_GRID: 'SQZ+GRID',
+	'SQZ+GRID': 'SQZ+GRID'
+};
+
+const BACKTEST_STRATEGY_KEY_MAP = {
+	ATF_VIXFIX: 'ATF+VIXFIX',
+	'ATF+VIXFIX': 'ATF+VIXFIX',
+	NYBOX: 'NY_QUIET_CLOSE_ASIA_BOX',
+	NY_QUIET_CLOSE_ASIA_BOX: 'NY_QUIET_CLOSE_ASIA_BOX',
+	SQZ_GRID: 'NY_QUIET_CLOSE_ASIA_BOX',
+	'SQZ+GRID': 'NY_QUIET_CLOSE_ASIA_BOX'
+};
+
+const resolveStrategyName = (row = {}, strategyCategory = 'SIGNAL') => {
+	const rawName = firstValue(
+		row.strategyDisplayName,
+		row.strategyName,
+		row.displayName,
+		strategyCategory === 'GRID' ? row.strategySignal : row.type,
+		row.strategySignal,
+		row.strategyCode,
+		row.signalName
+	);
+	const key = String(rawName || '').trim();
+	if (!key) return '전략 이름 없음';
+	return STRATEGY_NAME_MAP[key] || key;
+};
+
+const resolveWebhookStrategyName = (row = {}, strategyCategory = 'SIGNAL') => {
+	const rawName = strategyCategory === 'GRID' ? row.strategySignal : firstValue(row.type, row.strategySignal);
+	const key = String(rawName || '').trim();
+	if (!key) return '전략 이름 없음';
+	return STRATEGY_NAME_MAP[key] || key;
+};
 
 const normalizeTradeAmount = (row = {}) => {
 	const margin = getMargin(row);
@@ -182,6 +227,8 @@ const buildBotRows = ({ signalRows = [], gridRows = [], mode, publicPrices = {} 
 			key: `signal-${mode}-${row.id}`,
 			strategyCategory: 'SIGNAL',
 			typeLabel: 'Algorithm',
+			strategyName: resolveStrategyName(row, 'SIGNAL'),
+			webhookStrategyName: resolveWebhookStrategyName(row, 'SIGNAL'),
 			name: normalizeBotName(row, 'SIGNAL'),
 			symbol: normalizeSymbol(row.symbol || row.r_symbol),
 			direction: normalizeDirection(row, 'SIGNAL'),
@@ -203,6 +250,8 @@ const buildBotRows = ({ signalRows = [], gridRows = [], mode, publicPrices = {} 
 			key: `grid-${mode}-${row.id}`,
 			strategyCategory: 'GRID',
 			typeLabel: 'Grid',
+			strategyName: resolveStrategyName(row, 'GRID'),
+			webhookStrategyName: resolveWebhookStrategyName(row, 'GRID'),
 			name: normalizeBotName(row, 'GRID'),
 			symbol: normalizeSymbol(row.symbol),
 			direction: '양방향',
@@ -219,17 +268,53 @@ const buildBotRows = ({ signalRows = [], gridRows = [], mode, publicPrices = {} 
 const buildTrackRows = (payload) =>
 	pickArray(payload)
 		.slice(0, 20)
-		.map((row, index) => ({
-			key: row.id || row.demoRecordId || row.recordId || `${index}`,
-			time: formatDateTime(firstValue(row.exitTime, row.tradeTime, row.closedAt, row.updatedAt, row.createdAt)),
-			bot: String(firstValue(row.strategyName, row.botName, row.a_name, row.strategySignal, row.strategyType) || EMPTY_TEXT),
-			symbol: normalizeSymbol(row.symbol),
-			direction: normalizeDirection(row),
-			result: String(firstValue(row.exitReason, row.result, row.status, row.resultCode) || EMPTY_TEXT),
-			profitRate: formatPercent(firstValue(row.profitRate, row.returnRate, row.pnlRate, row.realizedPnlRate)),
-			pnl: formatSignedAmount(firstValue(row.realizedPnl, row.pnl, row.realizedDemoPnl), ' USDT'),
-			pnlTone: (toNumberOrNull(firstValue(row.realizedPnl, row.pnl, row.realizedDemoPnl)) || 0) >= 0 ? 'positive' : 'negative'
-		}));
+		.map((row, index) => {
+			const rawTime = firstValue(row.exitTime, row.tradeTime, row.closedAt, row.updatedAt, row.createdAt);
+			const pnlValue = toNumberOrNull(firstValue(row.realizedPnl, row.pnl, row.realizedDemoPnl));
+			return {
+				key: row.id || row.demoRecordId || row.recordId || `${index}`,
+				raw: row,
+				rawTime,
+				timestamp: rawTime ? new Date(rawTime).getTime() : null,
+				time: formatDateTime(rawTime),
+				bot: String(firstValue(row.strategyName, row.botName, row.a_name, row.strategySignal, row.strategyType) || EMPTY_TEXT),
+				symbol: normalizeSymbol(row.symbol),
+				direction: normalizeDirection(row),
+				result: String(firstValue(row.exitReason, row.result, row.status, row.resultCode) || EMPTY_TEXT),
+				profitRate: formatPercent(firstValue(row.profitRate, row.returnRate, row.pnlRate, row.realizedPnlRate)),
+				pnl: formatSignedAmount(pnlValue, ' USDT'),
+				pnlValue,
+				pnlTone: (pnlValue || 0) >= 0 ? 'positive' : 'negative',
+				detail: firstValue(row.summaryText, row.detail, row.resultCode, row.status) || EMPTY_TEXT
+			};
+		});
+
+const TRACK_RECORD_PERIODS = [
+	{ key: '1w', label: '1주', days: 7 },
+	{ key: '1m', label: '1개월', days: 30 },
+	{ key: '3m', label: '3개월', days: 90 },
+	{ key: '6m', label: '6개월', days: 180 },
+	{ key: '1y', label: '1년', days: 365 },
+	{ key: 'all', label: '전체', days: null }
+];
+
+const filterTrackRowsByPeriod = (rows = [], periodKey = '1m') => {
+	const selected = TRACK_RECORD_PERIODS.find((period) => period.key === periodKey) || TRACK_RECORD_PERIODS[1];
+	if (!selected.days) return rows;
+	const cutoff = Date.now() - selected.days * 24 * 60 * 60 * 1000;
+	return rows.filter((row) => !row.timestamp || row.timestamp >= cutoff);
+};
+
+const getBotTrackRows = (bot, trackRows = []) => {
+	if (!bot) return [];
+	const botName = String(bot.name || '').trim();
+	const symbol = normalizeSymbol(bot.symbol);
+	return trackRows.filter((row) => {
+		const sameSymbol = !row.symbol || row.symbol === EMPTY_TEXT || row.symbol === symbol;
+		const sameBot = !row.bot || row.bot === EMPTY_TEXT || row.bot === botName || row.bot === bot.strategyName || row.bot === bot.webhookStrategyName;
+		return sameSymbol && sameBot;
+	});
+};
 
 const LineChart = ({ rows, valueKey, labelKey }) => {
 	const values = rows.map((row) => toNumberOrNull(row[valueKey])).filter((value) => value !== null);
@@ -353,26 +438,123 @@ const ToggleSwitch = ({ active }) => (
 	</span>
 );
 
+const normalizeSignalTypeForBacktest = (direction) => {
+	if (direction === '매수') return 'BUY';
+	if (direction === '매도') return 'SELL';
+	if (direction === '양방향') return 'BOTH';
+	return String(direction || '').toUpperCase();
+};
+
+const normalizeBacktestStrategyKey = (strategyKey, strategyCategory) => {
+	const fallback = strategyCategory === 'GRID' ? 'NY_QUIET_CLOSE_ASIA_BOX' : 'ATF+VIXFIX';
+	const rawKey = String(strategyKey || '').trim();
+	if (!rawKey) return fallback;
+	const upperKey = rawKey.toUpperCase();
+	return BACKTEST_STRATEGY_KEY_MAP[rawKey] || BACKTEST_STRATEGY_KEY_MAP[upperKey] || rawKey;
+};
+
+const getBotBacktestQuery = (bot) => {
+	if (!bot) return null;
+	const rawStrategyKey = bot.strategyCategory === 'GRID'
+		? firstValue(bot.raw.strategySignal, bot.raw.strategyName, 'NY_QUIET_CLOSE_ASIA_BOX')
+		: firstValue(bot.raw.type, bot.raw.strategySignal, 'ATF+VIXFIX');
+	const strategyKey = normalizeBacktestStrategyKey(rawStrategyKey, bot.strategyCategory);
+	const symbol = normalizeSymbol(firstValue(bot.raw.symbol, bot.raw.r_symbol, bot.symbol)).replace('.P', '');
+	const bunbong = firstValue(bot.raw.bunbong, bot.raw.timeframe, bot.raw.interval);
+	const signalType = bot.strategyCategory === 'GRID' ? 'BOTH' : normalizeSignalTypeForBacktest(bot.direction);
+	if (!strategyKey || !symbol || !bunbong || !signalType) return null;
+	return { strategyKey, symbol, bunbong, signalType };
+};
+
+const formatSplitTakeProfit = (row = {}) => {
+	const enabled = isEnabledValue(firstValue(row.splitTakeProfitEnabled, row.splitTakeProfitST));
+	if (!enabled) return '사용 안 함';
+	const count = firstValue(row.splitTakeProfitCount, row.splitCount) || '-';
+	const gap = firstValue(row.splitTakeProfitGap, row.splitGap) || '-';
+	return `사용 / ${count}단계 / 간격 ${gap}%`;
+};
+
+const formatStopLossTime = (row = {}) => {
+	const enabled = isEnabledValue(row.stopLossTimeEnabled);
+	if (!enabled) return '사용 안 함';
+	return `${firstValue(row.stopLossTimeValue, row.stopLossMinutes) || '-'}분`;
+};
+
+const getSettingRows = (bot) => {
+	if (!bot) return [];
+	const row = bot.raw || {};
+	const commonRows = [
+		['Bot 이름 / 별명', bot.name],
+		['전략 설정 이름', firstValue(row.a_name, row.strategyName, bot.name) || '-'],
+		['실제 웹훅 수신 전략 이름', bot.webhookStrategyName],
+		['종목', bot.symbol],
+		['캔들 / timeframe', firstValue(row.bunbong, row.timeframe, row.interval) || '-'],
+		['방향', bot.direction],
+		['마진', bot.tradeAmount.margin === null ? '-' : `${formatCompactAmount(bot.tradeAmount.margin)} USDT`],
+		['레버리지', bot.tradeAmount.leverage === null ? '-' : `${formatCompactAmount(bot.tradeAmount.leverage)}x`],
+		['거래금액', bot.tradeAmount.label],
+		['익절 설정', firstValue(row.profit, row.t_profit, row.longTakeProfitPrice, row.shortTakeProfitPrice) || '-']
+	];
+
+	if (bot.strategyCategory === 'GRID') {
+		return [
+			...commonRows,
+			['그리드 종료 정책', '그리드 전략은 별도 손절값을 입력하지 않습니다. Grid Exit 웹훅을 수신하면 해당 레짐의 보유 포지션/주문 정리 경로가 실행됩니다.']
+		];
+	}
+
+	return [
+		...commonRows,
+		['분할 익절 설정', formatSplitTakeProfit(row)],
+		['% 손절', firstValue(row.stopLoss, row.r_stopPrice) || '-'],
+		['시간 경과 손절', formatStopLossTime(row)]
+	];
+};
+
 const BotDetailModal = ({ bot, trackRows, onClose }) => {
 	const [tab, setTab] = useState('settings');
-	const backtestRows = useMemo(() => {
-		if (!bot) return [];
-		return filterTakeProfitRows(normalizeQbtStats(qbtStatsFixture), {
-			symbol: bot.symbol.replace('.P', ''),
-			strategyId: bot.strategyCategory === 'GRID' ? 'NY_QUIET_CLOSE_ASIA_BOX' : 'ATF_VIXFIX',
-			period: 'all'
-		}).slice(0, 5);
-	}, [bot]);
+	const [trackPeriod, setTrackPeriod] = useState('1m');
+	const [backtestRows, setBacktestRows] = useState([]);
+	const [backtestLoading, setBacktestLoading] = useState(false);
+	const [backtestLatestGeneratedAt, setBacktestLatestGeneratedAt] = useState(null);
+
+	const backtestQuery = useMemo(() => getBotBacktestQuery(bot), [bot]);
+	const settingRows = useMemo(() => getSettingRows(bot), [bot]);
+	const botTrackRows = useMemo(() => getBotTrackRows(bot, trackRows), [bot, trackRows]);
+	const filteredTrackRows = useMemo(() => filterTrackRowsByPeriod(botTrackRows, trackPeriod), [botTrackRows, trackPeriod]);
+
+	useEffect(() => {
+		if (!bot || !backtestQuery) {
+			setBacktestRows([]);
+			setBacktestLatestGeneratedAt(null);
+			setBacktestLoading(false);
+			return;
+		}
+
+		let canceled = false;
+		setBacktestLoading(true);
+		trading.getBacktestStats(backtestQuery, (res) => {
+			if (canceled) return;
+			const items = Array.isArray(res?.items) ? res.items : [];
+			setBacktestRows(items);
+			setBacktestLatestGeneratedAt(res?.latestGeneratedAt || null);
+			setBacktestLoading(false);
+		});
+		return () => {
+			canceled = true;
+		};
+	}, [backtestQuery, bot]);
 
 	if (!bot) return null;
 	const hasPosition = Boolean(bot.position);
+	const canEdit = !hasPosition;
 
 	return (
 		<div className="fixed inset-0 z-[100] flex items-center justify-center bg-[#0F172A]/40 px-4 py-6">
 			<div className="max-h-[92vh] w-full max-w-[860px] overflow-y-auto rounded-[18px] bg-white p-6 shadow-[0_30px_80px_rgba(15,23,42,0.22)]">
 				<div className="flex items-start justify-between gap-4">
 					<div>
-						<p className="text-sm font-semibold text-[#2563EB]">{bot.typeLabel}</p>
+						<p className="text-sm font-semibold text-[#2563EB]">{bot.strategyName}</p>
 						<h2 className="mt-1 text-xl font-bold text-[#0F172A]">{bot.name}</h2>
 						<p className="mt-2 text-sm text-[#64748B]">{bot.symbol} · {bot.direction} · {bot.enabled ? 'ON' : 'OFF'} · 승률 {formatPercent(bot.winRateNumber)} · 수익률 {formatPercent(bot.profitRateNumber)}</p>
 					</div>
@@ -392,65 +574,84 @@ const BotDetailModal = ({ bot, trackRows, onClose }) => {
 				{tab === 'settings' ? (
 					<div className="mt-5">
 						<div className="grid gap-4 sm:grid-cols-2">
-							{[
-								['전략', bot.typeLabel],
-								['종목', bot.symbol],
-								['방향', bot.direction],
-								['거래금액', bot.tradeAmount.label],
-								['마진', bot.tradeAmount.margin === null ? '-' : formatAmount(bot.tradeAmount.margin, ' USDT')],
-								['레버리지', bot.tradeAmount.leverage === null ? '-' : `${bot.tradeAmount.leverage}x`],
-								['타임프레임/캔들', firstValue(bot.raw.bunbong, bot.raw.timeframe, bot.raw.interval) || '-'],
-								['익절 설정', firstValue(bot.raw.profit, bot.raw.t_profit, bot.raw.longTakeProfitPrice, bot.raw.shortTakeProfitPrice) || '-'],
-								['손절 설정', firstValue(bot.raw.stopLoss, bot.raw.longStopPrice, bot.raw.shortStopPrice) || '-'],
-								['그리드 박스/조건', bot.strategyCategory === 'GRID' ? `${firstValue(bot.raw.supportPrice, '-')} ~ ${firstValue(bot.raw.resistancePrice, '-')}` : '-'],
-								['활성 여부', bot.enabled ? 'ON' : 'OFF']
-							].map(([label, value]) => (
+							{settingRows.map(([label, value]) => (
 								<div key={label} className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4">
 									<p className="text-xs font-semibold text-[#64748B]">{label}</p>
 									<p className="mt-2 whitespace-pre-line text-sm font-bold text-[#0F172A]">{value}</p>
 								</div>
 							))}
 						</div>
+						<div className="mt-4 rounded-2xl border border-[#E2E8F0] bg-white p-4">
+							<p className="text-xs font-semibold text-[#64748B]">수정 가능 여부</p>
+							<p className="mt-2 text-sm font-bold text-[#0F172A]">
+								{canEdit ? '포지션 없음 / 수정 API 연결 필요' : '포지션 보유 중 / 조건 수정 불가'}
+							</p>
+							<p className="mt-1 text-xs text-[#94A3B8]">기존 owner/snapshot/open position projection에서 포지션이 있으면 수정하지 않습니다. 안전한 수정 API 연결 전까지 mutation은 호출하지 않습니다.</p>
+						</div>
 						<button
 							type="button"
-							disabled={hasPosition}
+							disabled
 							className="mt-5 h-11 rounded-xl bg-[#2563EB] px-5 text-sm font-bold text-white disabled:cursor-not-allowed disabled:bg-[#CBD5E1]"
-							title={hasPosition ? '포지션 보유 중인 Bot은 수정할 수 없습니다.' : '이번 1차는 UI-only입니다.'}
+							title={hasPosition ? '포지션 보유 중인 Bot은 수정할 수 없습니다.' : '조건 수정 API 연결 필요'}
 						>
-							조건 수정
+							조건 수정 API 연결 필요
 						</button>
 					</div>
 				) : null}
 
 				{tab === 'records' ? (
-					<div className="mt-5 overflow-x-auto">
-						<table className="w-full min-w-[620px] border-collapse">
-							<thead className="bg-[#F8FAFC]"><tr>{['날짜', '결과', '수익', '수익률', '방향'].map((header) => <th key={header} className="border-b border-[#E2E8F0] px-4 py-3 text-left text-xs font-semibold text-[#64748B]">{header}</th>)}</tr></thead>
-							<tbody>
-								{trackRows.slice(0, 8).map((row) => (
-									<tr key={`${bot.key}-${row.key}`} className="border-b border-[#E2E8F0] last:border-b-0">
-										<td className="px-4 py-3 text-sm">{row.time}</td>
-										<td className="px-4 py-3 text-sm">{row.result}</td>
-										<td className={`px-4 py-3 text-sm font-semibold ${row.pnlTone === 'negative' ? 'text-[#DC2626]' : 'text-[#16A34A]'}`}>{row.pnl}</td>
-										<td className="px-4 py-3 text-sm">{row.profitRate}</td>
-										<td className="px-4 py-3 text-sm">{row.direction}</td>
-									</tr>
-								))}
-							</tbody>
-						</table>
+					<div className="mt-5">
+						<div className="mb-4 flex flex-wrap gap-2">
+							{TRACK_RECORD_PERIODS.map((period) => (
+								<button
+									key={period.key}
+									type="button"
+									onClick={() => setTrackPeriod(period.key)}
+									className={`rounded-full px-3 py-1.5 text-xs font-bold ${trackPeriod === period.key ? 'bg-[#2563EB] text-white' : 'bg-[#F1F5F9] text-[#475569]'}`}
+								>
+									{period.label}
+								</button>
+							))}
+						</div>
+						<div className="overflow-x-auto">
+							<table className="w-full min-w-[760px] border-collapse">
+								<thead className="bg-[#F8FAFC]"><tr>{['날짜', '종목', '방향', '결과', '수익', '수익률', '상세'].map((header) => <th key={header} className="border-b border-[#E2E8F0] px-4 py-3 text-left text-xs font-semibold text-[#64748B]">{header}</th>)}</tr></thead>
+								<tbody>
+									{filteredTrackRows.length === 0 ? (
+										<tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-[#64748B]">선택 기간의 트랙레코드가 없습니다.</td></tr>
+									) : filteredTrackRows.map((row) => (
+										<tr key={`${bot.key}-${row.key}`} className="border-b border-[#E2E8F0] last:border-b-0">
+											<td className="px-4 py-3 text-sm">{row.time}</td>
+											<td className="px-4 py-3 text-sm">{row.symbol}</td>
+											<td className="px-4 py-3 text-sm">{row.direction}</td>
+											<td className="px-4 py-3 text-sm">{row.result}</td>
+											<td className={`px-4 py-3 text-sm font-semibold ${row.pnlTone === 'negative' ? 'text-[#DC2626]' : 'text-[#16A34A]'}`}>{row.pnl}</td>
+											<td className="px-4 py-3 text-sm">{row.profitRate}</td>
+											<td className="px-4 py-3 text-sm text-[#64748B]">{row.detail}</td>
+										</tr>
+									))}
+								</tbody>
+							</table>
+						</div>
 					</div>
 				) : null}
 
 				{tab === 'backtest' ? (
 					<div className="mt-5">
-						{backtestRows.length === 0 ? (
-							<div className="rounded-2xl border border-dashed border-[#CBD5E1] bg-[#F8FAFC] p-8 text-center text-sm text-[#64748B]">동일 조건 백테스트 데이터가 없습니다.</div>
+						<div className="mb-4 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4 text-sm text-[#64748B]">
+							<p>조회 조건: {backtestQuery ? `${backtestQuery.strategyKey} / ${backtestQuery.symbol} / ${backtestQuery.bunbong} / ${backtestQuery.signalType}` : '조건 부족'}</p>
+							<p className="mt-1">최근 갱신: {backtestLatestGeneratedAt ? formatDateTime(backtestLatestGeneratedAt) : '-'}</p>
+						</div>
+						{backtestLoading ? (
+							<div className="rounded-2xl border border-dashed border-[#CBD5E1] bg-[#F8FAFC] p-8 text-center text-sm text-[#64748B]">백테스트 데이터를 불러오는 중입니다.</div>
+						) : backtestRows.length === 0 ? (
+							<div className="rounded-2xl border border-dashed border-[#CBD5E1] bg-[#F8FAFC] p-8 text-center text-sm text-[#64748B]">동일 조건의 백테스트 데이터가 없습니다.</div>
 						) : (
 							<div className="grid gap-3 sm:grid-cols-2">
 								{backtestRows.map((row) => (
-									<div key={`${row.strategyId}-${row.symbol}-${row.direction}-${row.tpPct}-${row.period}`} className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4">
-										<p className="text-sm font-bold text-[#0F172A]">{row.strategyName} · {row.directionLabel}</p>
-										<p className="mt-2 text-sm text-[#64748B]">TP {formatPercent(row.tpPct)} · 승률 {formatPercent(row.winratePct)} · 수익률 {formatPercent(row.netPnlPct)}</p>
+									<div key={`${row.strategyKey}-${row.symbol}-${row.signalType}-${row.tpValue}`} className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4">
+										<p className="text-sm font-bold text-[#0F172A]">{row.strategyKey} · {row.signalType}</p>
+										<p className="mt-2 text-sm text-[#64748B]">TP {formatPlainPercent(row.tpValue)} · 승률 {formatPlainPercent(row.hitRate)} · 수익률 {formatPlainPercent(row.pnlValue)}</p>
 									</div>
 								))}
 							</div>
@@ -692,7 +893,7 @@ const TradingPage = () => {
 									<tr><td colSpan={8} className="px-4 py-10 text-center text-sm text-[#64748B]">설치된 Bot이 없습니다.</td></tr>
 								) : botRows.map((row) => (
 									<tr key={row.key} onClick={() => setSelectedBot(row)} className={`h-16 cursor-pointer border-b border-[#E2E8F0] last:border-b-0 ${row.enabled ? 'border-l-4 border-l-[#2563EB] bg-white' : 'bg-[#F8FAFC] text-[#64748B] opacity-80'} hover:bg-[#EFF6FF]`}>
-										<td className="px-4 py-3"><div className="flex flex-col"><span className="text-sm font-semibold text-[#0F172A]">{row.name}</span><span className="mt-1 w-fit rounded-full bg-[#EFF6FF] px-2 py-0.5 text-[11px] font-semibold text-[#2563EB]">{row.typeLabel}</span></div></td>
+										<td className="px-4 py-3"><div className="flex flex-col"><span className="text-sm font-semibold text-[#0F172A]">{row.name}</span><span className="mt-1 w-fit rounded-full bg-[#EFF6FF] px-2 py-0.5 text-[11px] font-semibold text-[#2563EB]">{row.strategyName}</span></div></td>
 										<td className="px-4 py-3 text-sm font-medium">{row.symbol}</td>
 										<td className="px-4 py-3 text-sm font-medium">{row.direction}</td>
 										<td className="whitespace-pre-line px-4 py-3 text-sm font-medium">{row.tradeAmount.label}</td>

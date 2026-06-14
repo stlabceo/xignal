@@ -10,6 +10,7 @@ const read = (relativePath) => fs.readFileSync(path.join(srcRoot, relativePath),
 const modalSource = read('pages/trading/BotSetupModal.jsx');
 const dashboardSource = read('pages/trading/TradingPage.jsx');
 const searchSource = read('pages/takeProfitSearch/TakeProfitSearchPage.jsx');
+const takeProfitDataSource = read('data/takeProfitSearchData.js');
 
 let tests = 0;
 const check = (condition, message) => {
@@ -41,5 +42,16 @@ check(dashboardSource.includes('On/Off'), 'dashboard renames management column t
 check(dashboardSource.includes('formatCompactAmount(margin)}$ X ${formatCompactAmount(leverage)'), 'dashboard formats trade amount as margin x leverage');
 check(dashboardSource.includes("recentEvent: position ? formatSignedAmount(position.pnl, ' USDT') : 'Ready'"), 'dashboard live PnL omits LONG/SHORT position text');
 check(!dashboardSource.includes('최근 이벤트'), 'dashboard no longer labels live PnL as recent event');
+check(dashboardSource.includes('{row.strategyName}</span>'), 'dashboard bot name chip renders strategy name');
+check(dashboardSource.includes('<p className="text-sm font-semibold text-[#2563EB]">{bot.strategyName}</p>'), 'detail modal header renders strategy name');
+check(!dashboardSource.includes('Technical category'), 'detail modal does not reintroduce Algorithm/Grid category as a displayed setting');
+check(!dashboardSource.includes("import { filterTakeProfitRows, normalizeQbtStats, qbtStatsFixture }"), 'detail modal does not use local QBT fixture as production backtest');
+check(dashboardSource.includes('trading.getBacktestStats'), 'detail modal uses existing backtest API');
+check(dashboardSource.includes('normalizeBacktestStrategyKey'), 'detail modal separates displayed strategy name from backtest query key');
+check(dashboardSource.includes('TRACK_RECORD_PERIODS'), 'detail modal has track record period filters');
+check(dashboardSource.includes('조건 수정 API 연결 필요'), 'detail modal disables edit until safe API wiring');
+check(dashboardSource.includes('formatSplitTakeProfit'), 'detail modal renders split take profit from real fields');
+check(dashboardSource.includes('formatStopLossTime'), 'detail modal renders time stop from real fields');
+check(takeProfitDataSource.includes("NY_QUIET_CLOSE_ASIA_BOX: 'NY Quiet Close Asia Box Grid'"), 'NYBOX label uses real strategy display name');
 
 console.log(JSON.stringify({ status: 'PASS', tests }));
