@@ -59,32 +59,38 @@ const NY_BOX_STRATEGY_IMAGES = [
 	{
 		label: '전략 개요',
 		src: nyBoxStrategyIntroWithCopyImage,
-		alt: '뉴욕 세션 고점과 저점을 기준으로 아시아 세션 가격 횡보를 설명하는 NY Box 전략 개요'
+		alt: '뉴욕 세션 고점과 저점을 기준으로 아시아 세션 가격 횡보를 설명하는 NY Box 전략 개요',
+		description: '뉴욕 세션에서 만들어진 고점과 저점이 다음 아시아 세션의 기준 박스가 됩니다. 가격이 이 박스 안에서 횡보할 때 Grid 전략 후보로 봅니다.'
 	},
 	{
 		label: '세션 박스',
 		src: nyBoxStrategySessionBoxImage,
-		alt: '뉴욕 세션 고점과 저점이 아시아 세션 기준 박스로 이어지는 구조'
+		alt: '뉴욕 세션 고점과 저점이 아시아 세션 기준 박스로 이어지는 구조',
+		description: '박스 상단은 직전 뉴욕 세션의 고점, 박스 하단은 직전 뉴욕 세션의 저점입니다. 현재가는 이 상단·하단 대비 위치로 해석합니다.'
 	},
 	{
 		label: '돌파 기준',
 		src: nyBoxStrategyBreakoutImage,
-		alt: '중심선을 기준으로 숏과 롱 신호가 반복되는 돌파 기준'
+		alt: '중심선을 기준으로 숏과 롱 신호가 반복되는 돌파 기준',
+		description: '가격이 박스 내부에서 왕복하면 Grid 후보가 유지됩니다. 상단 돌파나 하단 이탈이 확인되면 신규 Grid 운용보다 종료·관망 판단이 우선입니다.'
 	},
 	{
 		label: '주문 구조',
 		src: nyBoxStrategyOrdersImage,
-		alt: '상단과 하단 목표선을 기준으로 롱과 숏 Grid 주문이 교차하는 구조'
+		alt: '상단과 하단 목표선을 기준으로 롱과 숏 Grid 주문이 교차하는 구조',
+		description: 'Grid는 박스 안 왕복성을 전제로 양방향 가격 이동을 공략합니다. 실제 주문 설정은 로그인 후 보호된 Bot 설정 화면에서만 진행됩니다.'
 	},
 	{
 		label: 'Grid Exit',
 		src: nyBoxStrategyExitImage,
-		alt: '가격이 박스 밖으로 벗어나면 Grid 전략이 종료되는 구조'
+		alt: '가격이 박스 밖으로 벗어나면 Grid 전략이 종료되는 구조',
+		description: '가격이 박스 운용 범위를 벗어나면 Grid Exit 판단 대상입니다. 공개 화면은 상태 설명만 제공하며 주문이나 포지션을 만들지 않습니다.'
 	},
 	{
 		label: '강점',
 		src: nyBoxStrategyStrengthsImage,
-		alt: '박스 상하단 안정성, 뉴욕 세션 변동성 감소, 아시아 장초반 변동성, 가격 왕복성 등 전략 강점'
+		alt: '박스 상하단 안정성, 뉴욕 세션 변동성 감소, 아시아 장초반 변동성, 가격 왕복성 등 전략 강점',
+		description: '뉴욕 세션 후반 박스 안정성, 아시아 장초반 변동성, 가격 왕복성이 함께 확인될수록 Grid 참고 가치가 높아집니다.'
 	}
 ];
 
@@ -895,6 +901,7 @@ function tpLabel(tp) {
 }
 
 function formatBacktestPct(value, withSign = false) {
+	if (value === null || value === undefined || value === '') return '-';
 	const numeric = Number(value);
 	if (!Number.isFinite(numeric)) return '-';
 	const sign = withSign && numeric > 0 ? '+' : '';
@@ -1028,6 +1035,56 @@ function BacktestFootnote({ ready }) {
 	);
 }
 
+function normalizeBacktestStrategyType(value) {
+	return String(value || '').trim().toLowerCase();
+}
+
+function isReadyBacktestForType(item, expectedType) {
+	return item?.status === 'READY' && normalizeBacktestStrategyType(item?.strategyType) === expectedType;
+}
+
+function collectBestcaseEntries(stats) {
+	const bestcase = stats?.bestcase || {};
+	const entries = [];
+	if (isAlgorithmBestCase(bestcase)) {
+		for (const side of ['buy', 'sell']) {
+			for (const entry of Object.values(bestcase[side] || {})) {
+				if (entry && Number.isFinite(Number(entry.netPnlPct))) entries.push({ ...entry, side });
+			}
+		}
+		return entries;
+	}
+	for (const entry of Object.values(bestcase)) {
+		if (entry && Number.isFinite(Number(entry.netPnlPct))) entries.push(entry);
+	}
+	return entries;
+}
+
+function BacktestLiveSummary({ ready }) {
+	const stats = ready?.stats || {};
+	const best = collectBestcaseEntries(stats).sort((a, b) => Number(b.netPnlPct) - Number(a.netPnlPct))[0] || null;
+	const receivedAt = stats.receivedAt || ready?.updatedAt;
+	return (
+		<div className="backtest-live-summary" aria-label="실제 백테스트 수신 요약">
+			<div>
+				<span>데이터</span>
+				<strong>QBT_STATS_V1 실데이터</strong>
+				<small>{formatKstMonthDayTime(receivedAt)}</small>
+			</div>
+			<div>
+				<span>전략</span>
+				<strong>{stats.strategyName || ready?.strategyId || '-'}</strong>
+				<small>{normalizeBacktestStrategyType(stats.strategyType || ready?.strategyType).toUpperCase()}</small>
+			</div>
+			<div>
+				<span>최고 수익률</span>
+				<strong className={best && Number(best.netPnlPct) >= 0 ? 'backtest-cell-positive' : 'backtest-cell-negative'}>{best ? formatPercent(best.netPnlPct, 2, true) : '-'}</strong>
+				<small>{best ? `${periodLabel(best.period)} · TP ${tpLabel(best.tpPct)} · 승률 ${backtestWinrateText(best)}` : '수신값 없음'}</small>
+			</div>
+		</div>
+	);
+}
+
 function BacktestGridTable({ stats }) {
 	if (isAlgorithmBacktestMatrix(stats?.matrix)) return null;
 	const matrix = stats?.matrix || {};
@@ -1141,7 +1198,7 @@ function BacktestAlgorithmTable({ stats }) {
 function BacktestPanel({ itemType, backtests }) {
 	const strategy = strategyByItemType[itemType] || {};
 	const expectedType = itemType === 'ny_box' ? 'grid' : itemType === 'fear_greed' ? 'algorithm' : '';
-	const ready = Array.isArray(backtests) ? backtests.find((item) => item?.status === 'READY' && item?.strategyType === expectedType) : null;
+	const ready = Array.isArray(backtests) ? backtests.find((item) => isReadyBacktestForType(item, expectedType)) : null;
 	if (!ready) {
 		const missing = Array.isArray(backtests) ? backtests.find((item) => item?.status === 'NO_BACKTEST_DATA') : null;
 		return (
@@ -1171,6 +1228,7 @@ function BacktestPanel({ itemType, backtests }) {
 				</div>
 				<StatusBadge tone="up">READY</StatusBadge>
 			</div>
+			<BacktestLiveSummary ready={ready} />
 			{expectedType === 'grid' ? <BacktestGridTable stats={ready.stats} /> : <BacktestAlgorithmTable stats={ready.stats} />}
 			<BacktestFootnote ready={ready} />
 			<BacktestBestCasePanel stats={ready.stats} />
@@ -1267,20 +1325,28 @@ function NyBoxDetail({ detail, row, activeTab, autoTradeEligible, backtestEligib
 						</p>
 						<p>실제 Bot 설치와 주문 설정은 로그인 후 보호된 화면에서만 진행됩니다.</p>
 					</div>
-					<figure className="strategy-image-panel">
-						<img src={selectedStrategyImage.src} alt={selectedStrategyImage.alt} />
-					</figure>
-					<div className="strategy-nav">
-						{NY_BOX_STRATEGY_IMAGES.map(({ label }) => (
-							<button
-								key={label}
-								type="button"
-								className={label === selectedStrategyImage.label ? 'active' : undefined}
-								onClick={() => setSelectedStrategyImageLabel(label)}
-							>
-								{label}
-							</button>
-						))}
+					<div className="strategy-visual-layout">
+						<div className="strategy-nav strategy-nav-vertical" aria-label="뉴욕 박스 전략 이미지 선택">
+							{NY_BOX_STRATEGY_IMAGES.map(({ label }) => (
+								<button
+									key={label}
+									type="button"
+									className={label === selectedStrategyImage.label ? 'active' : undefined}
+									onClick={() => setSelectedStrategyImageLabel(label)}
+								>
+									{label}
+								</button>
+							))}
+						</div>
+						<div className="strategy-visual-main">
+							<figure className="strategy-image-panel">
+								<img src={selectedStrategyImage.src} alt={selectedStrategyImage.alt} />
+							</figure>
+							<div className="strategy-image-description">
+								<strong>{selectedStrategyImage.label}</strong>
+								<p>{selectedStrategyImage.description}</p>
+							</div>
+						</div>
 					</div>
 					{autoTradeEligible ? null : <EligibilityNotice type="autoTrade" />}
 					<ModalActionRow autoTradeEligible={autoTradeEligible} />

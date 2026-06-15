@@ -96,12 +96,18 @@ assert.match(page, /greedResolved/);
 assert.match(page, /NY_BOX_STRATEGY_IMAGES/);
 assert.match(page, /nybox-strategy-intro-with-copy\.png/);
 assert.match(page, /strategy-image-panel/);
+assert.match(page, /strategy-visual-layout/);
+assert.match(page, /strategy-nav-vertical/);
+assert.match(page, /strategy-image-description/);
 assert.match(page, /buildNyBoxOverviewSections/);
 assert.match(page, /현재 상태/);
 assert.match(page, /돌파 발생 시간/);
 assert.match(page, /돌파 확인 시간/);
 assert.match(page, /DeltaValue/);
 assert.match(page, /position-pill/);
+assert.match(page, /normalizeBacktestStrategyType/);
+assert.match(page, /BacktestLiveSummary/);
+assert.match(page, /QBT_STATS_V1 실데이터/);
 assert.doesNotMatch(page, /DetailSection title="기본 정보"/);
 assert.doesNotMatch(page, /restoredSections/);
 assert.doesNotMatch(page, /publicBacktest\s*\.\s*options/);
@@ -119,6 +125,10 @@ assert.match(pageCss, /\.ring-public-app \.backtest-side-toggle/);
 assert.match(pageCss, /\.ring-public-app \.backtest-bestcase-panel/);
 assert.match(pageCss, /\.ring-public-app \.strategy-placeholder/);
 assert.match(pageCss, /\.ring-public-app \.strategy-image-panel/);
+assert.match(pageCss, /\.ring-public-app \.strategy-visual-layout/);
+assert.match(pageCss, /\.ring-public-app \.strategy-nav-vertical/);
+assert.match(pageCss, /\.ring-public-app \.strategy-image-description/);
+assert.match(pageCss, /\.ring-public-app \.backtest-live-summary/);
 assert.match(pageCss, /\.ring-public-app \.nybox-gauge-current/);
 assert.match(pageCss, /\.ring-public-app \.delta-pill/);
 assert.match(pageCss, /\.ring-public-app \.position-pill/);
@@ -130,7 +140,7 @@ console.log(
 	JSON.stringify(
 		{
 			status: 'PASS',
-			tests: 84,
+			tests: 92,
 			noDummy: true,
 			tradingIsolation: true,
 			ringLevelPublicUxPort: true,

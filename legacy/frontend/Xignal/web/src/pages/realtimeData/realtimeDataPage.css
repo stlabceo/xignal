@@ -784,10 +784,52 @@
 	background: #fff;
 }
 
+.ring-public-app .strategy-visual-layout {
+	display: grid;
+	grid-template-columns: 156px minmax(0, 1fr);
+	gap: 16px;
+	align-items: start;
+}
+
+.ring-public-app .strategy-visual-main {
+	display: grid;
+	gap: 12px;
+	min-width: 0;
+}
+
+.ring-public-app .strategy-image-description {
+	padding: 15px 16px;
+	border: 1px solid #dbeafe;
+	border-radius: 14px;
+	background: #eff6ff;
+}
+
+.ring-public-app .strategy-image-description strong {
+	display: block;
+	color: #1d4ed8;
+	font-size: 14px;
+	font-weight: 950;
+}
+
+.ring-public-app .strategy-image-description p {
+	margin: 7px 0 0;
+	color: #334155;
+	font-size: 13px;
+	font-weight: 700;
+	line-height: 1.55;
+}
+
 .ring-public-app .strategy-nav {
 	display: flex;
 	flex-wrap: wrap;
 	gap: 8px;
+}
+
+.ring-public-app .strategy-nav-vertical {
+	position: sticky;
+	top: 8px;
+	display: grid;
+	align-self: start;
 }
 
 .ring-public-app .strategy-nav button {
@@ -799,6 +841,14 @@
 	color: #475569;
 	font-size: 12px;
 	font-weight: 850;
+}
+
+.ring-public-app .strategy-nav-vertical button {
+	justify-content: flex-start;
+	width: 100%;
+	min-height: 40px;
+	border-radius: 12px;
+	text-align: left;
 }
 
 .ring-public-app .strategy-nav button.active {
@@ -1035,6 +1085,34 @@
 	color: #64748b;
 	font-size: 13px;
 	line-height: 1.55;
+}
+
+.ring-public-app .backtest-live-summary {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 10px;
+}
+
+.ring-public-app .backtest-live-summary div {
+	display: grid;
+	gap: 4px;
+	padding: 14px;
+	border: 1px solid #dbeafe;
+	border-radius: 14px;
+	background: #f8fbff;
+}
+
+.ring-public-app .backtest-live-summary span,
+.ring-public-app .backtest-live-summary small {
+	color: #64748b;
+	font-size: 11px;
+	font-weight: 800;
+}
+
+.ring-public-app .backtest-live-summary strong {
+	color: #0f172a;
+	font-size: 14px;
+	font-weight: 950;
 }
 
 .ring-public-app .backtest-table-wrap {
@@ -1276,6 +1354,16 @@
 
 	.ring-public-app .modal-tabs {
 		overflow-x: auto;
+	}
+
+	.ring-public-app .strategy-visual-layout,
+	.ring-public-app .backtest-live-summary {
+		grid-template-columns: 1fr;
+	}
+
+	.ring-public-app .strategy-nav-vertical {
+		position: static;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
 	}
 
 	.ring-public-app .nybox-gauge-stage {
