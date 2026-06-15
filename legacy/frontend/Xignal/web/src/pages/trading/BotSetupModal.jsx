@@ -94,7 +94,14 @@ const buildStrategyOptions = (catalogItems, category) => {
 };
 
 const getStrategyOption = (strategyOptions, category, value) =>
-	strategyOptions.find((option) => option.category === category && option.value === value) || strategyOptions[0] || null;
+	strategyOptions.find((option) => option.category === category && option.value === value) || strategyOptions.find((option) => option.category === category) || null;
+
+const uniqueOptions = (...groups) =>
+	groups
+		.flat()
+		.map((value) => String(value || '').trim())
+		.filter(Boolean)
+		.filter((value, index, values) => values.indexOf(value) === index);
 
 const encodeStrategyOption = (option) => `${option.category}:${option.value}`;
 
@@ -208,17 +215,40 @@ const BotSetupModal = ({ isOpen, onClose, prefill = null, source = 'dashboard' }
 	}, [isOpen]);
 
 	const strategyOptions = useMemo(
-		() => [
-			...buildStrategyOptions(catalogByCategory.algorithm || [], 'algorithm'),
-			...buildStrategyOptions(catalogByCategory.grid || [], 'grid')
-		],
-		[catalogByCategory]
+		() => {
+			const options = [
+				...buildStrategyOptions(catalogByCategory.algorithm || [], 'algorithm'),
+				...buildStrategyOptions(catalogByCategory.grid || [], 'grid')
+			];
+			if (!prefill) return options;
+			const category = resolveCategoryFromPrefill(prefill);
+			const value = prefill.strategySignal || prefill.strategyCode || prefill.strategyId || prefill.strategyName;
+			if (!value || options.some((option) => option.category === category && option.value === value)) return options;
+			return [
+				{
+					value,
+					label: prefill.strategyName || value,
+					category,
+					item: {
+						strategyCode: value,
+						signalName: value,
+						displayName: prefill.strategyName || value,
+						allowedSymbols: prefill.symbol ? [normalizeSymbol(prefill.symbol)] : [],
+						allowedTimeframes: prefill.timeframeRaw ? [prefill.timeframeRaw] : []
+					}
+				},
+				...options
+			];
+		},
+		[catalogByCategory, prefill]
 	);
 	const selectedStrategyOption = useMemo(() => getStrategyOption(strategyOptions, form.category, form.strategySignal), [form.category, form.strategySignal, strategyOptions]);
 	const strategyItem = selectedStrategyOption?.item || null;
 	const strategySelectValue = selectedStrategyOption ? encodeStrategyOption(selectedStrategyOption) : `${form.category}:${form.strategySignal}`;
-	const symbolOptions = strategyItem?.allowedSymbols?.length ? strategyItem.allowedSymbols : buildFallbackCatalog(form.category)[0]?.allowedSymbols || [];
-	const timeframeOptions = strategyItem?.allowedTimeframes?.length ? strategyItem.allowedTimeframes : buildFallbackCatalog(form.category)[0]?.allowedTimeframes || [];
+	const baseSymbolOptions = strategyItem?.allowedSymbols?.length ? strategyItem.allowedSymbols : buildFallbackCatalog(form.category)[0]?.allowedSymbols || [];
+	const baseTimeframeOptions = strategyItem?.allowedTimeframes?.length ? strategyItem.allowedTimeframes : buildFallbackCatalog(form.category)[0]?.allowedTimeframes || [];
+	const symbolOptions = uniqueOptions(form.symbol, baseSymbolOptions);
+	const timeframeOptions = uniqueOptions(form.bunbong, baseTimeframeOptions);
 
 	const isGrid = form.category === 'grid';
 	const orderAmount = toNumber(form.margin) * toNumber(form.leverage);

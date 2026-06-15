@@ -24,6 +24,7 @@ import AdminConsole from './pages/admin/AdminConsole.jsx';
 import MenuPlaceholderPage from './pages/placeholder/MenuPlaceholderPage.jsx';
 import TakeProfitSearchPage from './pages/takeProfitSearch/TakeProfitSearchPage.jsx';
 import { clearSessionAuth, getSessionSnapshot } from './utils/sessionAuth.js';
+import { getDevSuperUser, isDevSuperLoginActive } from './utils/devSuperLogin.js';
 
 function App() {
 	useSocket();
@@ -33,6 +34,25 @@ function App() {
 		const { hydrateSessionState, setIsAdminSession, setIsLoggedIn, setUserInfo, setUserPrice } = useAuthStore();
 
 		useEffect(() => {
+			if (isDevSuperLoginActive()) {
+				const devUser = getDevSuperUser();
+				setUserInfo({
+					loginId: devUser.email,
+					username: devUser.name,
+					grade: 0,
+					isDevSuperLogin: true,
+					livePrice: 0,
+					paperPrice: 0
+				});
+				setUserPrice({
+					livePrice: 0,
+					paperPrice: 0
+				});
+				setIsLoggedIn(true);
+				setIsAdminSession(false);
+				return;
+			}
+
 			const session = getSessionSnapshot('user');
 			hydrateSessionState('user');
 
