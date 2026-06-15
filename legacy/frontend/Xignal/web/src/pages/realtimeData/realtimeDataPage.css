@@ -215,8 +215,7 @@
 	border-bottom: 1px solid #e2e8f0;
 }
 
-.ring-public-app .data-toolbar span,
-.ring-public-app .nybox-meta-bar span {
+.ring-public-app .data-toolbar span {
 	color: #64748b;
 	font-size: 13px;
 	font-weight: 650;
@@ -275,27 +274,6 @@
 	padding: 14px 20px;
 	border-bottom: 1px solid #e2e8f0;
 	background: #f8fafc;
-}
-
-.ring-public-app .nybox-meta-bar {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 10px;
-}
-
-.ring-public-app .nybox-meta-bar span {
-	display: inline-flex;
-	align-items: center;
-	gap: 6px;
-	padding: 7px 10px;
-	border: 1px solid #e2e8f0;
-	border-radius: 999px;
-	background: #fff;
-}
-
-.ring-public-app .nybox-meta-bar strong {
-	color: #0f172a;
-	font-weight: 900;
 }
 
 .ring-public-app .filter-chip-row {
@@ -1021,7 +999,7 @@
 .ring-public-app .backtest-table td {
 	padding: 12px 14px;
 	border-bottom: 1px solid #eef2f7;
-	text-align: left;
+	text-align: center;
 }
 
 .ring-public-app .backtest-table th {
@@ -1036,6 +1014,77 @@
 	color: #334155;
 	font-size: 13px;
 	font-weight: 750;
+}
+
+.ring-public-app .backtest-corner-head,
+.ring-public-app .backtest-tp-cell {
+	position: sticky;
+	left: 0;
+	z-index: 1;
+	text-align: left;
+}
+
+.ring-public-app .backtest-corner-head {
+	background: #f8fafc;
+}
+
+.ring-public-app .backtest-tp-cell {
+	background: #fff;
+	color: #0f172a;
+	font-weight: 950;
+}
+
+.ring-public-app .backtest-period-head,
+.ring-public-app .backtest-metric-head {
+	text-align: center;
+}
+
+.ring-public-app .backtest-period-head {
+	color: #0f172a;
+	font-size: 12px;
+	background: #f1f5f9;
+}
+
+.ring-public-app .backtest-rate-cell {
+	color: #334155;
+	font-weight: 850;
+}
+
+.ring-public-app .backtest-pnl-cell {
+	font-weight: 950;
+}
+
+.ring-public-app .backtest-pnl-cell.backtest-cell-positive {
+	background: #ecfdf5;
+}
+
+.ring-public-app .backtest-pnl-cell.backtest-cell-negative {
+	background: #fef2f2;
+}
+
+.ring-public-app .backtest-pnl-cell.backtest-cell-neutral {
+	background: #f8fafc;
+}
+
+.ring-public-app .backtest-pnl-cell.backtest-cell-best {
+	position: relative;
+	background: #dcfce7;
+	box-shadow: inset 0 0 0 2px #22c55e;
+	color: #047857;
+}
+
+.ring-public-app .backtest-pnl-cell.backtest-cell-best::after {
+	content: '최고';
+	display: inline-flex;
+	align-items: center;
+	margin-left: 6px;
+	padding: 2px 5px;
+	border-radius: 999px;
+	background: #16a34a;
+	color: #fff;
+	font-size: 10px;
+	font-weight: 950;
+	vertical-align: middle;
 }
 
 .ring-public-app .backtest-side-toggle {

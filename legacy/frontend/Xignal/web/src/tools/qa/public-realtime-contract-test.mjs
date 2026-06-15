@@ -92,7 +92,15 @@ assert.match(page, /normalizeBacktestStrategyType/);
 assert.match(page, /isRealBacktestCell/);
 assert.match(page, /displayRealPeriods/);
 assert.match(page, /displayRealGridTpList/);
-assert.match(page, /const calculationWindowLabel = itemType === 'ny_box' \? null : windowLabel/);
+assert.match(page, /'2w': '2주'/);
+assert.match(page, /'1m': '1달'/);
+assert.match(page, /'1y': '1년'/);
+assert.match(page, /all: '전체'/);
+assert.match(page, /bestBacktestCellKey/);
+assert.match(page, /backtestPnlCellClass/);
+assert.match(page, /backtest-cell-best/);
+assert.match(page, /className="backtest-period-head"/);
+assert.match(page, /className="backtest-metric-head"/);
 assert.match(page, /itemType === 'ny_box' \? null : \(/);
 
 assert.doesNotMatch(page, /NyBoxGauge/);
@@ -102,6 +110,12 @@ assert.doesNotMatch(page, /nyBoxBreakoutTimeRow/);
 assert.doesNotMatch(page, /nyBoxExplicitBreakoutTime/);
 assert.doesNotMatch(page, /돌파 확인 시간/);
 assert.doesNotMatch(page, /행을 클릭하면/);
+assert.doesNotMatch(page, /nybox-meta-bar/);
+assert.doesNotMatch(page, /Status <strong>/);
+assert.doesNotMatch(page, /Rows <strong>/);
+assert.doesNotMatch(page, /Updated <strong>/);
+assert.doesNotMatch(page, /Session <strong>/);
+assert.doesNotMatch(page, /Window <strong>/);
 assert.doesNotMatch(page, /disabled=\{itemType === 'ny_box'\}/);
 assert.doesNotMatch(page, /박스상단\/박스하단은 최근 완료된 뉴욕 세션 후반부 가격 범위입니다/);
 assert.doesNotMatch(page, /상세 모달은 RingLevel detail API의 뉴욕 박스 섹션과 백테스트를 그대로 표시합니다/);
@@ -125,6 +139,11 @@ assert.match(pageCss, /\.ring-public-app \.strategy-visual-layout/);
 assert.match(pageCss, /\.ring-public-app \.strategy-nav-vertical/);
 assert.match(pageCss, /\.ring-public-app \.strategy-image-description/);
 assert.match(pageCss, /\.ring-public-app \.backtest-real-empty/);
+assert.match(pageCss, /\.ring-public-app \.backtest-period-head/);
+assert.match(pageCss, /\.ring-public-app \.backtest-rate-cell/);
+assert.match(pageCss, /\.ring-public-app \.backtest-pnl-cell\.backtest-cell-positive/);
+assert.match(pageCss, /\.ring-public-app \.backtest-pnl-cell\.backtest-cell-negative/);
+assert.match(pageCss, /\.ring-public-app \.backtest-pnl-cell\.backtest-cell-best/);
 assert.match(pageCss, /\.ring-public-app \.delta-pill/);
 assert.match(pageCss, /\.ring-public-app \.position-pill/);
 assert.match(pageCss, /\.ring-public-app \.zone-row strong\.value-tone\.up/);
@@ -132,6 +151,7 @@ assert.match(pageCss, /@media \(max-width: 720px\)/);
 assert.match(pageCss, /content: attr\(data-label\)/);
 assert.doesNotMatch(pageCss, /bear-bull-box-gauge/);
 assert.doesNotMatch(pageCss, /backtest-live-summary/);
+assert.doesNotMatch(pageCss, /nybox-meta-bar/);
 assert.doesNotMatch(pageCss, /nybox-gauge/);
 assert.doesNotMatch(pageCss, /position-breakout-high/);
 assert.doesNotMatch(pageCss, /position-breakout-low/);
@@ -140,7 +160,7 @@ console.log(
 	JSON.stringify(
 		{
 			status: 'PASS',
-			tests: 106,
+			tests: 123,
 			noDummy: true,
 			tradingIsolation: true,
 			ringLevelPublicUxPort: true,
@@ -149,6 +169,9 @@ console.log(
 			nyBoxBacktestSummaryCardsRemoved: true,
 			nyBoxFakeBreakoutTimeRemoved: true,
 			nyBoxTimeframeControlHidden: true,
+			publicMetaBarRemoved: true,
+			backtestKoreanPeriodLabels: true,
+			backtestBestPnlHighlighted: true,
 			latestRingLevelPublicLaunch: 'ny_box,fear_greed',
 			detailBacktestSource: 'ring-level detail.backtests',
 			route: '/realtime-data'

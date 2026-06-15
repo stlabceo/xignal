@@ -364,14 +364,6 @@ const formatPercent = (value, digits = 2, withSign = false) => {
 	return `${sign}${numeric.toFixed(digits)}%`;
 };
 
-const formatDateTime = (value) => {
-	if (!value) return '-';
-	if (String(value).includes('KST')) return value;
-	const date = new Date(value);
-	if (Number.isNaN(date.getTime())) return String(value);
-	return date.toLocaleString('ko-KR', { hour12: false });
-};
-
 const formatKstMonthDayTime = (value) => {
 	if (!value) return '-';
 	const date = new Date(value);
@@ -750,10 +742,6 @@ function timeframeForWidget(value) {
 	return intervalByTimeframe[value] || '15';
 }
 
-function windowLabel(rows, itemType, raw) {
-	return rows?.[0]?.calculationWindow?.label || raw?.meta?.currentSessionLabel || (itemType === 'ny_box' ? '뉴욕박스 기준' : '공개 데이터 기준');
-}
-
 function TradingViewWidget({ symbol, timeframe }) {
 	const containerId = useMemo(() => `xignal-tv-${Math.random().toString(36).slice(2)}`, []);
 
@@ -822,7 +810,16 @@ const BACKTEST_STATUS_LABELS = {
 };
 
 function periodLabel(period) {
-	return String(period || '-').toUpperCase();
+	const labels = {
+		'2w': '2주',
+		'1m': '1달',
+		'2m': '2달',
+		'3m': '3달',
+		'6m': '6달',
+		'1y': '1년',
+		all: '전체'
+	};
+	return labels[String(period || '').toLowerCase()] || String(period || '-');
 }
 
 function tpLabel(tp) {
@@ -862,6 +859,24 @@ function backtestCellClass(cell) {
 	if (Number(cell.netPnlPct) > 0) return 'backtest-cell-positive';
 	if (Number(cell.netPnlPct) < 0) return 'backtest-cell-negative';
 	return 'backtest-cell-neutral';
+}
+
+function bestBacktestCellKey(matrix, periods, tpList) {
+	let best = null;
+	for (const period of periods) {
+		for (const tp of tpList) {
+			const tpKey = String(tp);
+			const cell = matrix?.[period]?.[tpKey];
+			if (!isRealBacktestCell(cell)) continue;
+			const value = Number(cell.netPnlPct);
+			if (!best || value > best.value) best = { key: `${period}:${tpKey}`, value };
+		}
+	}
+	return best?.key || null;
+}
+
+function backtestPnlCellClass(cell, isBest = false) {
+	return `${backtestCellClass(cell)} backtest-pnl-cell${isBest ? ' backtest-cell-best' : ''}`;
 }
 
 function isAlgorithmBacktestMatrix(matrix) {
@@ -1004,14 +1019,15 @@ function BacktestGridTable({ stats }) {
 	const periods = displayRealPeriods(stats);
 	const tpList = displayRealGridTpList(stats, periods);
 	if (!periods.length || !tpList.length) return <p className="backtest-real-empty">status=OK 실측 백테스트 값이 없습니다.</p>;
+	const bestKey = bestBacktestCellKey(matrix, periods, tpList);
 	return (
 		<div className="backtest-table-wrap">
 			<table className="backtest-table">
 				<thead>
 					<tr>
-						<th rowSpan={2}>TP별 / 기간별</th>
+						<th className="backtest-corner-head" rowSpan={2}>TP</th>
 						{periods.map((period) => (
-							<th key={period} colSpan={2}>
+							<th className="backtest-period-head" key={period} colSpan={2}>
 								{periodLabel(period)}
 							</th>
 						))}
@@ -1019,8 +1035,8 @@ function BacktestGridTable({ stats }) {
 					<tr>
 						{periods.map((period) => (
 							<Fragment key={`${period}-metrics`}>
-								<th>승률</th>
-								<th>수익률</th>
+								<th className="backtest-metric-head">승률</th>
+								<th className="backtest-metric-head">수익률</th>
 							</Fragment>
 						))}
 					</tr>
@@ -1030,13 +1046,14 @@ function BacktestGridTable({ stats }) {
 						const tpKey = String(tp);
 						return (
 							<tr key={tpKey}>
-								<td>{tpLabel(tp)}</td>
+								<td className="backtest-tp-cell">{tpLabel(tp)}</td>
 								{periods.map((period) => {
 									const cell = matrix?.[period]?.[tpKey];
+									const isBest = `${period}:${tpKey}` === bestKey;
 									return (
 										<Fragment key={period}>
-											<td className={backtestCellClass(cell)} title={backtestStatusText(cell)}>{backtestWinrateText(cell)}</td>
-											<td className={backtestCellClass(cell)} title={backtestStatusText(cell)}>{backtestNetPnlText(cell)}</td>
+											<td className="backtest-rate-cell" title={backtestStatusText(cell)}>{backtestWinrateText(cell)}</td>
+											<td className={backtestPnlCellClass(cell, isBest)} title={isBest ? `최고 수익률 · ${backtestStatusText(cell)}` : backtestStatusText(cell)}>{backtestNetPnlText(cell)}</td>
 										</Fragment>
 									);
 								})}
@@ -1057,6 +1074,7 @@ function BacktestAlgorithmTable({ stats }) {
 	const selectedMatrix = matrix[selectedSide] || {};
 	const tpList = displayTpList(stats).filter((tp) => periods.some((period) => isRealBacktestCell(selectedMatrix?.[period]?.[String(tp)])));
 	if (!periods.length || !tpList.length) return <p className="backtest-real-empty">status=OK 실측 백테스트 값이 없습니다.</p>;
+	const bestKey = bestBacktestCellKey(selectedMatrix, periods, tpList);
 	return (
 		<div className="backtest-algorithm-panel">
 			<div className="backtest-side-toggle" role="group" aria-label="백테스트 방향 선택">
@@ -1071,9 +1089,9 @@ function BacktestAlgorithmTable({ stats }) {
 				<table className="backtest-table">
 					<thead>
 						<tr>
-							<th rowSpan={2}>TP</th>
+							<th className="backtest-corner-head" rowSpan={2}>TP</th>
 							{periods.map((period) => (
-								<th key={period} colSpan={2}>
+								<th className="backtest-period-head" key={period} colSpan={2}>
 									{periodLabel(period)}
 								</th>
 							))}
@@ -1081,8 +1099,8 @@ function BacktestAlgorithmTable({ stats }) {
 						<tr>
 							{periods.map((period) => (
 								<Fragment key={`${selectedSide}-${period}-metrics`}>
-									<th>승률</th>
-									<th>수익률</th>
+									<th className="backtest-metric-head">승률</th>
+									<th className="backtest-metric-head">수익률</th>
 								</Fragment>
 							))}
 						</tr>
@@ -1092,13 +1110,14 @@ function BacktestAlgorithmTable({ stats }) {
 							const tpKey = String(tp);
 							return (
 								<tr key={tpKey}>
-									<td>{tpLabel(tp)}</td>
+									<td className="backtest-tp-cell">{tpLabel(tp)}</td>
 									{periods.map((period) => {
 										const cell = selectedMatrix?.[period]?.[tpKey];
+										const isBest = `${period}:${tpKey}` === bestKey;
 										return (
 											<Fragment key={`${selectedSide}-${period}`}>
-												<td className={backtestCellClass(cell)} title={backtestStatusText(cell)}>{backtestWinrateText(cell)}</td>
-												<td className={backtestCellClass(cell)} title={backtestStatusText(cell)}>{backtestNetPnlText(cell)}</td>
+												<td className="backtest-rate-cell" title={backtestStatusText(cell)}>{backtestWinrateText(cell)}</td>
+												<td className={backtestPnlCellClass(cell, isBest)} title={isBest ? `최고 수익률 · ${backtestStatusText(cell)}` : backtestStatusText(cell)}>{backtestNetPnlText(cell)}</td>
 											</Fragment>
 										);
 									})}
@@ -1778,10 +1797,6 @@ function RealtimeDataPage() {
 
 	const selectedForChart = selectedRow || filteredRows[0] || null;
 	const chartSymbol = chartSymbolFor(selectedForChart);
-	const updatedAt = state.raw?.updatedAt || state.raw?.meta?.livePriceUpdatedAtKst || state.raw?.nyBoxCacheMeta?.calculatedAtKst || state.raw?.nyBoxCoverage?.calculatedAtKst;
-	const activeSession = state.raw?.meta?.currentSessionLabel || '-';
-	const calculationWindowLabel = itemType === 'ny_box' ? null : windowLabel(filteredRows, itemType, state.raw);
-
 	const openDetail = async (row) => {
 		setSelectedRow(row);
 		setDetailState({ loading: true, detail: null, error: '' });
@@ -1876,25 +1891,6 @@ function RealtimeDataPage() {
 						</div>
 
 						<div className="nybox-panel">
-							<div className="nybox-meta-bar">
-								<span>
-									Status <strong>{state.status}</strong>
-								</span>
-								<span>
-									Rows <strong>{filteredRows.length.toLocaleString('ko-KR')} / {(state.rows || []).length.toLocaleString('ko-KR')}</strong>
-								</span>
-								<span>
-									Updated <strong>{formatDateTime(updatedAt)}</strong>
-								</span>
-								<span>
-									Session <strong>{activeSession}</strong>
-								</span>
-								{calculationWindowLabel ? (
-									<span>
-										Window <strong>{calculationWindowLabel}</strong>
-									</span>
-								) : null}
-							</div>
 							{itemType === 'ny_box' ? (
 								<div className="filter-chip-row">
 									{NYBOX_FILTERS.map((filter) => (
