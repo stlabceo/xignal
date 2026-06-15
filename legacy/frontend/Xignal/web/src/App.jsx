@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route, useNavigate } from 'react-router';
+import { BrowserRouter as Router, Navigate, Routes, Route, useNavigate } from 'react-router';
 import AppLayout from './layout/AppLayout';
 import TradingPage from './pages/trading/TradingPage';
 import TestTradingPage from './pages/trading/TestTradingPage';
@@ -146,6 +146,18 @@ function App() {
 		return shouldUseAppLayout ? <AppLayout>{children}</AppLayout> : children;
 	};
 
+	const MemberSurfaceRoute = ({ children }) => {
+		const { hydrateSessionState, isLoggedIn } = useAuthStore();
+		const session = getSessionSnapshot('user');
+		const isAllowed = isDevSuperLoginActive() || isLoggedIn || session.isLoggedIn;
+
+		useEffect(() => {
+			hydrateSessionState('user');
+		}, [hydrateSessionState]);
+
+		return isAllowed ? <AppLayout>{children}</AppLayout> : <Navigate to="/login" replace />;
+	};
+
 	return (
 		<>
 			<MessageModalProvider>
@@ -252,17 +264,17 @@ function App() {
 						<Route
 							path="/take-profit-search"
 							element={
-								<PublicSurfaceRoute>
+								<MemberSurfaceRoute>
 									<TakeProfitSearchPage />
-								</PublicSurfaceRoute>
+								</MemberSurfaceRoute>
 							}
 						/>
 						<Route
 							path="/tp-search"
 							element={
-								<PublicSurfaceRoute>
+								<MemberSurfaceRoute>
 									<TakeProfitSearchPage />
-								</PublicSurfaceRoute>
+								</MemberSurfaceRoute>
 							}
 						/>
 						<Route element={<AppLayout />}>

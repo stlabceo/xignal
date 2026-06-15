@@ -33,11 +33,13 @@ assert.match(app, /PublicSurfaceRoute/);
 assert.match(app, /<AppLayout>\{children\}<\/AppLayout>/);
 assert.match(app, /path="\/take-profit-search"/);
 assert.match(app, /<TakeProfitSearchPage \/>/);
+assert.match(app, /MemberSurfaceRoute/);
 assert.match(appLayout, /children \|\| <Outlet \/>/);
 assert.match(appSidebar, /실시간 데이터/);
 
 assert.match(login, /\/realtime-data/);
 assert.match(login, /실시간 데이터 보기/);
+assert.doesNotMatch(login, /href="\/take-profit-search"/);
 
 assert.match(page, /publicRealtime\.nyBoxSnapshot/);
 assert.match(page, /publicRealtime\.fearGreedSnapshot/);
@@ -49,7 +51,7 @@ console.log(
 	JSON.stringify(
 		{
 			status: 'PASS',
-			tests: 21,
+			tests: 23,
 			noDummy: true,
 			tradingIsolation: true,
 			route: '/realtime-data'

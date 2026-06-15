@@ -111,9 +111,7 @@ const LoginPage = () => {
 					<a href="/realtime-data" className="font-bold text-[#2563EB]">
 						실시간 데이터 보기
 					</a>
-					<a href="/take-profit-search" className="font-semibold text-[#64748B]">
-						백테스트 보기
-					</a>
+					<p className="font-semibold text-[#64748B]">익절 조건 검색은 로그인 후 이용할 수 있습니다.</p>
 				</div>
 			</div>
 		</AuthLayout>
