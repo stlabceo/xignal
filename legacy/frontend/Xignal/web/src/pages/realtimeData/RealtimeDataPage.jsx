@@ -853,15 +853,16 @@ function NyBoxGauge({ row }) {
 	const position = nyBoxPosition(row);
 	const rawPct = hasGaugeData ? ((current - bottom) / (top - bottom)) * 100 : 50;
 	const pct = Math.max(0, Math.min(100, rawPct));
-	const pricePlacement = pct < 10 ? 'left-outside' : pct > 90 ? 'right-outside' : 'center';
+	const markerLeft = rawPct > 100 ? 'calc(100% + 14px)' : rawPct < 0 ? 'calc(0% - 14px)' : `${pct}%`;
+	const pricePlacement = rawPct > 100 ? 'breakout-high' : rawPct < 0 ? 'breakout-low' : pct < 10 ? 'left-outside' : pct > 90 ? 'right-outside' : 'center';
 
 	return (
 		<section className={`bear-bull-box-gauge position-${pricePlacement}`} aria-label={`${getSymbol(row)} NY Box position gauge`}>
 			<div className="nybox-gauge-stage">
 				<div className="nybox-gauge-icon bear-icon">BEAR</div>
 				<div className="nybox-gauge-bar" aria-hidden="true">
-					<span className="price-marker" style={{ left: `${pct}%` }} />
-					<strong className="nybox-gauge-current" style={{ left: `${pct}%` }}>
+					<span className="price-marker" style={{ left: markerLeft }} />
+					<strong className="nybox-gauge-current" style={{ left: markerLeft }}>
 						{formatPrice(row?.currentPrice)}
 					</strong>
 				</div>
@@ -908,11 +909,17 @@ function formatBacktestPct(value, withSign = false) {
 	return `${sign}${numeric.toFixed(1)}%`;
 }
 
+function isRealBacktestCell(cell) {
+	return Boolean(cell && cell.status === 'OK' && Number.isFinite(Number(cell.winratePct)) && Number.isFinite(Number(cell.netPnlPct)));
+}
+
 function backtestWinrateText(cell) {
+	if (!isRealBacktestCell(cell)) return '-';
 	return formatBacktestPct(cell?.winratePct);
 }
 
 function backtestNetPnlText(cell) {
+	if (!isRealBacktestCell(cell)) return '-';
 	return formatBacktestPct(cell?.netPnlPct, true);
 }
 
@@ -937,8 +944,28 @@ function displayPeriods(stats) {
 	return known.length > 0 ? known : periods;
 }
 
+function gridPeriodHasRealBacktest(matrix, period) {
+	return Object.values(matrix?.[period] || {}).some(isRealBacktestCell);
+}
+
+function algorithmPeriodHasRealBacktest(matrix, period) {
+	return ['buy', 'sell'].some((side) => Object.values(matrix?.[side]?.[period] || {}).some(isRealBacktestCell));
+}
+
+function displayRealPeriods(stats) {
+	const periods = displayPeriods(stats);
+	const matrix = stats?.matrix || {};
+	if (isAlgorithmBacktestMatrix(matrix)) return periods.filter((period) => algorithmPeriodHasRealBacktest(matrix, period));
+	return periods.filter((period) => gridPeriodHasRealBacktest(matrix, period));
+}
+
 function displayTpList(stats) {
-	return Array.isArray(stats?.tpListPct) ? stats.tpListPct : [];
+	return Array.isArray(stats?.tpListPct) ? stats.tpListPct.map((tp) => Number(tp)).filter((tp) => Number.isFinite(tp)).sort((a, b) => a - b) : [];
+}
+
+function displayRealGridTpList(stats, periods) {
+	const matrix = stats?.matrix || {};
+	return displayTpList(stats).filter((tp) => periods.some((period) => isRealBacktestCell(matrix?.[period]?.[String(tp)])));
 }
 
 function isAlgorithmBestCase(bestcase) {
@@ -974,6 +1001,15 @@ function bestCaseByPeriod(value, periods) {
 
 function BacktestBestCaseTable({ title, bestcase, periods }) {
 	const rows = bestCaseByPeriod(bestcase, periods);
+	const realPeriods = periods.filter((period) => isRealBacktestCell(rows[period]));
+	if (!realPeriods.length) {
+		return (
+			<div className="backtest-bestcase-block">
+				<h4>{title}</h4>
+				<p className="backtest-real-empty">status=OK 실측 백테스트 값이 없습니다.</p>
+			</div>
+		);
+	}
 	return (
 		<div className="backtest-bestcase-block">
 			<h4>{title}</h4>
@@ -988,7 +1024,7 @@ function BacktestBestCaseTable({ title, bestcase, periods }) {
 					</tr>
 				</thead>
 				<tbody>
-					{periods.map((period) => {
+					{realPeriods.map((period) => {
 						const entry = rows[period];
 						return (
 							<tr key={period}>
@@ -1007,7 +1043,7 @@ function BacktestBestCaseTable({ title, bestcase, periods }) {
 }
 
 function BacktestBestCasePanel({ stats }) {
-	const periods = displayPeriods(stats);
+	const periods = displayRealPeriods(stats);
 	const bestcase = stats?.bestcase || {};
 	return (
 		<div className="backtest-bestcase-panel">
@@ -1049,13 +1085,13 @@ function collectBestcaseEntries(stats) {
 	if (isAlgorithmBestCase(bestcase)) {
 		for (const side of ['buy', 'sell']) {
 			for (const entry of Object.values(bestcase[side] || {})) {
-				if (entry && Number.isFinite(Number(entry.netPnlPct))) entries.push({ ...entry, side });
+				if (isRealBacktestCell(entry)) entries.push({ ...entry, side });
 			}
 		}
 		return entries;
 	}
 	for (const entry of Object.values(bestcase)) {
-		if (entry && Number.isFinite(Number(entry.netPnlPct))) entries.push(entry);
+		if (isRealBacktestCell(entry)) entries.push(entry);
 	}
 	return entries;
 }
@@ -1088,7 +1124,9 @@ function BacktestLiveSummary({ ready }) {
 function BacktestGridTable({ stats }) {
 	if (isAlgorithmBacktestMatrix(stats?.matrix)) return null;
 	const matrix = stats?.matrix || {};
-	const periods = displayPeriods(stats);
+	const periods = displayRealPeriods(stats);
+	const tpList = displayRealGridTpList(stats, periods);
+	if (!periods.length || !tpList.length) return <p className="backtest-real-empty">status=OK 실측 백테스트 값이 없습니다.</p>;
 	return (
 		<div className="backtest-table-wrap">
 			<table className="backtest-table">
@@ -1111,7 +1149,7 @@ function BacktestGridTable({ stats }) {
 					</tr>
 				</thead>
 				<tbody>
-					{displayTpList(stats).map((tp) => {
+					{tpList.map((tp) => {
 						const tpKey = String(tp);
 						return (
 							<tr key={tpKey}>
@@ -1138,8 +1176,10 @@ function BacktestAlgorithmTable({ stats }) {
 	const [selectedSide, setSelectedSide] = useState('buy');
 	if (!isAlgorithmBacktestMatrix(stats?.matrix)) return null;
 	const matrix = stats.matrix;
-	const periods = displayPeriods(stats);
+	const periods = displayRealPeriods(stats);
 	const selectedMatrix = matrix[selectedSide] || {};
+	const tpList = displayTpList(stats).filter((tp) => periods.some((period) => isRealBacktestCell(selectedMatrix?.[period]?.[String(tp)])));
+	if (!periods.length || !tpList.length) return <p className="backtest-real-empty">status=OK 실측 백테스트 값이 없습니다.</p>;
 	return (
 		<div className="backtest-algorithm-panel">
 			<div className="backtest-side-toggle" role="group" aria-label="백테스트 방향 선택">
@@ -1171,7 +1211,7 @@ function BacktestAlgorithmTable({ stats }) {
 						</tr>
 					</thead>
 					<tbody>
-						{displayTpList(stats).map((tp) => {
+						{tpList.map((tp) => {
 							const tpKey = String(tp);
 							return (
 								<tr key={tpKey}>

@@ -937,6 +937,7 @@
 	position: relative;
 	height: 12px;
 	margin-bottom: 18px;
+	overflow: visible;
 	border-radius: 999px;
 	background: linear-gradient(90deg, #ef4444 0%, #e2e8f0 50%, #22c55e 100%);
 }
@@ -951,6 +952,16 @@
 	background: #2563eb;
 	box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
 	transform: translate(-50%, -50%);
+}
+
+.ring-public-app .bear-bull-box-gauge.position-breakout-high .price-marker {
+	background: #16a34a;
+	box-shadow: 0 4px 12px rgba(22, 163, 74, 0.32);
+}
+
+.ring-public-app .bear-bull-box-gauge.position-breakout-low .price-marker {
+	background: #dc2626;
+	box-shadow: 0 4px 12px rgba(220, 38, 38, 0.32);
 }
 
 .ring-public-app .nybox-gauge-current {
@@ -971,6 +982,16 @@
 
 .ring-public-app .bear-bull-box-gauge.position-right-outside .nybox-gauge-current {
 	transform: translateX(-100%);
+}
+
+.ring-public-app .bear-bull-box-gauge.position-breakout-high .nybox-gauge-current {
+	color: #047857;
+	transform: translateX(-100%);
+}
+
+.ring-public-app .bear-bull-box-gauge.position-breakout-low .nybox-gauge-current {
+	color: #b91c1c;
+	transform: translateX(0);
 }
 
 .ring-public-app .nybox-gauge-values,
@@ -1113,6 +1134,17 @@
 	color: #0f172a;
 	font-size: 14px;
 	font-weight: 950;
+}
+
+.ring-public-app .backtest-real-empty {
+	margin: 0;
+	padding: 14px 15px;
+	border: 1px solid #e2e8f0;
+	border-radius: 14px;
+	background: #f8fafc;
+	color: #64748b;
+	font-size: 13px;
+	font-weight: 800;
 }
 
 .ring-public-app .backtest-table-wrap {

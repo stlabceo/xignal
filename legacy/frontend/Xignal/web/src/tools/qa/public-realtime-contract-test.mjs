@@ -108,6 +108,9 @@ assert.match(page, /position-pill/);
 assert.match(page, /normalizeBacktestStrategyType/);
 assert.match(page, /BacktestLiveSummary/);
 assert.match(page, /QBT_STATS_V1 실데이터/);
+assert.match(page, /isRealBacktestCell/);
+assert.match(page, /displayRealPeriods/);
+assert.match(page, /displayRealGridTpList/);
 assert.doesNotMatch(page, /DetailSection title="기본 정보"/);
 assert.doesNotMatch(page, /restoredSections/);
 assert.doesNotMatch(page, /publicBacktest\s*\.\s*options/);
@@ -129,6 +132,9 @@ assert.match(pageCss, /\.ring-public-app \.strategy-visual-layout/);
 assert.match(pageCss, /\.ring-public-app \.strategy-nav-vertical/);
 assert.match(pageCss, /\.ring-public-app \.strategy-image-description/);
 assert.match(pageCss, /\.ring-public-app \.backtest-live-summary/);
+assert.match(pageCss, /\.ring-public-app \.backtest-real-empty/);
+assert.match(pageCss, /position-breakout-high/);
+assert.match(pageCss, /position-breakout-low/);
 assert.match(pageCss, /\.ring-public-app \.nybox-gauge-current/);
 assert.match(pageCss, /\.ring-public-app \.delta-pill/);
 assert.match(pageCss, /\.ring-public-app \.position-pill/);
@@ -140,7 +146,7 @@ console.log(
 	JSON.stringify(
 		{
 			status: 'PASS',
-			tests: 92,
+			tests: 99,
 			noDummy: true,
 			tradingIsolation: true,
 			ringLevelPublicUxPort: true,
