@@ -12,6 +12,7 @@ const readWeb = (relativePath) => fs.readFileSync(path.join(webRoot, relativePat
 
 const client = readSrc('services/publicRealtime.js');
 const page = readSrc('pages/realtimeData/RealtimeDataPage.jsx');
+const pageCss = readSrc('pages/realtimeData/realtimeDataPage.css');
 const app = readSrc('App.jsx');
 const appLayout = readSrc('layout/AppLayout.jsx');
 const appSidebar = readSrc('layout/AppSidebar.jsx');
@@ -37,7 +38,7 @@ assert.match(app, /MemberSurfaceRoute/);
 assert.match(appLayout, /children \|\| <Outlet \/>/);
 assert.match(appSidebar, /실시간 데이터/);
 
-assert.match(login, /\/realtime-data/);
+assert.match(login, /href="\/realtime-data"/);
 assert.match(login, /실시간 데이터 보기/);
 assert.doesNotMatch(login, /href="\/take-profit-search"/);
 
@@ -45,15 +46,30 @@ assert.match(page, /publicRealtime\.nyBoxSnapshot/);
 assert.match(page, /publicRealtime\.fearGreedSnapshot/);
 assert.match(page, /publicRealtime\.supportResistanceSnapshot/);
 assert.match(page, /publicBacktest\s*\.\s*options/);
-assert.doesNotMatch(page, /order_intent_queue|GRID_LIVE_ARM|Binance|private polling/i);
+assert.match(page, /TradingViewWidget/);
+assert.match(page, /LevelModal/);
+assert.match(page, /NyBoxGauge/);
+assert.match(page, /BacktestPanel/);
+assert.match(page, /ring-public-app/);
+assert.match(page, /NY_QUIET_CLOSE_ASIA_BOX/);
+assert.match(page, /ATF_VIXFIX/);
+assert.doesNotMatch(page, /order_intent_queue|GRID_LIVE_ARM|private polling|private write|order_intent_queue\.insert|direct DB/i);
+
+assert.match(pageCss, /\.ring-public-app \.app-shell/);
+assert.match(pageCss, /\.ring-public-app \.chart-section/);
+assert.match(pageCss, /\.ring-public-app \.modal-tabs/);
+assert.match(pageCss, /\.ring-public-app \.public-data-table/);
+assert.match(pageCss, /\.ring-public-app \.bear-bull-box-gauge/);
+assert.match(pageCss, /\.ring-public-app \.backtest-table/);
 
 console.log(
 	JSON.stringify(
 		{
 			status: 'PASS',
-			tests: 23,
+			tests: 34,
 			noDummy: true,
 			tradingIsolation: true,
+			ringLevelPublicUxPort: true,
 			route: '/realtime-data'
 		},
 		null,

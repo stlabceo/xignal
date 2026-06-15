@@ -24,10 +24,14 @@ assert.match(loginPage, /href="\/realtime-data"/);
 assert.doesNotMatch(loginPage, /href="\/take-profit-search"/);
 assert.match(loginPage, /익절 조건 검색은 로그인 후 이용할 수 있습니다/);
 
-assert.match(realtimePage, /BacktestMiniPanel/);
+assert.match(realtimePage, /BacktestPanel/);
 assert.match(realtimePage, /publicBacktest\s*\.\s*options/);
-assert.doesNotMatch(realtimePage, /회원 전용|로그인 후 이용|Bot 추가하기/);
-assert.match(realtimePage, /관련 백테스트/);
+assert.match(realtimePage, /href="\/take-profit-search"/);
+assert.match(realtimePage, /href="\/login"/);
+assert.match(realtimePage, /LevelModal/);
+assert.match(realtimePage, /TradingViewWidget/);
+assert.doesNotMatch(realtimePage, /BotSetupModal/);
+assert.doesNotMatch(realtimePage, /order_intent_queue|GRID_LIVE_ARM|private polling|private write/i);
 
 assert.match(takeProfitPage, /BotSetupModal/);
 assert.match(takeProfitPage, /publicBacktest\s*\.\s*options/);
@@ -37,7 +41,7 @@ console.log(
 	JSON.stringify(
 		{
 			status: 'PASS',
-			tests: 14,
+			tests: 18,
 			unauthRealtimeAllowed: true,
 			unauthTakeProfitProtected: true,
 			realtimeModalBacktestPublic: true,

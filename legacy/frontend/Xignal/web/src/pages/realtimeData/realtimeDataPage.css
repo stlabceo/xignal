@@ -1,0 +1,963 @@
+.ring-public-app {
+	min-height: 100vh;
+	background: #f3f6fb;
+	color: #0f172a;
+	font-family: Pretendard, Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.ring-public-app * {
+	box-sizing: border-box;
+}
+
+.ring-public-app .app-shell {
+	width: min(1440px, calc(100% - 32px));
+	margin: 0 auto;
+	padding: 28px 0 52px;
+}
+
+.ring-public-app .chart-section,
+.ring-public-app .controls-section,
+.ring-public-app .category-intro-section,
+.ring-public-app .table-section {
+	margin: 0 auto 18px;
+}
+
+.ring-public-app .chart-section {
+	overflow: hidden;
+	border: 1px solid #dbe4ef;
+	border-radius: 22px;
+	background: #fff;
+	box-shadow: 0 22px 70px rgba(15, 23, 42, 0.08);
+}
+
+.ring-public-app .top-strip {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	padding: 16px 18px;
+	border-bottom: 1px solid #e2e8f0;
+	background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.ring-public-app .brand-block {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	color: #64748b;
+	font-size: 13px;
+	font-weight: 700;
+}
+
+.ring-public-app .wordmark-button {
+	display: inline-flex;
+	align-items: center;
+	height: 34px;
+	padding: 0 12px;
+	border: 1px solid #bfdbfe;
+	border-radius: 10px;
+	background: #eff6ff;
+	color: #1d4ed8;
+	font-size: 15px;
+	font-weight: 900;
+	letter-spacing: 0;
+	text-decoration: none;
+}
+
+.ring-public-app .auth-button,
+.ring-public-app .icon-text-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-height: 36px;
+	padding: 0 14px;
+	border: 1px solid #cbd5e1;
+	border-radius: 10px;
+	background: #fff;
+	color: #334155;
+	font-size: 13px;
+	font-weight: 800;
+	text-decoration: none;
+	transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease;
+}
+
+.ring-public-app .auth-button:hover,
+.ring-public-app .icon-text-button:hover {
+	border-color: #93c5fd;
+	background: #eff6ff;
+	color: #1d4ed8;
+}
+
+.ring-public-app .icon-text-button.primary {
+	border-color: #2563eb;
+	background: #2563eb;
+	color: #fff;
+}
+
+.ring-public-app .trading-view {
+	width: 100%;
+	height: clamp(320px, 46vw, 560px);
+	background: #f8fafc;
+}
+
+.ring-public-app .chart-fallback {
+	display: grid;
+	min-height: 320px;
+	place-items: center;
+	padding: 32px;
+	color: #64748b;
+	font-size: 14px;
+	text-align: center;
+}
+
+.ring-public-app .controls-section {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 2px 0 0;
+}
+
+.ring-public-app .segmented {
+	display: inline-flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	padding: 6px;
+	border: 1px solid #dbe4ef;
+	border-radius: 14px;
+	background: #fff;
+	box-shadow: 0 12px 34px rgba(15, 23, 42, 0.04);
+}
+
+.ring-public-app .segmented button {
+	min-height: 38px;
+	padding: 0 16px;
+	border: 0;
+	border-radius: 10px;
+	background: transparent;
+	color: #64748b;
+	font-size: 13px;
+	font-weight: 850;
+	cursor: pointer;
+}
+
+.ring-public-app .segmented button.active {
+	background: #2563eb;
+	color: #fff;
+	box-shadow: 0 8px 20px rgba(37, 99, 235, 0.22);
+}
+
+.ring-public-app .category-intro-card {
+	display: grid;
+	gap: 10px;
+	padding: 22px;
+	border: 1px solid #dbe4ef;
+	border-radius: 20px;
+	background: #fff;
+	box-shadow: 0 18px 52px rgba(15, 23, 42, 0.05);
+}
+
+.ring-public-app .category-intro-card p {
+	margin: 0;
+	color: #2563eb;
+	font-size: 12px;
+	font-weight: 900;
+	text-transform: uppercase;
+}
+
+.ring-public-app .category-intro-card h2 {
+	margin: 0;
+	font-size: clamp(22px, 2.3vw, 34px);
+	line-height: 1.18;
+	font-weight: 900;
+}
+
+.ring-public-app .category-intro-card strong {
+	max-width: 940px;
+	color: #334155;
+	font-size: 15px;
+	line-height: 1.7;
+}
+
+.ring-public-app .category-intro-card ul {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 10px;
+	margin: 4px 0 0;
+	padding: 0;
+	list-style: none;
+}
+
+.ring-public-app .category-intro-card li {
+	padding: 12px 14px;
+	border: 1px solid #e2e8f0;
+	border-radius: 12px;
+	background: #f8fafc;
+	color: #475569;
+	font-size: 13px;
+	font-weight: 650;
+	line-height: 1.55;
+}
+
+.ring-public-app .data-table-card {
+	overflow: hidden;
+	border: 1px solid #dbe4ef;
+	border-radius: 20px;
+	background: #fff;
+	box-shadow: 0 20px 60px rgba(15, 23, 42, 0.06);
+}
+
+.ring-public-app .data-toolbar {
+	display: flex;
+	align-items: flex-end;
+	justify-content: space-between;
+	gap: 18px;
+	padding: 20px;
+	border-bottom: 1px solid #e2e8f0;
+}
+
+.ring-public-app .data-toolbar span,
+.ring-public-app .nybox-meta-bar span {
+	color: #64748b;
+	font-size: 13px;
+	font-weight: 650;
+}
+
+.ring-public-app .table-title {
+	margin: 0 0 4px;
+	color: #0f172a;
+	font-size: 18px;
+	font-weight: 900;
+}
+
+.ring-public-app .toolbar-controls {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-end;
+	justify-content: flex-end;
+	gap: 10px;
+}
+
+.ring-public-app .nybox-search,
+.ring-public-app .nybox-filter-grid {
+	display: grid;
+	gap: 6px;
+	min-width: 154px;
+}
+
+.ring-public-app .nybox-search span,
+.ring-public-app .nybox-filter-grid span {
+	color: #64748b;
+	font-size: 11px;
+	font-weight: 850;
+	text-transform: uppercase;
+}
+
+.ring-public-app .nybox-search input,
+.ring-public-app .nybox-filter-grid select {
+	height: 40px;
+	border: 1px solid #cbd5e1;
+	border-radius: 10px;
+	background: #fff;
+	padding: 0 12px;
+	color: #0f172a;
+	font-size: 13px;
+	outline: none;
+}
+
+.ring-public-app .nybox-filter-grid select:disabled {
+	background: #f8fafc;
+	color: #94a3b8;
+}
+
+.ring-public-app .nybox-panel {
+	display: grid;
+	gap: 12px;
+	padding: 14px 20px;
+	border-bottom: 1px solid #e2e8f0;
+	background: #f8fafc;
+}
+
+.ring-public-app .nybox-meta-bar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+}
+
+.ring-public-app .nybox-meta-bar span {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 7px 10px;
+	border: 1px solid #e2e8f0;
+	border-radius: 999px;
+	background: #fff;
+}
+
+.ring-public-app .nybox-meta-bar strong {
+	color: #0f172a;
+	font-weight: 900;
+}
+
+.ring-public-app .filter-chip-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.ring-public-app .filter-chip-row button {
+	height: 32px;
+	padding: 0 12px;
+	border: 1px solid #cbd5e1;
+	border-radius: 999px;
+	background: #fff;
+	color: #475569;
+	font-size: 12px;
+	font-weight: 800;
+	cursor: pointer;
+}
+
+.ring-public-app .filter-chip-row button.active {
+	border-color: #2563eb;
+	background: #eff6ff;
+	color: #1d4ed8;
+}
+
+.ring-public-app .table-wrap {
+	overflow-x: auto;
+}
+
+.ring-public-app .public-data-table {
+	width: 100%;
+	min-width: 980px;
+	border-collapse: collapse;
+}
+
+.ring-public-app .public-data-table th,
+.ring-public-app .public-data-table td {
+	padding: 14px 16px;
+	border-bottom: 1px solid #e2e8f0;
+	text-align: left;
+	vertical-align: middle;
+}
+
+.ring-public-app .public-data-table th {
+	background: #f8fafc;
+	color: #64748b;
+	font-size: 11px;
+	font-weight: 900;
+	text-transform: uppercase;
+	white-space: nowrap;
+}
+
+.ring-public-app .public-data-table td {
+	color: #334155;
+	font-size: 13px;
+	font-weight: 650;
+}
+
+.ring-public-app .public-data-table tr {
+	cursor: pointer;
+	transition: background 0.16s ease;
+}
+
+.ring-public-app .public-data-table tr:hover {
+	background: #f8fbff;
+}
+
+.ring-public-app .public-data-table td:first-child strong {
+	display: block;
+	color: #0f172a;
+	font-size: 14px;
+	font-weight: 950;
+}
+
+.ring-public-app .public-data-table td:first-child span {
+	display: block;
+	margin-top: 2px;
+	color: #94a3b8;
+	font-size: 11px;
+}
+
+.ring-public-app .price-with-change {
+	display: inline-grid;
+	gap: 2px;
+}
+
+.ring-public-app .price-with-change strong {
+	color: #0f172a;
+	font-weight: 900;
+}
+
+.ring-public-app .price-with-change em {
+	font-style: normal;
+	font-size: 11px;
+	font-weight: 850;
+}
+
+.ring-public-app .price-change-positive,
+.ring-public-app .backtest-cell-positive {
+	color: #16a34a;
+}
+
+.ring-public-app .price-change-negative,
+.ring-public-app .backtest-cell-negative {
+	color: #dc2626;
+}
+
+.ring-public-app .price-change-neutral,
+.ring-public-app .backtest-cell-neutral {
+	color: #64748b;
+}
+
+.ring-public-app .status-badge {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-height: 24px;
+	padding: 0 9px;
+	border-radius: 999px;
+	background: #f1f5f9;
+	color: #475569;
+	font-size: 11px;
+	font-weight: 900;
+	white-space: nowrap;
+}
+
+.ring-public-app .status-badge.up,
+.ring-public-app .status-badge.box-upper {
+	background: #ecfdf5;
+	color: #16a34a;
+}
+
+.ring-public-app .status-badge.down,
+.ring-public-app .status-badge.box-lower {
+	background: #fef2f2;
+	color: #dc2626;
+}
+
+.ring-public-app .status-badge.box-inside {
+	background: #eff6ff;
+	color: #2563eb;
+}
+
+.ring-public-app .status-badge.muted {
+	background: #f8fafc;
+	color: #64748b;
+}
+
+.ring-public-app .empty-state,
+.ring-public-app .modal-loading {
+	margin: 20px;
+	padding: 34px;
+	border: 1px dashed #cbd5e1;
+	border-radius: 16px;
+	background: #f8fafc;
+	color: #64748b;
+	text-align: center;
+}
+
+.ring-public-app .empty-state strong {
+	display: block;
+	margin-bottom: 6px;
+	color: #334155;
+	font-size: 15px;
+}
+
+.ring-public-app .modal-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 130;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 28px;
+	background: rgba(15, 23, 42, 0.46);
+}
+
+.ring-public-app .modal {
+	width: min(920px, 100%);
+	max-height: min(860px, 92vh);
+	overflow-y: auto;
+	border: 1px solid #dbe4ef;
+	border-radius: 22px;
+	background: #fff;
+	box-shadow: 0 34px 90px rgba(15, 23, 42, 0.28);
+}
+
+.ring-public-app .modal-header {
+	position: sticky;
+	top: 0;
+	z-index: 2;
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 14px;
+	padding: 22px 24px 16px;
+	border-bottom: 1px solid #e2e8f0;
+	background: rgba(255, 255, 255, 0.96);
+	backdrop-filter: blur(12px);
+}
+
+.ring-public-app .modal-kicker {
+	margin: 0 0 4px;
+	color: #2563eb;
+	font-size: 12px;
+	font-weight: 900;
+	text-transform: uppercase;
+}
+
+.ring-public-app .modal-header h2 {
+	margin: 0;
+	color: #0f172a;
+	font-size: clamp(22px, 3vw, 32px);
+	line-height: 1.18;
+	font-weight: 950;
+}
+
+.ring-public-app .icon-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 38px;
+	height: 38px;
+	border: 1px solid #cbd5e1;
+	border-radius: 10px;
+	background: #fff;
+	color: #475569;
+	font-size: 24px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.ring-public-app .modal-tabs {
+	display: flex;
+	gap: 8px;
+	padding: 16px 24px 0;
+}
+
+.ring-public-app .modal-tabs button {
+	min-height: 36px;
+	padding: 0 12px;
+	border: 1px solid #cbd5e1;
+	border-radius: 10px;
+	background: #fff;
+	color: #475569;
+	font-size: 12px;
+	font-weight: 900;
+	cursor: pointer;
+}
+
+.ring-public-app .modal-tabs button.active {
+	border-color: #2563eb;
+	background: #eff6ff;
+	color: #1d4ed8;
+}
+
+.ring-public-app .modal-overview-layout,
+.ring-public-app .nybox-strategy-layout,
+.ring-public-app .backtest-section {
+	display: grid;
+	gap: 16px;
+	padding: 20px 24px 24px;
+}
+
+.ring-public-app .zone-list {
+	border: 1px solid #e2e8f0;
+	border-radius: 16px;
+	background: #fff;
+	overflow: hidden;
+}
+
+.ring-public-app .nybox-section-header {
+	padding: 13px 15px;
+	border-bottom: 1px solid #e2e8f0;
+	background: #f8fafc;
+}
+
+.ring-public-app .nybox-section-header strong {
+	color: #0f172a;
+	font-size: 13px;
+	font-weight: 950;
+}
+
+.ring-public-app .zone-row,
+.ring-public-app .nybox-kv-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 13px 15px;
+	border-bottom: 1px solid #eef2f7;
+}
+
+.ring-public-app .zone-row:last-child,
+.ring-public-app .nybox-kv-row:last-child {
+	border-bottom: 0;
+}
+
+.ring-public-app .zone-row span {
+	color: #64748b;
+	font-size: 13px;
+	font-weight: 700;
+}
+
+.ring-public-app .zone-row strong {
+	color: #0f172a;
+	font-size: 13px;
+	font-weight: 900;
+	text-align: right;
+}
+
+.ring-public-app .modal-disclaimer,
+.ring-public-app .backtest-footnote {
+	padding: 14px 15px;
+	border: 1px solid #e2e8f0;
+	border-radius: 14px;
+	background: #f8fafc;
+	color: #64748b;
+	font-size: 13px;
+	line-height: 1.6;
+}
+
+.ring-public-app .modal-disclaimer p,
+.ring-public-app .backtest-footnote p {
+	margin: 0 0 5px;
+}
+
+.ring-public-app .modal-disclaimer p:last-child,
+.ring-public-app .backtest-footnote p:last-child {
+	margin-bottom: 0;
+}
+
+.ring-public-app .nybox-strategy-message {
+	padding: 18px;
+	border: 1px solid #bfdbfe;
+	border-radius: 16px;
+	background: #eff6ff;
+}
+
+.ring-public-app .nybox-strategy-message strong {
+	color: #1d4ed8;
+	font-size: 15px;
+	font-weight: 950;
+}
+
+.ring-public-app .nybox-strategy-message p {
+	margin: 8px 0 0;
+	color: #334155;
+	font-size: 14px;
+	line-height: 1.65;
+}
+
+.ring-public-app .modal-cta-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+}
+
+.ring-public-app .bear-bull-box-gauge {
+	display: grid;
+	gap: 10px;
+	padding: 16px;
+	border: 1px solid #e2e8f0;
+	border-radius: 16px;
+	background: #f8fafc;
+}
+
+.ring-public-app .nybox-gauge-stage {
+	display: grid;
+	grid-template-columns: 68px 1fr 68px;
+	align-items: center;
+	gap: 10px;
+}
+
+.ring-public-app .nybox-gauge-icon {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 42px;
+	border-radius: 12px;
+	font-size: 11px;
+	font-weight: 950;
+}
+
+.ring-public-app .bear-icon {
+	background: #fef2f2;
+	color: #dc2626;
+}
+
+.ring-public-app .bull-icon {
+	background: #ecfdf5;
+	color: #16a34a;
+}
+
+.ring-public-app .nybox-gauge-bar {
+	position: relative;
+	height: 12px;
+	border-radius: 999px;
+	background: linear-gradient(90deg, #ef4444 0%, #e2e8f0 50%, #22c55e 100%);
+}
+
+.ring-public-app .price-marker {
+	position: absolute;
+	top: 50%;
+	width: 18px;
+	height: 18px;
+	border: 3px solid #fff;
+	border-radius: 999px;
+	background: #2563eb;
+	box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+	transform: translate(-50%, -50%);
+}
+
+.ring-public-app .nybox-gauge-values,
+.ring-public-app .nybox-gauge-meta {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	color: #64748b;
+	font-size: 12px;
+	font-weight: 800;
+}
+
+.ring-public-app .nybox-gauge-values strong {
+	color: #0f172a;
+	font-size: 14px;
+	font-weight: 950;
+}
+
+.ring-public-app .range-wrap {
+	display: grid;
+	gap: 12px;
+	padding: 18px;
+	border: 1px solid #e2e8f0;
+	border-radius: 16px;
+	background: #f8fafc;
+}
+
+.ring-public-app .range-track {
+	position: relative;
+	height: 16px;
+	border-radius: 999px;
+	background: #e2e8f0;
+}
+
+.ring-public-app .range-zone {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	border-radius: 999px;
+	opacity: 0.75;
+}
+
+.ring-public-app .range-zone.support {
+	background: #bbf7d0;
+}
+
+.ring-public-app .range-zone.resistance {
+	background: #fecaca;
+}
+
+.ring-public-app .range-marker {
+	position: absolute;
+	top: 50%;
+	width: 12px;
+	height: 12px;
+	border: 2px solid #fff;
+	border-radius: 999px;
+	background: #2563eb;
+	box-shadow: 0 4px 12px rgba(15, 23, 42, 0.22);
+	transform: translate(-50%, -50%);
+}
+
+.ring-public-app .range-marker span {
+	position: absolute;
+	top: 18px;
+	left: 50%;
+	width: max-content;
+	max-width: 110px;
+	transform: translateX(-50%);
+	color: #475569;
+	font-size: 11px;
+	font-weight: 900;
+}
+
+.ring-public-app .range-marker.support {
+	background: #16a34a;
+}
+
+.ring-public-app .range-marker.resistance {
+	background: #dc2626;
+}
+
+.ring-public-app .range-scale {
+	display: flex;
+	justify-content: space-between;
+	padding-top: 18px;
+	color: #64748b;
+	font-size: 11px;
+	font-weight: 850;
+}
+
+.ring-public-app .nybox-backtest-head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 16px;
+	border: 1px solid #e2e8f0;
+	border-radius: 16px;
+	background: #f8fafc;
+}
+
+.ring-public-app .nybox-backtest-head strong {
+	color: #0f172a;
+	font-size: 15px;
+	font-weight: 950;
+}
+
+.ring-public-app .nybox-backtest-head p {
+	margin: 6px 0 0;
+	color: #64748b;
+	font-size: 13px;
+	line-height: 1.55;
+}
+
+.ring-public-app .backtest-table-wrap {
+	overflow-x: auto;
+	border: 1px solid #e2e8f0;
+	border-radius: 16px;
+}
+
+.ring-public-app .backtest-table {
+	width: 100%;
+	min-width: 560px;
+	border-collapse: collapse;
+}
+
+.ring-public-app .backtest-table th,
+.ring-public-app .backtest-table td {
+	padding: 12px 14px;
+	border-bottom: 1px solid #eef2f7;
+	text-align: left;
+}
+
+.ring-public-app .backtest-table th {
+	background: #f8fafc;
+	color: #64748b;
+	font-size: 11px;
+	font-weight: 950;
+	text-transform: uppercase;
+}
+
+.ring-public-app .backtest-table td {
+	color: #334155;
+	font-size: 13px;
+	font-weight: 750;
+}
+
+@media (max-width: 860px) {
+	.ring-public-app .app-shell {
+		width: min(100% - 20px, 760px);
+		padding-top: 14px;
+	}
+
+	.ring-public-app .top-strip,
+	.ring-public-app .data-toolbar,
+	.ring-public-app .nybox-backtest-head {
+		align-items: stretch;
+		flex-direction: column;
+	}
+
+	.ring-public-app .auth-button,
+	.ring-public-app .icon-text-button {
+		width: 100%;
+	}
+
+	.ring-public-app .category-intro-card {
+		padding: 18px;
+	}
+
+	.ring-public-app .category-intro-card ul {
+		grid-template-columns: 1fr;
+	}
+
+	.ring-public-app .toolbar-controls,
+	.ring-public-app .nybox-search,
+	.ring-public-app .nybox-filter-grid {
+		width: 100%;
+		min-width: 0;
+	}
+
+	.ring-public-app .public-data-table {
+		display: block;
+		min-width: 0;
+	}
+
+	.ring-public-app .public-data-table thead {
+		display: none;
+	}
+
+	.ring-public-app .public-data-table tbody {
+		display: grid;
+		gap: 10px;
+		padding: 12px;
+	}
+
+	.ring-public-app .public-data-table tr {
+		display: grid;
+		gap: 8px;
+		padding: 12px;
+		border: 1px solid #e2e8f0;
+		border-radius: 14px;
+		background: #fff;
+	}
+
+	.ring-public-app .public-data-table td {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 14px;
+		padding: 0;
+		border: 0;
+		text-align: right;
+	}
+
+	.ring-public-app .public-data-table td::before {
+		content: attr(data-label);
+		flex: 0 0 auto;
+		color: #94a3b8;
+		font-size: 11px;
+		font-weight: 900;
+		text-align: left;
+		text-transform: uppercase;
+	}
+
+	.ring-public-app .modal-backdrop {
+		align-items: flex-end;
+		padding: 0;
+	}
+
+	.ring-public-app .modal {
+		max-height: 94vh;
+		border-radius: 20px 20px 0 0;
+	}
+
+	.ring-public-app .modal-header,
+	.ring-public-app .modal-tabs,
+	.ring-public-app .modal-overview-layout,
+	.ring-public-app .nybox-strategy-layout,
+	.ring-public-app .backtest-section {
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+
+	.ring-public-app .modal-tabs {
+		overflow-x: auto;
+	}
+
+	.ring-public-app .nybox-gauge-stage {
+		grid-template-columns: 54px 1fr 54px;
+	}
+}
