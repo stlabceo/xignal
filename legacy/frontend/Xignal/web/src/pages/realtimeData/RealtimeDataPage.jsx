@@ -1388,14 +1388,6 @@ function FearGreedDetail({ detail, row, activeTab, autoTradeEligible, backtestEl
 						<p>ATF+VIXFIX는 과도한 공포 또는 탐욕 이벤트가 발생한 뒤 가격 변동이 해소되는 흐름을 확인하는 알고리즘 전략입니다.</p>
 						<p>실제 Bot 설치와 주문 설정은 로그인 후 보호된 화면에서만 진행됩니다.</p>
 					</div>
-					<div className="strategy-placeholder">전략 설명 이미지 영역</div>
-					<div className="strategy-nav">
-						{['작동원리 1', '작동원리 2', '작동원리 3', '강점', 'Risk'].map((label) => (
-							<button key={label} type="button">
-								{label}
-							</button>
-						))}
-					</div>
 					{autoTradeEligible ? null : <EligibilityNotice type="autoTrade" />}
 					<ModalActionRow autoTradeEligible={autoTradeEligible} />
 				</div>
@@ -1727,7 +1719,7 @@ function RealtimeDataPage() {
 
 	useEffect(() => {
 		let cancelled = false;
-		const streamParams = itemType === 'fear_greed' ? { timeframe } : itemType === 'support_resistance' ? { timeframe, logic: 'vp' } : {};
+		const streamParams = itemType === 'support_resistance' ? { timeframe, logic: 'vp' } : {};
 		const applyStreamEvent = (event) => {
 			if (cancelled || event?.itemType !== itemType) return;
 			if (event.type === 'snapshot' && Array.isArray(event.data)) {
@@ -1759,7 +1751,7 @@ function RealtimeDataPage() {
 				itemType === 'ny_box'
 					? publicRealtime.nyBoxSnapshot()
 					: itemType === 'fear_greed'
-						? publicRealtime.fearGreedSnapshot({ timeframe })
+						? publicRealtime.fearGreedSnapshot()
 						: publicRealtime.supportResistanceSnapshot({ timeframe, logic: 'vp' });
 			const res = await request;
 			if (cancelled) return;
@@ -1801,7 +1793,7 @@ function RealtimeDataPage() {
 		setSelectedRow(row);
 		setDetailState({ loading: true, detail: null, error: '' });
 		const symbol = getSymbol(row);
-		const params = itemType === 'fear_greed' ? { timeframe } : itemType === 'support_resistance' ? { timeframe, logic: 'vp' } : {};
+		const params = itemType === 'support_resistance' ? { timeframe, logic: 'vp' } : {};
 		const res =
 			itemType === 'ny_box'
 				? await publicRealtime.nyBoxSymbol(symbol, params)
@@ -1856,11 +1848,13 @@ function RealtimeDataPage() {
 						<p>{config.kicker}</p>
 						<h2>{config.title}</h2>
 						<strong>{config.lead}</strong>
-						<ul>
-							{config.help.map((line) => (
-								<li key={line}>{line}</li>
-							))}
-						</ul>
+						{itemType === 'support_resistance' && config.help.length ? (
+							<ul>
+								{config.help.map((line) => (
+									<li key={line}>{line}</li>
+								))}
+							</ul>
+						) : null}
 					</div>
 				</section>
 
@@ -1875,18 +1869,18 @@ function RealtimeDataPage() {
 									<span>Symbol</span>
 									<input value={symbolSearch} onChange={(event) => setSymbolSearch(event.target.value)} placeholder="BTCUSDT" />
 								</label>
-								{itemType === 'ny_box' ? null : (
+								{itemType === 'support_resistance' ? (
 									<label className="nybox-filter-grid">
 										<span>Timeframe</span>
 										<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)}>
-											{(itemType === 'support_resistance' ? SR_TIMEFRAMES : TIMEFRAMES).map((option) => (
+											{SR_TIMEFRAMES.map((option) => (
 												<option key={option.value} value={option.value}>
 													{option.label}
 												</option>
 											))}
 										</select>
 									</label>
-								)}
+								) : null}
 							</div>
 						</div>
 

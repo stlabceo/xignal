@@ -101,10 +101,14 @@ assert.match(page, /backtestPnlCellClass/);
 assert.match(page, /backtest-cell-best/);
 assert.match(page, /className="backtest-period-head"/);
 assert.match(page, /className="backtest-metric-head"/);
-assert.match(page, /itemType === 'ny_box' \? null : \(/);
+assert.match(page, /publicRealtime\.fearGreedSnapshot\(\)/);
+assert.match(page, /itemType === 'support_resistance' \? \(/);
 
 assert.doesNotMatch(page, /NyBoxGauge/);
 assert.doesNotMatch(page, /BacktestLiveSummary/);
+assert.doesNotMatch(page, /publicRealtime\.fearGreedSnapshot\(\{ timeframe \}\)/);
+assert.doesNotMatch(page, /itemType === 'fear_greed' \? \{ timeframe \}/);
+assert.doesNotMatch(page, /className="strategy-placeholder"/);
 assert.doesNotMatch(page, /QBT_STATS_V1 실데이터/);
 assert.doesNotMatch(page, /nyBoxBreakoutTimeRow/);
 assert.doesNotMatch(page, /nyBoxExplicitBreakoutTime/);
@@ -160,7 +164,7 @@ console.log(
 	JSON.stringify(
 		{
 			status: 'PASS',
-			tests: 123,
+			tests: 127,
 			noDummy: true,
 			tradingIsolation: true,
 			ringLevelPublicUxPort: true,
