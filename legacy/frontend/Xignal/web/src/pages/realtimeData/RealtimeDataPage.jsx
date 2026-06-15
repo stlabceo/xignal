@@ -1,5 +1,11 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { publicRealtime } from '../../services/publicRealtime';
+import nyBoxStrategyBreakoutImage from '../../assets/nybox-strategy/nybox-strategy-breakout.png';
+import nyBoxStrategyExitImage from '../../assets/nybox-strategy/nybox-strategy-exit.png';
+import nyBoxStrategyIntroWithCopyImage from '../../assets/nybox-strategy/nybox-strategy-intro-with-copy.png';
+import nyBoxStrategyOrdersImage from '../../assets/nybox-strategy/nybox-strategy-orders.png';
+import nyBoxStrategySessionBoxImage from '../../assets/nybox-strategy/nybox-strategy-session-box.png';
+import nyBoxStrategyStrengthsImage from '../../assets/nybox-strategy/nybox-strategy-strengths.png';
 import './realtimeDataPage.css';
 
 const PUBLIC_LAUNCH_CATEGORY_VISIBILITY = {
@@ -48,6 +54,39 @@ const PUBLIC_ITEM_CONFIGS = [
 ];
 
 const PUBLIC_ITEM_TYPES = PUBLIC_ITEM_CONFIGS.filter((item) => PUBLIC_LAUNCH_CATEGORY_VISIBILITY[item.key]);
+
+const NY_BOX_STRATEGY_IMAGES = [
+	{
+		label: '전략 개요',
+		src: nyBoxStrategyIntroWithCopyImage,
+		alt: '뉴욕 세션 고점과 저점을 기준으로 아시아 세션 가격 횡보를 설명하는 NY Box 전략 개요'
+	},
+	{
+		label: '세션 박스',
+		src: nyBoxStrategySessionBoxImage,
+		alt: '뉴욕 세션 고점과 저점이 아시아 세션 기준 박스로 이어지는 구조'
+	},
+	{
+		label: '돌파 기준',
+		src: nyBoxStrategyBreakoutImage,
+		alt: '중심선을 기준으로 숏과 롱 신호가 반복되는 돌파 기준'
+	},
+	{
+		label: '주문 구조',
+		src: nyBoxStrategyOrdersImage,
+		alt: '상단과 하단 목표선을 기준으로 롱과 숏 Grid 주문이 교차하는 구조'
+	},
+	{
+		label: 'Grid Exit',
+		src: nyBoxStrategyExitImage,
+		alt: '가격이 박스 밖으로 벗어나면 Grid 전략이 종료되는 구조'
+	},
+	{
+		label: '강점',
+		src: nyBoxStrategyStrengthsImage,
+		alt: '박스 상하단 안정성, 뉴욕 세션 변동성 감소, 아시아 장초반 변동성, 가격 왕복성 등 전략 강점'
+	}
+];
 
 const FUTURES_TO_DISPLAY_BASE = {
 	'1000000BOB': 'BOB',
@@ -531,10 +570,17 @@ function breakoutTime(row) {
 
 function latestFearGreedEvent(row = {}) {
 	if (row.sourceStatus === 'INSUFFICIENT_DATA') return { state: '수집 중', occurredAt: null };
-	const fearTime = row.fearStartedAt ? Date.parse(row.fearStartedAt) : null;
-	const greedTime = row.greedStartedAt ? Date.parse(row.greedStartedAt) : null;
-	if (!Number.isFinite(fearTime) && !Number.isFinite(greedTime)) return { state: '정상', occurredAt: null };
-	if (Number.isFinite(fearTime) && (!Number.isFinite(greedTime) || fearTime >= greedTime)) {
+	const parseEventTime = (value) => {
+		const timestamp = value ? Date.parse(value) : null;
+		return Number.isFinite(timestamp) ? timestamp : null;
+	};
+	const resolved = (flag, label) => flag === true || label === '해소';
+	const fearTime = parseEventTime(row.fearStartedAt);
+	const greedTime = parseEventTime(row.greedStartedAt);
+	const fearActive = row.fearActive === true || (fearTime !== null && !resolved(row.fearResolved, row.fearResolvedLabel));
+	const greedActive = row.greedActive === true || (greedTime !== null && !resolved(row.greedResolved, row.greedResolvedLabel));
+	if (!fearActive && !greedActive) return { state: '정상', occurredAt: null };
+	if (fearActive && (!greedActive || (fearTime ?? 0) >= (greedTime ?? 0))) {
 		return { state: '공포', occurredAt: row.fearStartedAt || null };
 	}
 	return { state: '탐욕', occurredAt: row.greedStartedAt || null };
@@ -1037,6 +1083,8 @@ function ModalActionRow({ autoTradeEligible = true }) {
 function NyBoxDetail({ detail, row, activeTab, autoTradeEligible, backtestEligible }) {
 	const state = detail?.state || row;
 	const modal = detail?.nyBoxModal;
+	const [selectedStrategyImageLabel, setSelectedStrategyImageLabel] = useState(NY_BOX_STRATEGY_IMAGES[0].label);
+	const selectedStrategyImage = NY_BOX_STRATEGY_IMAGES.find((image) => image.label === selectedStrategyImageLabel) || NY_BOX_STRATEGY_IMAGES[0];
 	const overviewRows = [
 		{ label: '종목명', value: displayAssetText(state?.symbol, state?.baseAsset) },
 		{ label: '전략명', value: '뉴욕 박스 그리드' },
@@ -1051,6 +1099,10 @@ function NyBoxDetail({ detail, row, activeTab, autoTradeEligible, backtestEligib
 		.filter((section) => section.rows.length > 0);
 	const disclaimerStart = modal?.nySessionStartKst || modal?.baselineNySessionDate || '-';
 	const disclaimerEnd = modal?.nySessionEndKst || modal?.nyDataCalculatedAtKst || '-';
+
+	useEffect(() => {
+		setSelectedStrategyImageLabel(NY_BOX_STRATEGY_IMAGES[0].label);
+	}, [state?.symbol]);
 
 	return (
 		<>
@@ -1101,10 +1153,17 @@ function NyBoxDetail({ detail, row, activeTab, autoTradeEligible, backtestEligib
 						</p>
 						<p>실제 Bot 설치와 주문 설정은 로그인 후 보호된 화면에서만 진행됩니다.</p>
 					</div>
-					<div className="strategy-placeholder">전략 설명 이미지 영역</div>
+					<figure className="strategy-image-panel">
+						<img src={selectedStrategyImage.src} alt={selectedStrategyImage.alt} />
+					</figure>
 					<div className="strategy-nav">
-						{['작동원리 1', '작동원리 2', '작동원리 3', '강점', 'Risk'].map((label) => (
-							<button key={label} type="button">
+						{NY_BOX_STRATEGY_IMAGES.map(({ label }) => (
+							<button
+								key={label}
+								type="button"
+								className={label === selectedStrategyImage.label ? 'active' : undefined}
+								onClick={() => setSelectedStrategyImageLabel(label)}
+							>
 								{label}
 							</button>
 						))}

@@ -89,6 +89,13 @@ assert.match(page, /publicRealtime\.createItemStream/);
 assert.match(page, /RangeBar/);
 assert.match(page, /대표 매물대 위치 이동/);
 assert.match(page, /돌파·근접 상태/);
+assert.match(page, /fearActive/);
+assert.match(page, /fearResolved/);
+assert.match(page, /greedActive/);
+assert.match(page, /greedResolved/);
+assert.match(page, /NY_BOX_STRATEGY_IMAGES/);
+assert.match(page, /nybox-strategy-intro-with-copy\.png/);
+assert.match(page, /strategy-image-panel/);
 assert.doesNotMatch(page, /publicBacktest\s*\.\s*options/);
 assert.doesNotMatch(page, /order_intent_queue|GRID_LIVE_ARM|private polling|private write|order_intent_queue\.insert|direct DB/i);
 
@@ -103,6 +110,7 @@ assert.match(pageCss, /\.ring-public-app \.backtest-table/);
 assert.match(pageCss, /\.ring-public-app \.backtest-side-toggle/);
 assert.match(pageCss, /\.ring-public-app \.backtest-bestcase-panel/);
 assert.match(pageCss, /\.ring-public-app \.strategy-placeholder/);
+assert.match(pageCss, /\.ring-public-app \.strategy-image-panel/);
 assert.match(pageCss, /@media \(max-width: 720px\)/);
 assert.match(pageCss, /content: attr\(data-label\)/);
 
@@ -114,6 +122,8 @@ console.log(
 			noDummy: true,
 			tradingIsolation: true,
 			ringLevelPublicUxPort: true,
+			fearGreedResolvedDisplay: true,
+			nyBoxStrategyImages: 6,
 			latestRingLevelPublicLaunch: 'ny_box,fear_greed',
 			detailBacktestSource: 'ring-level detail.backtests',
 			route: '/realtime-data'
