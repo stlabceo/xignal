@@ -94,6 +94,20 @@ const parseGridPrice = (value) => {
   return Number.isFinite(numeric) ? numeric : 0;
 };
 
+const pickGridPayloadValue = (...values) => {
+  for (const value of values) {
+    if (value !== undefined && value !== null && String(value).trim() !== "") {
+      return value;
+    }
+  }
+  return null;
+};
+
+const isSideTriggerRequiredGridSignal = (strategySignal) => {
+  const key = normalizeGridRegimeStrategySignal(strategySignal);
+  return /^NY_BOX_GRID_\d+_\d+$/.test(key);
+};
+
 const normalizeGridContractEnum = (value, allowed, fallback) => {
   const normalized = String(value || "")
     .trim()
@@ -338,6 +352,27 @@ const validateGridBoxScope = (payload = {}) => {
   }
   if (payload.triggerPrice <= payload.supportPrice || payload.triggerPrice >= payload.resistancePrice) {
     return { ok: false, reason: "trigger-outside-box" };
+  }
+  if (payload.sideTriggerRequired && !payload.longTriggerPriceProvided) {
+    return { ok: false, reason: "missing-long-trigger-price" };
+  }
+  if (payload.sideTriggerRequired && !payload.shortTriggerPriceProvided) {
+    return { ok: false, reason: "missing-short-trigger-price" };
+  }
+  if (!(payload.longTriggerPrice > 0)) {
+    return { ok: false, reason: "missing-long-trigger-price" };
+  }
+  if (!(payload.shortTriggerPrice > 0)) {
+    return { ok: false, reason: "missing-short-trigger-price" };
+  }
+  if (payload.longTriggerPrice < payload.supportPrice || payload.longTriggerPrice > payload.resistancePrice) {
+    return { ok: false, reason: "long-trigger-outside-box" };
+  }
+  if (payload.shortTriggerPrice < payload.supportPrice || payload.shortTriggerPrice > payload.resistancePrice) {
+    return { ok: false, reason: "short-trigger-outside-box" };
+  }
+  if (payload.longTriggerPrice > payload.shortTriggerPrice) {
+    return { ok: false, reason: "side-trigger-order-invalid" };
   }
   return { ok: true, reason: null };
 };
@@ -773,6 +808,25 @@ const normalizeGridWebhookPayload = (payload = {}) => {
     payload?.time || payload?.signalTime || payload?.eventTime || payload?.triggeredAt || ""
   ).trim();
 
+  const triggerPrice = parseGridPrice(
+    payload?.triggerPrice ?? payload?.trigger ?? payload?.triggerLine ?? payload?.centerLine
+  );
+  const rawLongTriggerPrice = pickGridPayloadValue(
+    payload?.longTriggerPrice,
+    payload?.long_trigger_price,
+    payload?.longTrigger,
+    payload?.longEntryPrice,
+    payload?.buyTriggerPrice
+  );
+  const rawShortTriggerPrice = pickGridPayloadValue(
+    payload?.shortTriggerPrice,
+    payload?.short_trigger_price,
+    payload?.shortTrigger,
+    payload?.shortEntryPrice,
+    payload?.sellTriggerPrice
+  );
+  const longTriggerPriceProvided = rawLongTriggerPrice !== null;
+  const shortTriggerPriceProvided = rawShortTriggerPrice !== null;
   const normalized = {
     strategySignal,
     strategySignalKey: normalizeGridSignalKey(strategySignal),
@@ -791,9 +845,13 @@ const normalizeGridWebhookPayload = (payload = {}) => {
     resistancePrice: parseGridPrice(
       payload?.resistancePrice ?? payload?.resistance ?? payload?.resistanceLine ?? payload?.upperLine
     ),
-    triggerPrice: parseGridPrice(
-      payload?.triggerPrice ?? payload?.trigger ?? payload?.triggerLine ?? payload?.centerLine
-    ),
+    triggerPrice,
+    longTriggerPrice: parseGridPrice(longTriggerPriceProvided ? rawLongTriggerPrice : triggerPrice),
+    shortTriggerPrice: parseGridPrice(shortTriggerPriceProvided ? rawShortTriggerPrice : triggerPrice),
+    longTriggerPriceProvided,
+    shortTriggerPriceProvided,
+    sideTriggerRequired: isSideTriggerRequiredGridSignal(strategySignal),
+    triggerProfile: String(payload?.triggerProfile || payload?.trigger_profile || "").trim(),
     gridRegimeKey: String(payload?.gridRegimeKey || payload?.grid_regime_key || "").trim(),
     rawPayload: payload,
   };
@@ -922,26 +980,11 @@ const validateGridExitWebhookPayload = (payload = {}, options = {}) => {
   }
 
   if (normalized.explicitGridExit) {
-    const keyContract = validateGridRegimeKeyContract({
-      eventType: "GRID_EXIT",
-      payload: normalized,
-      flags,
-    });
-    if (!keyContract.ok) {
-      return {
-        ok: false,
-        reason: keyContract.reason,
-        payload: {
-          ...normalized,
-          gridRegimeKeyWarnings: keyContract.warnings,
-        },
-      };
-    }
     return {
       ok: true,
       payload: {
         ...normalized,
-        gridRegimeKeyWarnings: keyContract.warnings,
+        gridRegimeKeyWarnings: normalized.gridRegimeKey ? [] : ["grid-exit-grid-regime-key-absent-scope-by-strategy-symbol-timeframe"],
       },
     };
   }
@@ -1126,32 +1169,12 @@ const previewGridExitWebhookTargetsForMode = async (mode, payload, options = {})
       continue;
     }
 
-    if (!payload.gridRegimeKey) {
-      result.ignoredConflict += 1;
-      result.targetItems.push(
-        buildGridWebhookTargetItem({
-          row,
-          mode,
-          resultCode: "GRID_EXIT_MISSING_GRID_REGIME_KEY",
-          note: "missing-gridRegimeKey",
-        })
-      );
-      continue;
-    }
-
     const storedGridRegimeKey = getStoredGridRegimeKeyForRow(row);
-    if (!storedGridRegimeKey || storedGridRegimeKey !== payload.gridRegimeKey) {
-      result.targetItems.push(
-        buildGridWebhookTargetItem({
-          row,
-          mode,
-          resultCode: storedGridRegimeKey ? "GRID_EXIT_KEY_MISMATCH" : "GRID_EXIT_ROW_KEY_MISSING",
-          note: `payloadKey:${payload.gridRegimeKey || "-"}, rowKey:${storedGridRegimeKey || "-"}`,
-        })
-      );
-      result.ignoredConflict += 1;
-      continue;
-    }
+    const keyScopeNote = payload.gridRegimeKey
+      ? (storedGridRegimeKey === payload.gridRegimeKey
+        ? "gridRegimeKey:match"
+        : `gridRegimeKey:correlation-only,payloadKey:${payload.gridRegimeKey || "-"},rowKey:${storedGridRegimeKey || "-"}`)
+      : `gridRegimeKey:absent,rowKey:${storedGridRegimeKey || "-"}`;
 
     result.armed += 1;
     result.targetItems.push(
@@ -1159,7 +1182,7 @@ const previewGridExitWebhookTargetsForMode = async (mode, payload, options = {})
         row,
         mode,
         resultCode: "GRID_EXIT_ALERT_PREVIEW",
-        note: "explicit-grid-exit-alert-key-match",
+        note: `explicit-grid-exit-alert-scope-match:${keyScopeNote}`,
         nextRegimeStatus: "CANCEL_INTENT_PENDING",
       })
     );
@@ -1186,7 +1209,14 @@ const buildGridWebhookUpdateParams = (payload) => [
   payload.supportPrice,
   payload.resistancePrice,
   payload.triggerPrice,
-  JSON.stringify(payload.rawPayload || {}),
+  JSON.stringify({
+    ...(payload.rawPayload || {}),
+    triggerPrice: payload.triggerPrice,
+    longTriggerPrice: payload.longTriggerPrice,
+    shortTriggerPrice: payload.shortTriggerPrice,
+    triggerProfile: payload.triggerProfile || null,
+    gridRegimeKey: payload.gridRegimeKey || payload.rawPayload?.gridRegimeKey || payload.rawPayload?.grid_regime_key || null,
+  }),
 ];
 
 module.exports = {
@@ -1201,6 +1231,7 @@ module.exports = {
   normalizeGridSymbol,
   normalizeGridBunbong,
   parseGridPrice,
+  isSideTriggerRequiredGridSignal,
   normalizeGridSignalTime,
   findForbiddenGridWebhookTargetIdentityField,
   validateGridBoxScope,

@@ -86,6 +86,70 @@ check("trigger price is used for both pair legs", () => {
   assert.ok(plan.legs.every((leg) => leg.triggerPrice === 0.001495));
 });
 
+check("35/65 side trigger prices are preserved per leg", () => {
+  const target = baseTarget({
+    strategySignal: "NY_BOX_GRID_35_65",
+    symbol: "BTCUSDT.P",
+    supportPrice: 100,
+    resistancePrice: 110,
+    triggerPrice: 105,
+    longTriggerPrice: 103.5,
+    shortTriggerPrice: 106.5,
+    triggerProfile: "35_65",
+    gridPayload: {
+      ...baseTarget().gridPayload,
+      strategySignal: "NY_BOX_GRID_35_65",
+      symbol: "BTCUSDT.P",
+      supportPrice: 100,
+      resistancePrice: 110,
+      triggerPrice: 105,
+      longTriggerPrice: 103.5,
+      shortTriggerPrice: 106.5,
+      triggerProfile: "35_65",
+    },
+  });
+  const plan = gridEngine.buildLiveGridArmPairPrimingPlan({
+    row: baseRow({ symbol: "BTCUSDT", supportPrice: null, resistancePrice: null, triggerPrice: null }),
+    targetItem: target,
+  });
+  assert.strictEqual(plan.ok, true);
+  assert.strictEqual(plan.longTriggerPrice, 103.5);
+  assert.strictEqual(plan.shortTriggerPrice, 106.5);
+  assert.strictEqual(plan.triggerProfile, "35_65");
+  assert.strictEqual(plan.legs.find((leg) => leg.leg === "LONG").triggerPrice, 103.5);
+  assert.strictEqual(plan.legs.find((leg) => leg.leg === "SHORT").triggerPrice, 106.5);
+});
+
+check("50/50 side trigger prices can match legacy center trigger", () => {
+  const target = baseTarget({
+    strategySignal: "NY_BOX_GRID_50_50",
+    symbol: "BTCUSDT.P",
+    supportPrice: 100,
+    resistancePrice: 110,
+    triggerPrice: 105,
+    longTriggerPrice: 105,
+    shortTriggerPrice: 105,
+    triggerProfile: "50_50",
+    gridPayload: {
+      ...baseTarget().gridPayload,
+      strategySignal: "NY_BOX_GRID_50_50",
+      symbol: "BTCUSDT.P",
+      supportPrice: 100,
+      resistancePrice: 110,
+      triggerPrice: 105,
+      longTriggerPrice: 105,
+      shortTriggerPrice: 105,
+      triggerProfile: "50_50",
+    },
+  });
+  const plan = gridEngine.buildLiveGridArmPairPrimingPlan({
+    row: baseRow({ symbol: "BTCUSDT" }),
+    targetItem: target,
+  });
+  assert.strictEqual(plan.ok, true);
+  assert.ok(plan.legs.every((leg) => leg.triggerPrice === 105));
+});
+
 check("support and resistance are preserved from target payload", () => {
   const plan = buildPlan();
   assert.strictEqual(plan.supportPrice, 0.001465);
@@ -115,6 +179,29 @@ check("missing trigger blocks pair priming", () => {
   const plan = gridEngine.buildLiveGridArmPairPrimingPlan({ row: baseRow(), targetItem: target });
   assert.strictEqual(plan.ok, false);
   assert.strictEqual(plan.reason, "GRID_LIVE_ARM_PAIR_CONTEXT_MISSING");
+});
+
+check("side trigger outside box is rejected", () => {
+  const target = baseTarget({
+    symbol: "BTCUSDT.P",
+    supportPrice: 100,
+    resistancePrice: 110,
+    triggerPrice: 105,
+    longTriggerPrice: 99.9,
+    shortTriggerPrice: 106.5,
+    gridPayload: {
+      ...baseTarget().gridPayload,
+      symbol: "BTCUSDT.P",
+      supportPrice: 100,
+      resistancePrice: 110,
+      triggerPrice: 105,
+      longTriggerPrice: 99.9,
+      shortTriggerPrice: 106.5,
+    },
+  });
+  const plan = gridEngine.buildLiveGridArmPairPrimingPlan({ row: baseRow({ symbol: "BTCUSDT" }), targetItem: target });
+  assert.strictEqual(plan.ok, false);
+  assert.strictEqual(plan.reason, "GRID_LIVE_ARM_LONG_TRIGGER_OUTSIDE_BOX");
 });
 
 check("missing gridRegimeKey blocks pair priming", () => {

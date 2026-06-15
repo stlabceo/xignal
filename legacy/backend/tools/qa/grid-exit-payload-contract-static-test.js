@@ -85,6 +85,44 @@ const mockRowsByTable = {
       triggerPrice: "1.2166",
       lastWebhookPayloadJson: JSON.stringify({ gridRegimeKey: sharedKey }),
     },
+    {
+      id: 206,
+      uid: 156,
+      a_name: "Grid 50/50",
+      strategySignal: "NY_BOX_GRID_50_50",
+      symbol: "BTCUSDT",
+      bunbong: "15MIN",
+      enabled: "Y",
+      regimeStatus: "ACTIVE",
+      supportPrice: "100",
+      resistancePrice: "110",
+      triggerPrice: "105",
+      lastWebhookPayloadJson: JSON.stringify({
+        gridRegimeKey: "GRIDREGIME|v1|NY_BOX_GRID_50_50|BTCUSDT|15MIN|100|110|105|2026-06-15T10:00:00",
+        triggerProfile: "50_50",
+        longTriggerPrice: 105,
+        shortTriggerPrice: 105,
+      }),
+    },
+    {
+      id: 207,
+      uid: 156,
+      a_name: "Grid 35/65",
+      strategySignal: "NY_BOX_GRID_35_65",
+      symbol: "BTCUSDT",
+      bunbong: "15MIN",
+      enabled: "Y",
+      regimeStatus: "ACTIVE",
+      supportPrice: "100",
+      resistancePrice: "110",
+      triggerPrice: "105",
+      lastWebhookPayloadJson: JSON.stringify({
+        gridRegimeKey: "GRIDREGIME|v1|NY_BOX_GRID_35_65|BTCUSDT|15MIN|100|110|105|2026-06-15T10:00:00",
+        triggerProfile: "35_65",
+        longTriggerPrice: 103.5,
+        shortTriggerPrice: 106.5,
+      }),
+    },
   ],
   test_grid_strategy_list: [],
 };
@@ -215,9 +253,9 @@ const exitBase = {
   signalTime: "2026-06-05 12:10:00",
 };
 assert.strictEqual(
-  gridRuntime.validateGridExitWebhookPayload(exitBase, { env: enforceEnv }).reason,
-  "grid-exit-missing-grid-regime-key",
-  "GRID_EXIT missing key reject in ENFORCE"
+  gridRuntime.validateGridExitWebhookPayload(exitBase, { env: enforceEnv }).ok,
+  true,
+  "GRID_EXIT missing key accepted; scope is strategy/symbol/timeframe"
 );
 assert.strictEqual(
   gridRuntime.validateGridExitWebhookPayload({ ...exitBase, gridRegimeKey: sharedKey, signal_price: 1 }, { env: enforceEnv }).reason,
@@ -228,6 +266,29 @@ assert.strictEqual(
   gridRuntime.validateGridExitWebhookPayload({ ...exitBase, gridRegimeKey: sharedKey }, { env: enforceEnv }).ok,
   true,
   "GRID_EXIT with key validates without box prices"
+);
+assert.strictEqual(
+  gridRuntime.validateGridWebhookPayload(
+    { ...armBase, strategySignal: "NY_BOX_GRID_35_65", gridRegimeKey: canonicalKey },
+    { env: enforceEnv }
+  ).reason,
+  "missing-long-trigger-price",
+  "side-specific NY_BOX_GRID_* requires longTriggerPrice"
+);
+assert.strictEqual(
+  gridRuntime.validateGridWebhookPayload(
+    {
+      ...armBase,
+      strategySignal: "NY_BOX_GRID_35_65",
+      longTriggerPrice: "1.2050",
+      shortTriggerPrice: "1.2250",
+      triggerProfile: "35_65",
+      gridRegimeKey: gridRuntime.buildGridRegimeKey({ ...armBase, strategySignal: "NY_BOX_GRID_35_65" }),
+    },
+    { env: enforceEnv }
+  ).ok,
+  true,
+  "side-specific NY_BOX_GRID_* accepts explicit side triggers"
 );
 assert.strictEqual(
   gridRuntime.validateGridWebhookPayload({ ...armBase, strategySignal: "Other Released Grid", gridRegimeKey: gridRuntime.buildGridRegimeKey({ ...armBase, strategySignal: "Other Released Grid" }) }, { env: enforceEnv }).ok,
@@ -244,22 +305,22 @@ assert.ok(
     ...exitBase,
     gridRegimeKey: "GRIDREGIME|v1|WRONG",
   });
-  assert.strictEqual(wrongKeyPreview.live.armed, 0, "GRID_EXIT wrong key no target");
+  assert.strictEqual(wrongKeyPreview.live.armed, 3, "GRID_EXIT wrong key still scopes by strategy/symbol/timeframe");
   assert.strictEqual(
-    wrongKeyPreview.targetItems.filter((item) => item.resultCode === "GRID_EXIT_KEY_MISMATCH").length,
+    wrongKeyPreview.targetItems.filter((item) => item.resultCode === "GRID_EXIT_ALERT_PREVIEW").length,
     3,
-    "wrong key is audited per candidate without target mutation"
+    "wrong key is retained as correlation-only note"
   );
 
   const sameKeyPreview = await gridRuntime.previewGridExitWebhook({
     ...exitBase,
     gridRegimeKey: sharedKey,
   });
-  assert.strictEqual(sameKeyPreview.live.armed, 2, "GRID_EXIT same-key multi-PID target preview");
+  assert.strictEqual(sameKeyPreview.live.armed, 3, "GRID_EXIT same strategy/symbol/timeframe target preview");
   assert.strictEqual(
-    sameKeyPreview.targetItems.some((item) => item.pid === 203 && item.resultCode === "GRID_EXIT_KEY_MISMATCH"),
+    sameKeyPreview.targetItems.some((item) => item.pid === 203 && item.resultCode === "GRID_EXIT_ALERT_PREVIEW"),
     true,
-    "unrelated same symbol PID untouched by wrong stored key"
+    "stored gridRegimeKey mismatch no longer blocks explicit EXIT scope"
   );
   assert.strictEqual(
     sameKeyPreview.targetItems.some((item) => item.pid === 204 && item.resultCode === "GRID_EXIT_SIGNAL_MISMATCH"),
@@ -270,6 +331,26 @@ assert.ok(
     sameKeyPreview.targetItems.some((item) => item.pid === 205),
     false,
     "disabled row excluded"
+  );
+
+  const profileExitPreview = await gridRuntime.previewGridExitWebhook({
+    eventType: "GRID_EXIT",
+    strategySignal: "NY_BOX_GRID_35_65",
+    symbol: "BTCUSDT.P",
+    timeframe: "15",
+    exitReason: "BOX_TOUCH",
+    signalTime: "2026-06-15T10:10:00",
+  });
+  assert.strictEqual(profileExitPreview.live.armed, 1, "35/65 EXIT targets only 35/65 row");
+  assert.strictEqual(
+    profileExitPreview.targetItems.some((item) => item.pid === 207 && item.resultCode === "GRID_EXIT_ALERT_PREVIEW"),
+    true,
+    "35/65 active grid targeted"
+  );
+  assert.strictEqual(
+    profileExitPreview.targetItems.some((item) => item.pid === 206 && item.resultCode === "GRID_EXIT_SIGNAL_MISMATCH"),
+    true,
+    "50/50 active grid remains untouched by 35/65 EXIT"
   );
 
   const candlePreview = await gridRuntime.previewGridExitWebhook({

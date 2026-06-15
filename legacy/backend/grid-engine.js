@@ -485,6 +485,76 @@ const computeGridEntryQty = (row, entryPrice) => {
   return tradeValue / entryPrice;
 };
 
+const parseGridPayloadObject = (value) => {
+  if (!value) {
+    return {};
+  }
+  if (typeof value === "object") {
+    return value;
+  }
+  try {
+    const parsed = JSON.parse(String(value));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+};
+
+const pickGridPayloadValue = (...values) => {
+  for (const value of values) {
+    if (value !== undefined && value !== null && String(value).trim() !== "") {
+      return value;
+    }
+  }
+  return null;
+};
+
+const getGridRowPayload = (row = {}) => {
+  if (row.gridPayload && typeof row.gridPayload === "object") {
+    return row.gridPayload;
+  }
+  return parseGridPayloadObject(row.lastWebhookPayloadJson);
+};
+
+const getGridTriggerProfile = (row = {}) => {
+  const payload = getGridRowPayload(row);
+  return String(pickGridPayloadValue(row.triggerProfile, payload.triggerProfile, payload.trigger_profile) || "").trim();
+};
+
+const getGridLegTriggerPrice = (row = {}, leg = "LONG") => {
+  const payload = getGridRowPayload(row);
+  const fallbackTriggerPrice = pickGridPayloadValue(row.triggerPrice, payload.triggerPrice, payload.trigger, payload.price);
+  const value = leg === "SHORT"
+    ? pickGridPayloadValue(
+        row.shortTriggerPrice,
+        row.short_trigger_price,
+        payload.shortTriggerPrice,
+        payload.short_trigger_price,
+        payload.shortTrigger,
+        payload.shortEntryPrice,
+        payload.sellTriggerPrice,
+        fallbackTriggerPrice
+      )
+    : pickGridPayloadValue(
+        row.longTriggerPrice,
+        row.long_trigger_price,
+        payload.longTriggerPrice,
+        payload.long_trigger_price,
+        payload.longTrigger,
+        payload.longEntryPrice,
+        payload.buyTriggerPrice,
+        fallbackTriggerPrice
+      );
+  return toNumber(value);
+};
+
+const getGridSideTriggerMetadata = (row = {}) => ({
+  payloadTriggerPrice: toNumber(row.triggerPrice || getGridRowPayload(row).triggerPrice),
+  longTriggerPrice: getGridLegTriggerPrice(row, "LONG"),
+  shortTriggerPrice: getGridLegTriggerPrice(row, "SHORT"),
+  triggerProfile: getGridTriggerProfile(row) || null,
+});
+
 const computeLegTakeProfitPrice = (row, leg, entryPrice) => {
   const profitPercent = toNumber(row.profit);
   if (!(profitPercent > 0) || !(entryPrice > 0)) {
@@ -519,7 +589,7 @@ const getExitFillPriceFromTicker = (leg, reason, price) => {
 };
 
 const isLegEntryTriggered = (leg, row, price) => {
-  const triggerPrice = toNumber(row.triggerPrice);
+  const triggerPrice = getGridLegTriggerPrice(row, leg);
   if (!(triggerPrice > 0) || !price?.st) {
     return false;
   }
@@ -1768,7 +1838,7 @@ const collectMissingGridProtection = (exits = {}) => {
 
 const placeLiveEntryOrderForLeg = async (row, leg, options = {}) => {
   const coin = getCoin();
-  const triggerPrice = toNumber(row.triggerPrice);
+  const triggerPrice = getGridLegTriggerPrice(row, leg);
   const qty = computeGridEntryQty(row, triggerPrice);
   if (!(qty > 0)) {
     return null;
@@ -2596,6 +2666,9 @@ const buildGridArmLastPayloadJson = (targetItem = {}, plan = {}) => {
     supportPrice: plan.supportPrice,
     resistancePrice: plan.resistancePrice,
     triggerPrice: plan.triggerPrice,
+    longTriggerPrice: plan.longTriggerPrice,
+    shortTriggerPrice: plan.shortTriggerPrice,
+    triggerProfile: plan.triggerProfile || null,
     signalTime: plan.signalTime,
     pairPrimingSource: "GRID_LIVE_ARM_WORKER_TARGET",
   });
@@ -2655,16 +2728,42 @@ const buildLiveGridArmPairPrimingPlan = ({ row = {}, targetItem = {} } = {}) => 
   const supportPrice = toNumber(hydratedRow.supportPrice);
   const resistancePrice = toNumber(hydratedRow.resistancePrice);
   const triggerPrice = toNumber(hydratedRow.triggerPrice);
-  if (!(supportPrice > 0) || !(resistancePrice > 0) || !(triggerPrice > 0)) {
+  const longTriggerPrice = getGridLegTriggerPrice(hydratedRow, "LONG");
+  const shortTriggerPrice = getGridLegTriggerPrice(hydratedRow, "SHORT");
+  const triggerProfile = getGridTriggerProfile(hydratedRow);
+  if (!(supportPrice > 0) || !(resistancePrice > 0) || !(triggerPrice > 0) || !(longTriggerPrice > 0) || !(shortTriggerPrice > 0)) {
     return { ok: false, reason: "GRID_LIVE_ARM_PRICE_CONTEXT_MISSING" };
   }
   if (!(supportPrice < triggerPrice && triggerPrice < resistancePrice)) {
     return { ok: false, reason: "GRID_LIVE_ARM_PRICE_CONTEXT_INVALID" };
   }
+  if (longTriggerPrice < supportPrice || longTriggerPrice > resistancePrice) {
+    return { ok: false, reason: "GRID_LIVE_ARM_LONG_TRIGGER_OUTSIDE_BOX" };
+  }
+  if (shortTriggerPrice < supportPrice || shortTriggerPrice > resistancePrice) {
+    return { ok: false, reason: "GRID_LIVE_ARM_SHORT_TRIGGER_OUTSIDE_BOX" };
+  }
+  if (longTriggerPrice > shortTriggerPrice) {
+    return { ok: false, reason: "GRID_LIVE_ARM_SIDE_TRIGGER_ORDER_INVALID" };
+  }
 
   const tradeValue = getTradeValue(hydratedRow);
   const qty = computeGridEntryQty(hydratedRow, triggerPrice);
-  if (!(tradeValue > 0) || !(qty > 0)) {
+  const legPlans = GRID_ENTRY_PAIR_LEGS.map((leg) => {
+    const legTriggerPrice = getGridLegTriggerPrice(hydratedRow, leg);
+    const legQty = computeGridEntryQty(hydratedRow, legTriggerPrice);
+    return {
+      leg,
+      orderType: "LIMIT",
+      side: getLegMeta(leg).signalSide,
+      positionSide: getLegPositionSide(leg),
+      triggerPrice: legTriggerPrice,
+      qty: legQty,
+      notional: legQty * legTriggerPrice,
+      clientOrderId: gridPairAtomicity.buildGridPairClientOrderId(hydratedRow, leg),
+    };
+  });
+  if (!(tradeValue > 0) || !(qty > 0) || legPlans.some((legPlan) => !(legPlan.qty > 0))) {
     return { ok: false, reason: "GRID_LIVE_ARM_NOTIONAL_MISSING" };
   }
 
@@ -2688,19 +2787,14 @@ const buildLiveGridArmPairPrimingPlan = ({ row = {}, targetItem = {} } = {}) => 
     supportPrice,
     resistancePrice,
     triggerPrice,
+    longTriggerPrice,
+    shortTriggerPrice,
+    triggerProfile: triggerProfile || null,
     signalTime: signalTime || null,
     qty,
     notional: qty * triggerPrice,
     tradeValue,
-    legs: GRID_ENTRY_PAIR_LEGS.map((leg) => ({
-      leg,
-      orderType: "LIMIT",
-      side: getLegMeta(leg).signalSide,
-      positionSide: getLegPositionSide(leg),
-      triggerPrice,
-      qty,
-      clientOrderId: gridPairAtomicity.buildGridPairClientOrderId(hydratedRow, leg),
-    })),
+    legs: legPlans,
   };
 };
 
@@ -2882,9 +2976,10 @@ const enqueueLiveReentryIntentAfterTakeProfit = async (row, parsed, reData) => {
       source: "ERROR",
       reason: error?.message || String(error),
     }));
-  const triggerPrice = toNumber(row.triggerPrice);
+  const triggerPrice = getGridLegTriggerPrice(row, leg);
   const reentryQty = computeGridEntryQty(row, triggerPrice);
   const closedQty = toNumber(reData?.l || reData?.z);
+  const sideTriggerMetadata = getGridSideTriggerMetadata(row);
   const summary = await orderIntentQueue.enqueueGridReentryCreateIntent({
     routePath: "grid-runtime-tp-reentry",
     payload: {
@@ -2896,6 +2991,10 @@ const enqueueLiveReentryIntentAfterTakeProfit = async (row, parsed, reData) => {
       timeframe: row.bunbong,
       positionSide: leg,
       triggerPrice,
+      payloadTriggerPrice: sideTriggerMetadata.payloadTriggerPrice,
+      longTriggerPrice: sideTriggerMetadata.longTriggerPrice,
+      shortTriggerPrice: sideTriggerMetadata.shortTriggerPrice,
+      triggerProfile: sideTriggerMetadata.triggerProfile,
       reentryQty,
       ownedQtyBasis: closedQty,
       sourceTakeProfitClientOrderId: parsed.clientOrderId,
@@ -3589,7 +3688,7 @@ const armMissingLiveEntries = async (row) => {
           current,
           "gridLiveArm",
           "ENTRY_SLOT_BUSY",
-          `leg:${leg}, triggerPrice:${current.triggerPrice}`,
+          `leg:${leg}, triggerPrice:${getGridLegTriggerPrice(current, leg)}`,
           leg
         );
         continue;
@@ -3628,7 +3727,7 @@ const armMissingLiveEntries = async (row) => {
         current,
         "gridLiveArm",
         "ENTRY_ARM_FATAL",
-        `leg:${leg}, triggerPrice:${current.triggerPrice}, message:${error?.message || error}`,
+        `leg:${leg}, triggerPrice:${getGridLegTriggerPrice(current, leg)}, message:${error?.message || error}`,
         leg
       );
     }
@@ -3642,6 +3741,7 @@ const enqueueLiveGridArmIntentForRuntimeRow = async (row) => {
     return false;
   }
 
+  const sideTriggerMetadata = getGridSideTriggerMetadata(row);
   const payload = {
     strategySignal: row.strategySignal || "SQZ+GRID",
     symbol: row.symbol,
@@ -3649,6 +3749,9 @@ const enqueueLiveGridArmIntentForRuntimeRow = async (row) => {
     supportPrice: row.supportPrice,
     resistancePrice: row.resistancePrice,
     triggerPrice: row.triggerPrice,
+    longTriggerPrice: sideTriggerMetadata.longTriggerPrice,
+    shortTriggerPrice: sideTriggerMetadata.shortTriggerPrice,
+    triggerProfile: sideTriggerMetadata.triggerProfile,
     signalTime: row.regimeReceivedAt || row.signalTime || row.updatedAt || null,
   };
   const previewResult = {
@@ -4776,6 +4879,7 @@ const handleLiveOrderTradeUpdate = async (uid, data) => {
 
 module.exports = {
   parseGridClientOrderId,
+  getGridLegTriggerPrice,
   buildLiveGridArmPairPrimingPlan,
   runLive: () => runMode("LIVE"),
   runTest: () => runMode("TEST"),

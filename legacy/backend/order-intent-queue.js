@@ -144,6 +144,9 @@ const buildGridArmIntentPayloadHash = ({ payload = {}, targetItem = {} } = {}) =
       supportPrice: payload.supportPrice,
       resistancePrice: payload.resistancePrice,
       triggerPrice: payload.triggerPrice,
+      longTriggerPrice: payload.longTriggerPrice,
+      shortTriggerPrice: payload.shortTriggerPrice,
+      triggerProfile: payload.triggerProfile || null,
     })
   );
 
