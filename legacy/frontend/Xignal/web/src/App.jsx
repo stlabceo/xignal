@@ -21,7 +21,6 @@ import TradeHistoryDetailPage from './pages/tradingHistory/TradeHistoryDetailPag
 import TestTradeHistoryDetailPage from './pages/tradingHistory/TestTradeHistoryDetailPage.jsx';
 import SignUpComplete from './pages/authpage/SignUpComplete.jsx';
 import AdminConsole from './pages/admin/AdminConsole.jsx';
-import MenuPlaceholderPage from './pages/placeholder/MenuPlaceholderPage.jsx';
 import TakeProfitSearchPage from './pages/takeProfitSearch/TakeProfitSearchPage.jsx';
 import RealtimeDataPage from './pages/realtimeData/RealtimeDataPage.jsx';
 import { clearSessionAuth, getSessionSnapshot } from './utils/sessionAuth.js';
@@ -135,6 +134,18 @@ function App() {
 		return children;
 	};
 
+	const PublicSurfaceRoute = ({ children }) => {
+		const { hydrateSessionState, isLoggedIn } = useAuthStore();
+		const session = getSessionSnapshot('user');
+		const shouldUseAppLayout = isDevSuperLoginActive() || isLoggedIn || session.isLoggedIn;
+
+		useEffect(() => {
+			hydrateSessionState('user');
+		}, [hydrateSessionState]);
+
+		return shouldUseAppLayout ? <AppLayout>{children}</AppLayout> : children;
+	};
+
 	return (
 		<>
 			<MessageModalProvider>
@@ -230,9 +241,30 @@ function App() {
 								</>
 							}
 						/>
-						<Route path="/realtime-data" element={<RealtimeDataPage />} />
-						<Route path="/take-profit-search" element={<TakeProfitSearchPage />} />
-						<Route path="/tp-search" element={<TakeProfitSearchPage />} />
+						<Route
+							path="/realtime-data"
+							element={
+								<PublicSurfaceRoute>
+									<RealtimeDataPage />
+								</PublicSurfaceRoute>
+							}
+						/>
+						<Route
+							path="/take-profit-search"
+							element={
+								<PublicSurfaceRoute>
+									<TakeProfitSearchPage />
+								</PublicSurfaceRoute>
+							}
+						/>
+						<Route
+							path="/tp-search"
+							element={
+								<PublicSurfaceRoute>
+									<TakeProfitSearchPage />
+								</PublicSurfaceRoute>
+							}
+						/>
 						<Route element={<AppLayout />}>
 							<Route
 								path="/"
@@ -296,33 +328,6 @@ function App() {
 								element={
 									<ProtectedRoute>
 										<Mypage />
-									</ProtectedRoute>
-								}
-							/>
-							<Route
-								path="/take-profit-search"
-								element={
-									<ProtectedRoute>
-										<TakeProfitSearchPage />
-									</ProtectedRoute>
-								}
-							/>
-							<Route
-								path="/tp-search"
-								element={
-									<ProtectedRoute>
-										<TakeProfitSearchPage />
-									</ProtectedRoute>
-								}
-							/>
-							<Route
-								path="/realtime-data"
-								element={
-									<ProtectedRoute>
-										<MenuPlaceholderPage
-											title="실시간데이터"
-											description="실시간 데이터 화면은 대시보드와 섞지 않고 별도 메뉴로 준비합니다."
-										/>
 									</ProtectedRoute>
 								}
 							/>

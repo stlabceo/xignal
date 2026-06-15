@@ -3,7 +3,7 @@ import { useState } from 'react';
 import AppSidebar from './AppSidebar';
 import AppFooter from './AppFooter';
 
-const LayoutContent = () => {
+const LayoutContent = ({ children }) => {
 	const [isDesktopSidebarOpen, setIsDesktopSidebarOpen] = useState(true);
 
 	return (
@@ -20,7 +20,7 @@ const LayoutContent = () => {
 			>
 				<div className="flex min-h-screen flex-col">
 					<div className="flex-1 pt-[72px] md:pt-0">
-						<Outlet />
+						{children || <Outlet />}
 					</div>
 					<AppFooter />
 				</div>
@@ -29,8 +29,8 @@ const LayoutContent = () => {
 	);
 };
 
-const AppLayout = () => {
-	return <LayoutContent />;
+const AppLayout = ({ children }) => {
+	return <LayoutContent>{children}</LayoutContent>;
 };
 
 export default AppLayout;

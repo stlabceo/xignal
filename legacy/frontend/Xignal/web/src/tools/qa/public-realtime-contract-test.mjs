@@ -13,6 +13,8 @@ const readWeb = (relativePath) => fs.readFileSync(path.join(webRoot, relativePat
 const client = readSrc('services/publicRealtime.js');
 const page = readSrc('pages/realtimeData/RealtimeDataPage.jsx');
 const app = readSrc('App.jsx');
+const appLayout = readSrc('layout/AppLayout.jsx');
+const appSidebar = readSrc('layout/AppSidebar.jsx');
 const login = readSrc('pages/auth/LoginPage.jsx');
 const vite = readWeb('vite.config.js');
 
@@ -27,7 +29,12 @@ assert.match(vite, /VITE_PUBLIC_REALTIME_API_BASE/);
 
 assert.match(app, /path="\/realtime-data"/);
 assert.match(app, /<RealtimeDataPage \/>/);
-assert.match(app, /path="\/take-profit-search" element=\{<TakeProfitSearchPage \/>/);
+assert.match(app, /PublicSurfaceRoute/);
+assert.match(app, /<AppLayout>\{children\}<\/AppLayout>/);
+assert.match(app, /path="\/take-profit-search"/);
+assert.match(app, /<TakeProfitSearchPage \/>/);
+assert.match(appLayout, /children \|\| <Outlet \/>/);
+assert.match(appSidebar, /실시간 데이터/);
 
 assert.match(login, /\/realtime-data/);
 assert.match(login, /실시간 데이터 보기/);
@@ -42,7 +49,7 @@ console.log(
 	JSON.stringify(
 		{
 			status: 'PASS',
-			tests: 16,
+			tests: 21,
 			noDummy: true,
 			tradingIsolation: true,
 			route: '/realtime-data'

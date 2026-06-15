@@ -11,6 +11,7 @@ const read = (relativePath) => fs.readFileSync(path.join(srcRoot, relativePath),
 const helper = read('utils/devSuperLogin.js');
 const loginPage = read('pages/auth/LoginPage.jsx');
 const app = read('App.jsx');
+const sidebar = read('layout/AppSidebar.jsx');
 
 assert.match(helper, /DEV_SUPER_LOGIN: local QA only/);
 assert.match(helper, /VITE_ENABLE_DEV_SUPER_LOGIN/);
@@ -24,6 +25,8 @@ assert.match(loginPage, /isDevSuperLoginAvailable/);
 assert.match(loginPage, /activateDevSuperLogin/);
 assert.match(loginPage, /DEV SUPER LOGIN/);
 assert.match(loginPage, /navigate\('\/take-profit-search'\)/);
+assert.match(sidebar, /clearDevSuperLogin/);
+assert.match(sidebar, /clearDevSuperLogin\(\);\s*auth\.logout/);
 
 const devGuardIndex = app.indexOf('isDevSuperLoginActive()');
 const authMemberIndex = app.indexOf('auth.member');
@@ -35,7 +38,7 @@ console.log(
 	JSON.stringify(
 		{
 			ok: true,
-			tests: 14,
+			tests: 16,
 			devOnlyFlag: 'VITE_ENABLE_DEV_SUPER_LOGIN',
 			localhostOnly: true,
 			productionDisabled: true,

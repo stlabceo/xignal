@@ -131,7 +131,7 @@ const TakeProfitSearchPage = () => {
 				<header className="flex flex-col gap-2">
 					<p className="text-sm font-semibold text-[#2563EB]">QBT_STATS_V1</p>
 					<h1 className="text-[28px] font-bold leading-tight">익절 조건 검색</h1>
-					<p className="text-sm text-[#64748B]">Ring Levels public backtest API에서 수신된 TradingView 실데이터만 표시합니다.</p>
+					<p className="text-sm text-[#64748B]">실제 TradingView 백테스트 데이터에서 수익률과 승률이 좋은 조건을 찾습니다.</p>
 				</header>
 
 				<section className="rounded-[18px] border border-[#E2E8F0] bg-white p-5 shadow-[0_18px_40px_rgba(15,23,42,0.04)]">

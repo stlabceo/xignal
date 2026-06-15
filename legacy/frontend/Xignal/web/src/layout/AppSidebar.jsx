@@ -5,6 +5,7 @@ import MessageModal from '../components/modal/pageModal/MessageModal';
 import { useNotifyStore } from '../store/notifyStore';
 import { useAuthStore } from '../store/authState';
 import { auth } from '../services/auth';
+import { clearDevSuperLogin } from '../utils/devSuperLogin';
 
 const NavIcon = ({ type }) => {
 	const common = {
@@ -74,12 +75,13 @@ const AppSidebar = ({ isDesktopSidebarOpen = false, setIsDesktopSidebarOpen = ()
 			{ name: '익절 조건 검색', path: '/take-profit-search', icon: 'search' },
 			{ name: '마이페이지', path: '/mypage', icon: 'user' },
 			{ name: '메시지', action: 'message', icon: 'message' },
-			{ name: '실시간데이터', path: '/realtime-data', icon: 'data' }
+			{ name: '실시간 데이터', path: '/realtime-data', icon: 'data' }
 		],
 		[]
 	);
 
 	const signout = () => {
+		clearDevSuperLogin();
 		auth.logout();
 		setIsLoggedIn(false);
 		setIsAdminSession(false);

@@ -61,7 +61,7 @@ const Badge = ({ children, tone = 'blue' }) => {
 
 const EmptyState = ({ status, error }) => (
 	<div className="rounded-2xl border border-dashed border-[#CBD5E1] bg-[#F8FAFC] p-8 text-center text-sm text-[#64748B]">
-		{status === 'ERROR' ? error || 'public realtime API를 불러오지 못했습니다.' : '아직 수신된 public realtime 데이터가 없습니다.'}
+		{status === 'ERROR' ? error || '실시간 데이터 API를 불러오지 못했습니다.' : '아직 수신된 실시간 데이터가 없습니다.'}
 	</div>
 );
 
@@ -148,9 +148,9 @@ const DetailModal = ({ row, activeTab, onClose }) => {
 			<div className="max-h-[94vh] w-full max-w-[760px] overflow-y-auto rounded-t-[20px] bg-white p-5 shadow-[0_30px_80px_rgba(15,23,42,0.22)] sm:rounded-[20px] sm:p-6">
 				<header className="flex items-start justify-between gap-4">
 					<div>
-						<p className="text-sm font-semibold text-[#2563EB]">public realtime detail</p>
+						<p className="text-sm font-semibold text-[#2563EB]">실시간 데이터 상세</p>
 						<h2 className="mt-1 text-2xl font-bold text-[#0F172A]">{symbol}</h2>
-						<p className="mt-2 text-sm text-[#64748B]">거래 실행 상태와 분리된 공개 데이터 상세입니다.</p>
+						<p className="mt-2 text-sm text-[#64748B]">시장에서 형성된 현재 공개 데이터 기준 상세입니다.</p>
 					</div>
 					<button type="button" onClick={onClose} className="h-9 rounded-lg border border-[#E2E8F0] px-3 text-sm font-semibold text-[#64748B]">
 						닫기
@@ -242,10 +242,10 @@ const RealtimeDataPage = () => {
 		<div className="min-h-screen bg-[#F8FAFC] px-4 py-6 text-[#0F172A] sm:px-6 lg:px-8">
 			<div className="mx-auto flex max-w-[1440px] flex-col gap-6">
 				<header className="flex flex-col gap-2">
-					<p className="text-sm font-semibold text-[#2563EB]">PUBLIC REALTIME DATA</p>
+					<p className="text-sm font-semibold text-[#2563EB]">REALTIME DATA</p>
 					<h1 className="text-[28px] font-bold leading-tight">실시간 데이터</h1>
 					<p className="max-w-3xl text-sm text-[#64748B]">
-						Ring Levels public API에서 수신한 NY Box, 공포/탐욕, 지지/저항선 데이터를 Xignal 화면에 맞게 표시합니다.
+						시장에서 형성된 주요 박스와 공포·탐욕 이벤트를 확인합니다.
 					</p>
 				</header>
 
