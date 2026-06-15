@@ -1,5 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
-import { publicBacktest } from '../../services/publicBacktest';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { publicRealtime } from '../../services/publicRealtime';
 import './realtimeDataPage.css';
 
@@ -16,38 +15,176 @@ const PUBLIC_ITEM_CONFIGS = [
 		kicker: '뉴욕 박스',
 		title: '뉴욕 세션 기준 박스와 현재 위치',
 		lead: '전일 뉴욕 세션에서 만들어진 상단과 하단을 기준으로 현재 가격이 박스 안, 상단 돌파, 하단 이탈 중 어디에 있는지 확인합니다.',
-		help: ['박스 상단과 하단은 공개 시장 데이터로 계산됩니다.', '상세 모달에서 전략 설명과 관련 백테스트를 함께 확인할 수 있습니다.', '자동매매 설정은 로그인 후 익절 조건 검색 화면에서 이어집니다.']
+		help: [
+			'박스상단/박스하단은 최근 완료된 뉴욕 세션 후반부 가격 범위입니다.',
+			'상세 모달은 RingLevel detail API의 뉴욕 박스 섹션과 백테스트를 그대로 표시합니다.',
+			'주문이나 PID를 만들지 않고 공개 데이터와 백테스트 참고 정보만 보여줍니다.'
+		]
 	},
 	{
 		key: 'fear_greed',
 		label: '공포/탐욕',
 		kicker: '시장 심리',
-		title: '단기·중기·장기 공포와 탐욕 이벤트',
-		lead: '가격 흐름에서 공포와 탐욕 이벤트가 발생했는지, 그리고 해소됐는지 기간별로 보여줍니다.',
-		help: ['단기, 중기, 장기 기간을 바꾸며 시장의 심리 변화를 비교합니다.', '상세 모달은 최근 이벤트, 발생 가격, 해소 가격을 분리해 보여줍니다.', 'ATF+VIXFIX 백테스트는 매수와 매도 방향을 나누어 표시합니다.']
+		title: '단기·중기·장기 공포/탐욕 이벤트',
+		lead: '가격 흐름에서 공포와 탐욕 이벤트가 발생했는지, 그리고 해소됐는지를 기간별로 보여줍니다.',
+		help: [
+			'단기, 중기, 장기 기간을 나누어 시장 심리 변화를 비교합니다.',
+			'상세 모달은 기간별 이벤트, 발생 가격, 해소 가격을 detail API 기준으로 표시합니다.',
+			'ATF+VIXFIX 백테스트는 매수/매도 방향을 분리해서 보여줍니다.'
+		]
 	},
 	{
 		key: 'support_resistance',
 		label: '지지/저항선',
 		kicker: '가격대 분석',
 		title: '볼륨 프로파일 기반 지지선과 저항선',
-		lead: '현재가가 의미 있는 지지선과 저항선에 얼마나 가까운지 공개 데이터로 확인합니다.',
-		help: ['지지선과 저항선은 공개 가격·거래량 기반 구간으로 계산됩니다.', '상세 모달에서 현재가 위치와 다음 구간을 한눈에 볼 수 있습니다.', '이 화면은 공개 데이터 확인용이며 주문이나 포지션을 만들지 않습니다.']
+		lead: '현재가는 어느 지지선과 저항선 사이에 있는지 공개 데이터로 확인합니다.',
+		help: [
+			'이 카테고리는 RingLevel 최신 publicLaunch 기준에서 아직 공개 비활성입니다.',
+			'코드와 API는 남아 있지만 공개 화면에는 노출하지 않습니다.',
+			'공개 전환 시 별도 QA 후 켜야 합니다.'
+		]
 	}
 ];
 
 const PUBLIC_ITEM_TYPES = PUBLIC_ITEM_CONFIGS.filter((item) => PUBLIC_LAUNCH_CATEGORY_VISIBILITY[item.key]);
 
+const FUTURES_TO_DISPLAY_BASE = {
+	'1000000BOB': 'BOB',
+	'1000000MOG': 'MOG',
+	'1000BONK': 'BONK',
+	'1000CAT': 'CAT',
+	'1000CHEEMS': 'CHEEMS',
+	'1000FLOKI': 'FLOKI',
+	'1000LUNC': 'LUNC',
+	'1000PEPE': 'PEPE',
+	'1000RATS': 'RATS',
+	'1000SATS': 'SATS',
+	'1000SHIB': 'SHIB',
+	'1000XEC': 'XEC'
+};
+
+const KOREAN_ASSET_NAMES = {
+	BTC: '비트코인',
+	ETH: '이더리움',
+	BNB: '비앤비',
+	SOL: '솔라나',
+	XRP: '리플',
+	DOGE: '도지코인',
+	ADA: '에이다',
+	TRX: '트론',
+	LINK: '체인링크',
+	AVAX: '아발란체',
+	BCH: '비트코인캐시',
+	DOT: '폴카닷',
+	LTC: '라이트코인',
+	APT: '앱토스',
+	ARB: '아비트럼',
+	SUI: '수이',
+	ICP: '인터넷컴퓨터',
+	ETC: '이더리움클래식',
+	FIL: '파일코인',
+	ATOM: '코스모스',
+	OP: '옵티미즘',
+	INJ: '인젝티브',
+	NEAR: '니어프로토콜',
+	UNI: '유니스왑',
+	PEPE: '페페',
+	SHIB: '시바이누',
+	BONK: '봉크',
+	WLD: '월드코인',
+	AAVE: '에이브',
+	ALGO: '알고랜드',
+	APE: '에이프코인',
+	AR: '알위브',
+	AXS: '엑시인피니티',
+	CHZ: '칠리즈',
+	COMP: '컴파운드',
+	CRV: '커브',
+	DYDX: '디와이디엑스',
+	ENA: '에테나',
+	FET: '페치에이아이',
+	GALA: '갈라',
+	HBAR: '헤데라',
+	IMX: '이뮤터블엑스',
+	JUP: '주피터',
+	KAS: '카스파',
+	MKR: '메이커',
+	OM: '만트라',
+	ONDO: '온도',
+	PENDLE: '펜들',
+	POL: '폴리곤',
+	RENDER: '렌더',
+	SEI: '세이',
+	STX: '스택스',
+	TAO: '비텐서',
+	TIA: '셀레스티아',
+	VET: '비체인',
+	XLM: '스텔라루멘',
+	XMR: '모네로',
+	ZEC: '지캐시'
+};
+
+const STABLE_OR_PEGGED_BASE_ASSETS = new Set(['USDT', 'USDC', 'FDUSD', 'TUSD', 'DAI', 'USDE', 'USDS', 'USDD', 'PYUSD', 'USD1', 'USDG', 'RLUSD', 'EURC', 'FRAX', 'GUSD', 'LUSD', 'USDP', 'EURS', 'AEUR', 'BUSD', 'BFUSD', 'XAUT', 'PAXG', 'XAU', 'STABLE']);
+
+const PUBLIC_PRIORITY = {
+	BTC: 1,
+	ETH: 2,
+	BNB: 4,
+	SOL: 5,
+	XRP: 6,
+	DOGE: 8,
+	ADA: 9,
+	TRX: 10,
+	WBTC: 11,
+	LINK: 12,
+	AVAX: 13,
+	SHIB: 14,
+	DOT: 15,
+	BCH: 16,
+	NEAR: 17,
+	UNI: 18,
+	LTC: 19,
+	APT: 20,
+	ICP: 21,
+	ETC: 22,
+	ARB: 23,
+	PEPE: 24,
+	FIL: 25,
+	ATOM: 26,
+	SUI: 27,
+	OP: 28,
+	IMX: 29,
+	INJ: 30,
+	XLM: 31,
+	HBAR: 32,
+	AAVE: 33,
+	ONDO: 34,
+	JUP: 35,
+	RUNE: 36,
+	GRT: 37,
+	MKR: 38,
+	ENA: 39,
+	RENDER: 40,
+	FET: 41,
+	ALGO: 42,
+	VET: 43,
+	KAITO: 44,
+	WLD: 45,
+	SEI: 46,
+	TIA: 47,
+	ZEC: 48,
+	PUMP: 49
+};
+
 const TIMEFRAMES = [
-	{ value: 'short', label: '단기' },
-	{ value: 'mid', label: '중기' },
-	{ value: 'long', label: '장기' }
+	{ value: 'short', label: '단기', windowLabel: '1일' },
+	{ value: 'mid', label: '중기', windowLabel: '7일' },
+	{ value: 'long', label: '장기', windowLabel: '30일' }
 ];
 
 const SR_TIMEFRAMES = [
-	{ value: 'short', label: '단기' },
-	{ value: 'mid', label: '중기' },
-	{ value: 'long', label: '장기' },
+	...TIMEFRAMES,
 	{ value: '15', label: '15분' },
 	{ value: '60', label: '1시간' }
 ];
@@ -55,7 +192,7 @@ const SR_TIMEFRAMES = [
 const NYBOX_FILTERS = [
 	{ value: null, label: '전체' },
 	{ value: 'break_above', label: '상단 돌파' },
-	{ value: 'inside_box', label: '박스 내부' },
+	{ value: 'inside_box', label: '박스 안' },
 	{ value: 'break_below', label: '하단 이탈' }
 ];
 
@@ -72,7 +209,7 @@ const strategyByItemType = {
 		strategyId: 'NY_QUIET_CLOSE_ASIA_BOX',
 		expectedType: 'GRID',
 		title: 'NY Quiet Close Asia Box Grid',
-		description: '박스 상단과 하단을 기준으로 양방향 Grid 조건을 관찰합니다.'
+		description: '박스 상단과 하단을 기준으로 양방향 Grid 조건을 참고합니다.'
 	},
 	fear_greed: {
 		strategyId: 'ATF_VIXFIX',
@@ -84,7 +221,7 @@ const strategyByItemType = {
 		strategyId: undefined,
 		expectedType: undefined,
 		title: '지지·저항선 참고',
-		description: '현재 공개 백테스트 계약에 직접 연결된 전략이 있으면 이 영역에 표시합니다.'
+		description: '현재 공개 백테스트 계약과 직접 연결된 전략은 없습니다.'
 	}
 };
 
@@ -131,27 +268,89 @@ const formatDateTime = (value) => {
 	return date.toLocaleString('ko-KR', { hour12: false });
 };
 
+const formatKstMonthDayTime = (value) => {
+	if (!value) return '-';
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) return String(value);
+	return date.toLocaleString('ko-KR', {
+		month: '2-digit',
+		day: '2-digit',
+		hour: '2-digit',
+		minute: '2-digit',
+		hour12: false
+	});
+};
+
 const getSymbol = (row) => row?.symbol || row?.baseAsset || '-';
-const getDisplaySymbol = (row) => row?.baseAsset || String(getSymbol(row)).replace(/USDT$/i, '') || '-';
+
+function baseAssetFromSymbol(symbol, baseAsset) {
+	const raw = String(baseAsset || symbol || '')
+		.replace(/\.P$/i, '')
+		.replace(/USDT$/i, '')
+		.toUpperCase();
+	return FUTURES_TO_DISPLAY_BASE[raw] || raw;
+}
+
+const getDisplaySymbol = (row) => baseAssetFromSymbol(getSymbol(row), row?.baseAsset) || '-';
 const getPrice = (row) => row?.currentPrice ?? row?.price ?? null;
 const getUpdatedAt = (row) => row?.updatedAt || row?.calculatedAtKst || row?.lastUpdatedAt || null;
 const publicSupport = (row) => (row?.supportProvenance?.source === 'vp' || row?.support ? row?.support : null);
 const publicResistance = (row) => row?.resistance || null;
 
+function getDisplaySymbolLabel(symbol, baseAsset) {
+	const displayBase = baseAssetFromSymbol(symbol, baseAsset);
+	const primaryName = KOREAN_ASSET_NAMES[displayBase] || displayBase || '-';
+	return {
+		primaryName,
+		secondarySymbol: symbol || displayBase || '-',
+		displayBase
+	};
+}
+
+function displayAssetText(symbol, baseAsset) {
+	const label = getDisplaySymbolLabel(symbol, baseAsset);
+	return `${label.primaryName} (${label.secondarySymbol})`;
+}
+
+function isPublicVisibleRow(row) {
+	const label = getDisplaySymbolLabel(row?.symbol, row?.baseAsset);
+	if (!label.displayBase || STABLE_OR_PEGGED_BASE_ASSETS.has(label.displayBase)) return false;
+	if (!/^[A-Z0-9]+$/.test(label.displayBase)) return false;
+	return true;
+}
+
+function sortByPublicPriority(rows) {
+	return [...rows].sort((a, b) => {
+		const aLabel = getDisplaySymbolLabel(a?.symbol, a?.baseAsset);
+		const bLabel = getDisplaySymbolLabel(b?.symbol, b?.baseAsset);
+		const aPriority = PUBLIC_PRIORITY[aLabel.displayBase] ?? Infinity;
+		const bPriority = PUBLIC_PRIORITY[bLabel.displayBase] ?? Infinity;
+		if (aPriority !== bPriority) return aPriority - bPriority;
+		const aRank = Number.isFinite(Number(a?.marketCapRank)) ? Number(a.marketCapRank) : Infinity;
+		const bRank = Number.isFinite(Number(b?.marketCapRank)) ? Number(b.marketCapRank) : Infinity;
+		if (aRank !== bRank) return aRank - bRank;
+		return aLabel.displayBase.localeCompare(bLabel.displayBase);
+	});
+}
+
 function nyBoxPosition(row) {
 	const position = row?.currentBoxPosition;
 	const label = row?.currentBoxPositionLabel || position || '-';
-	if (position === 'ABOVE_BOX') return { label: label === 'ABOVE_BOX' ? '상단 돌파' : label, className: 'box-upper' };
-	if (position === 'BELOW_BOX') return { label: label === 'BELOW_BOX' ? '하단 이탈' : label, className: 'box-lower' };
-	if (position === 'INSIDE_BOX') return { label: label === 'INSIDE_BOX' ? '박스 내부' : label, className: 'box-inside' };
+	if (position === 'ABOVE_BOX' || position === 'BREAK_ABOVE') {
+		return { label: label === 'ABOVE_BOX' || label === 'BREAK_ABOVE' ? '상단박스 돌파' : label, className: 'box-upper' };
+	}
+	if (position === 'BELOW_BOX' || position === 'BREAK_BELOW') {
+		return { label: label === 'BELOW_BOX' || label === 'BREAK_BELOW' ? '하단박스 돌파' : label, className: 'box-lower' };
+	}
+	if (position === 'INSIDE_BOX') return { label: label === 'INSIDE_BOX' ? '박스 안' : label, className: 'box-inside' };
 	return { label, className: 'muted' };
 }
 
 function matchesNyBoxFilter(row, filter) {
 	if (!filter) return true;
 	const position = row?.currentBoxPosition;
-	if (filter === 'break_above') return position === 'ABOVE_BOX';
-	if (filter === 'break_below') return position === 'BELOW_BOX';
+	if (filter === 'break_above') return position === 'ABOVE_BOX' || position === 'BREAK_ABOVE';
+	if (filter === 'break_below') return position === 'BELOW_BOX' || position === 'BREAK_BELOW';
 	if (filter === 'inside_box') return position === 'INSIDE_BOX';
 	return true;
 }
@@ -160,8 +359,66 @@ function statusTone(text) {
 	const value = String(text || '');
 	if (value.includes('상승') || value.includes('돌파') || value.includes('탐욕') || value.includes('상단')) return 'up';
 	if (value.includes('하락') || value.includes('이탈') || value.includes('공포') || value.includes('하단')) return 'down';
-	if (value.includes('박스')) return 'box-inside';
+	if (value.includes('박스') || value.includes('정상')) return 'box-inside';
 	return 'muted';
+}
+
+function latestFearGreedEvent(row = {}) {
+	if (row.sourceStatus === 'INSUFFICIENT_DATA') return { state: '수집 중', occurredAt: null };
+	const fearTime = row.fearStartedAt ? Date.parse(row.fearStartedAt) : null;
+	const greedTime = row.greedStartedAt ? Date.parse(row.greedStartedAt) : null;
+	if (!Number.isFinite(fearTime) && !Number.isFinite(greedTime)) return { state: '정상', occurredAt: null };
+	if (Number.isFinite(fearTime) && (!Number.isFinite(greedTime) || fearTime >= greedTime)) {
+		return { state: '공포', occurredAt: row.fearStartedAt || null };
+	}
+	return { state: '탐욕', occurredAt: row.greedStartedAt || null };
+}
+
+function formatFearGreedRelativeTime(value, nowMs = Date.now()) {
+	const timestamp = value ? Date.parse(value) : null;
+	if (!Number.isFinite(timestamp)) return '-';
+	const elapsedMinutes = Math.max(0, Math.floor((nowMs - timestamp) / 60000));
+	if (elapsedMinutes < 1) return '방금 전';
+	if (elapsedMinutes < 60) return `${elapsedMinutes}분 전`;
+	const elapsedHours = Math.floor(elapsedMinutes / 60);
+	if (elapsedHours < 24) return `${elapsedHours}시간 전`;
+	return `${Math.floor(elapsedHours / 24)}일 전`;
+}
+
+function fearGreedPeriodDisplay(row) {
+	const event = latestFearGreedEvent(row);
+	return {
+		state: event.state,
+		relativeTime: event.state === '정상' || event.state === '수집 중' || event.state === '-' ? '-' : formatFearGreedRelativeTime(event.occurredAt)
+	};
+}
+
+function buildFearGreedPeriodMapFromRaw(raw, fallbackTimeframe, rows = []) {
+	const next = {};
+	if (raw?.periodStates) {
+		for (const [symbol, periodStates] of Object.entries(raw.periodStates)) {
+			for (const period of TIMEFRAMES) {
+				const row = periodStates?.[period.value];
+				if (!row) continue;
+				next[symbol] = {
+					...next[symbol],
+					[period.value]: fearGreedPeriodDisplay(row)
+				};
+			}
+		}
+	}
+	if (Object.keys(next).length) return next;
+	for (const row of rows || []) {
+		next[row.symbol] = {
+			...next[row.symbol],
+			[fallbackTimeframe]: fearGreedPeriodDisplay(row)
+		};
+	}
+	return next;
+}
+
+function fearGreedPeriodState(row, periodMap, timeframe) {
+	return periodMap?.[row?.symbol]?.[timeframe] ?? (row?.timeframe === timeframe ? fearGreedPeriodDisplay(row) : { state: '-', relativeTime: '-' });
 }
 
 function chartSymbolFor(row, fallback = 'BTCUSDT') {
@@ -172,6 +429,10 @@ function chartSymbolFor(row, fallback = 'BTCUSDT') {
 
 function timeframeForWidget(value) {
 	return intervalByTimeframe[value] || '15';
+}
+
+function windowLabel(rows, itemType, raw) {
+	return rows?.[0]?.calculationWindow?.label || raw?.meta?.currentSessionLabel || (itemType === 'ny_box' ? '뉴욕박스 기준' : '공개 데이터 기준');
 }
 
 function TradingViewWidget({ symbol, timeframe }) {
@@ -230,48 +491,6 @@ function PriceWithChange({ price, pct }) {
 	);
 }
 
-function RangeBar({ markers, zones = [] }) {
-	const values = [
-		...markers.map((marker) => Number(marker.value)).filter(Number.isFinite),
-		...zones.flatMap((zone) => [Number(zone?.low), Number(zone?.mid), Number(zone?.high)]).filter(Number.isFinite)
-	];
-	if (values.length < 2) return null;
-	const min = Math.min(...values);
-	const max = Math.max(...values);
-	const span = Math.max(max - min, Number.EPSILON);
-	const pct = (value) => Math.max(0, Math.min(100, ((value - min) / span) * 100));
-
-	return (
-		<div className="range-wrap">
-			<div className="range-track">
-				{zones
-					.filter((zone) => Number.isFinite(Number(zone?.low)) && Number.isFinite(Number(zone?.high)))
-					.map((zone, index) => (
-						<span
-							key={`${zone.kind}-${index}`}
-							className={`range-zone ${zone.kind}`}
-							style={{
-								left: `${pct(Number(zone.low))}%`,
-								width: `${Math.max(1, pct(Number(zone.high)) - pct(Number(zone.low)))}%`
-							}}
-						/>
-					))}
-				{markers
-					.filter((marker) => Number.isFinite(Number(marker.value)))
-					.map((marker) => (
-						<span key={marker.label} className={`range-marker ${marker.kind}`} style={{ left: `${pct(Number(marker.value))}%` }}>
-							<span>{marker.label}</span>
-						</span>
-					))}
-			</div>
-			<div className="range-scale">
-				<span>{formatPrice(min)}</span>
-				<span>{formatPrice(max)}</span>
-			</div>
-		</div>
-	);
-}
-
 function NyBoxGauge({ row }) {
 	const current = Number(row?.currentPrice);
 	const bottom = Number(row?.boxBottom);
@@ -303,98 +522,318 @@ function NyBoxGauge({ row }) {
 	);
 }
 
-function BacktestPanel({ row, itemType }) {
-	const [state, setState] = useState({ status: 'LOADING', items: [], error: '' });
-	const symbol = getSymbol(row);
+const BACKTEST_PERIOD_ORDER = ['2w', '1m', '2m', '3m', '6m', '1y', 'all'];
+const BACKTEST_STATUS_LABELS = {
+	OK: '정상',
+	NO_PERIOD: '기간 부족',
+	NO_REGIME: '레짐 없음',
+	NO_CLOSED_REGIME: '종료 레짐 없음',
+	NO_TRADED_REGIME: '거래 없음',
+	INSUFFICIENT_SAMPLE: '표본 부족',
+	CALC_NA: '계산 불가'
+};
+
+function periodLabel(period) {
+	return String(period || '-').toUpperCase();
+}
+
+function tpLabel(tp) {
+	const numeric = Number(tp);
+	if (!Number.isFinite(numeric)) return '-';
+	return `${numeric.toFixed(Number.isInteger(numeric) ? 0 : 1)}%`;
+}
+
+function formatBacktestPct(value, withSign = false) {
+	const numeric = Number(value);
+	if (!Number.isFinite(numeric)) return '-';
+	const sign = withSign && numeric > 0 ? '+' : '';
+	return `${sign}${numeric.toFixed(1)}%`;
+}
+
+function backtestWinrateText(cell) {
+	return formatBacktestPct(cell?.winratePct);
+}
+
+function backtestNetPnlText(cell) {
+	return formatBacktestPct(cell?.netPnlPct, true);
+}
+
+function backtestStatusText(cell) {
+	return BACKTEST_STATUS_LABELS[cell?.status || 'CALC_NA'] || BACKTEST_STATUS_LABELS.CALC_NA;
+}
+
+function backtestCellClass(cell) {
+	if (!cell || cell.status !== 'OK' || cell.netPnlPct === null || cell.netPnlPct === undefined) return 'backtest-cell-neutral';
+	if (Number(cell.netPnlPct) > 0) return 'backtest-cell-positive';
+	if (Number(cell.netPnlPct) < 0) return 'backtest-cell-negative';
+	return 'backtest-cell-neutral';
+}
+
+function isAlgorithmBacktestMatrix(matrix) {
+	return Boolean(matrix && typeof matrix === 'object' && 'buy' in matrix && 'sell' in matrix);
+}
+
+function displayPeriods(stats) {
+	const periods = Array.isArray(stats?.periods) ? stats.periods : [];
+	const known = BACKTEST_PERIOD_ORDER.filter((period) => periods.includes(period));
+	return known.length > 0 ? known : periods;
+}
+
+function displayTpList(stats) {
+	return Array.isArray(stats?.tpListPct) ? stats.tpListPct : [];
+}
+
+function isAlgorithmBestCase(bestcase) {
+	return Boolean(bestcase && typeof bestcase === 'object' && 'buy' in bestcase && 'sell' in bestcase);
+}
+
+function isBestCaseEntry(value) {
+	return Boolean(value && typeof value === 'object' && 'status' in value);
+}
+
+function emptyBestCaseEntry(period) {
+	return {
+		period,
+		tpPct: null,
+		winratePct: null,
+		netPnlPct: null,
+		status: 'CALC_NA'
+	};
+}
+
+function bestCaseByPeriod(value, periods) {
+	const rows = Object.fromEntries(periods.map((period) => [period, emptyBestCaseEntry(period)]));
+	if (isBestCaseEntry(value)) {
+		const period = value.period && periods.includes(value.period) ? value.period : periods.includes('all') ? 'all' : periods[0];
+		if (period) rows[period] = { ...value, period };
+		return rows;
+	}
+	for (const period of periods) {
+		rows[period] = value?.[period] || rows[period];
+	}
+	return rows;
+}
+
+function BacktestBestCaseTable({ title, bestcase, periods }) {
+	const rows = bestCaseByPeriod(bestcase, periods);
+	return (
+		<div className="backtest-bestcase-block">
+			<h4>{title}</h4>
+			<table className="backtest-bestcase-table">
+				<thead>
+					<tr>
+						<th>기간</th>
+						<th>TP</th>
+						<th>승률</th>
+						<th>수익률</th>
+						<th>상태</th>
+					</tr>
+				</thead>
+				<tbody>
+					{periods.map((period) => {
+						const entry = rows[period];
+						return (
+							<tr key={period}>
+								<td>{periodLabel(period)}</td>
+								<td>{entry.tpPct === null ? '-' : tpLabel(entry.tpPct)}</td>
+								<td>{backtestWinrateText(entry)}</td>
+								<td className={entry.netPnlPct === null || entry.netPnlPct === undefined ? 'backtest-cell-neutral' : Number(entry.netPnlPct) >= 0 ? 'backtest-cell-positive' : 'backtest-cell-negative'}>{backtestNetPnlText(entry)}</td>
+								<td>{backtestStatusText(entry)}</td>
+							</tr>
+						);
+					})}
+				</tbody>
+			</table>
+		</div>
+	);
+}
+
+function BacktestBestCasePanel({ stats }) {
+	const periods = displayPeriods(stats);
+	const bestcase = stats?.bestcase || {};
+	return (
+		<div className="backtest-bestcase-panel">
+			<h3>BestCase</h3>
+			{isAlgorithmBestCase(bestcase) ? (
+				<>
+					<BacktestBestCaseTable title="매수 BestCase" bestcase={bestcase.buy} periods={periods} />
+					<BacktestBestCaseTable title="매도 BestCase" bestcase={bestcase.sell} periods={periods} />
+				</>
+			) : (
+				<BacktestBestCaseTable title="Grid BestCase" bestcase={bestcase} periods={periods} />
+			)}
+		</div>
+	);
+}
+
+function BacktestFootnote({ ready }) {
+	return (
+		<div className="backtest-footnote">
+			<p>
+				기준: TradingView 수신 백테스트 데이터 · 종목: {displayAssetText(ready.symbol)} · 타임프레임: {ready.timeframe}m · 마지막 수신: {formatKstMonthDayTime(ready.updatedAt)}
+			</p>
+			<p>수수료, 슬리피지, 펀딩비는 반영하지 않은 참고 데이터입니다.</p>
+		</div>
+	);
+}
+
+function BacktestGridTable({ stats }) {
+	if (isAlgorithmBacktestMatrix(stats?.matrix)) return null;
+	const matrix = stats?.matrix || {};
+	const periods = displayPeriods(stats);
+	return (
+		<div className="backtest-table-wrap">
+			<table className="backtest-table">
+				<thead>
+					<tr>
+						<th rowSpan={2}>TP별 / 기간별</th>
+						{periods.map((period) => (
+							<th key={period} colSpan={2}>
+								{periodLabel(period)}
+							</th>
+						))}
+					</tr>
+					<tr>
+						{periods.map((period) => (
+							<Fragment key={`${period}-metrics`}>
+								<th>승률</th>
+								<th>수익률</th>
+							</Fragment>
+						))}
+					</tr>
+				</thead>
+				<tbody>
+					{displayTpList(stats).map((tp) => {
+						const tpKey = String(tp);
+						return (
+							<tr key={tpKey}>
+								<td>{tpLabel(tp)}</td>
+								{periods.map((period) => {
+									const cell = matrix?.[period]?.[tpKey];
+									return (
+										<Fragment key={period}>
+											<td className={backtestCellClass(cell)} title={backtestStatusText(cell)}>{backtestWinrateText(cell)}</td>
+											<td className={backtestCellClass(cell)} title={backtestStatusText(cell)}>{backtestNetPnlText(cell)}</td>
+										</Fragment>
+									);
+								})}
+							</tr>
+						);
+					})}
+				</tbody>
+			</table>
+		</div>
+	);
+}
+
+function BacktestAlgorithmTable({ stats }) {
+	const [selectedSide, setSelectedSide] = useState('buy');
+	if (!isAlgorithmBacktestMatrix(stats?.matrix)) return null;
+	const matrix = stats.matrix;
+	const periods = displayPeriods(stats);
+	const selectedMatrix = matrix[selectedSide] || {};
+	return (
+		<div className="backtest-algorithm-panel">
+			<div className="backtest-side-toggle" role="group" aria-label="백테스트 방향 선택">
+				<button type="button" className={selectedSide === 'buy' ? 'active' : ''} onClick={() => setSelectedSide('buy')}>
+					매수
+				</button>
+				<button type="button" className={selectedSide === 'sell' ? 'active' : ''} onClick={() => setSelectedSide('sell')}>
+					매도
+				</button>
+			</div>
+			<div className="backtest-table-wrap">
+				<table className="backtest-table">
+					<thead>
+						<tr>
+							<th rowSpan={2}>TP</th>
+							{periods.map((period) => (
+								<th key={period} colSpan={2}>
+									{periodLabel(period)}
+								</th>
+							))}
+						</tr>
+						<tr>
+							{periods.map((period) => (
+								<Fragment key={`${selectedSide}-${period}-metrics`}>
+									<th>승률</th>
+									<th>수익률</th>
+								</Fragment>
+							))}
+						</tr>
+					</thead>
+					<tbody>
+						{displayTpList(stats).map((tp) => {
+							const tpKey = String(tp);
+							return (
+								<tr key={tpKey}>
+									<td>{tpLabel(tp)}</td>
+									{periods.map((period) => {
+										const cell = selectedMatrix?.[period]?.[tpKey];
+										return (
+											<Fragment key={`${selectedSide}-${period}`}>
+												<td className={backtestCellClass(cell)} title={backtestStatusText(cell)}>{backtestWinrateText(cell)}</td>
+												<td className={backtestCellClass(cell)} title={backtestStatusText(cell)}>{backtestNetPnlText(cell)}</td>
+											</Fragment>
+										);
+									})}
+								</tr>
+							);
+						})}
+					</tbody>
+				</table>
+			</div>
+		</div>
+	);
+}
+
+function BacktestPanel({ itemType, backtests }) {
 	const strategy = strategyByItemType[itemType] || {};
-
-	useEffect(() => {
-		if (!symbol || symbol === '-') return undefined;
-		let cancelled = false;
-		setState({ status: 'LOADING', items: [], error: '' });
-		publicBacktest
-			.options({
-				strategyId: strategy.strategyId,
-				symbol,
-				timeframe: row?.interval || row?.timeframe || undefined,
-				period: 'all',
-				limit: 8
-			})
-			.then((res) => {
-				if (cancelled) return;
-				const items = (res.items || []).filter((item) => !strategy.expectedType || item.strategyType === strategy.expectedType);
-				setState({
-					status: res.dataStatus || (items.length ? 'READY' : 'NO_REAL_DATA'),
-					items,
-					error: res.error || ''
-				});
-			});
-		return () => {
-			cancelled = true;
-		};
-	}, [itemType, row?.interval, row?.timeframe, strategy.expectedType, strategy.strategyId, symbol]);
-
-	const bestRows = [...state.items].sort((a, b) => {
-		const pnl = Number(b.netPnlPct ?? -Infinity) - Number(a.netPnlPct ?? -Infinity);
-		if (pnl !== 0) return pnl;
-		const winrate = Number(b.winratePct ?? -Infinity) - Number(a.winratePct ?? -Infinity);
-		if (winrate !== 0) return winrate;
-		return Number(a.tpPct ?? Infinity) - Number(b.tpPct ?? Infinity);
-	});
-
+	const expectedType = itemType === 'ny_box' ? 'grid' : itemType === 'fear_greed' ? 'algorithm' : '';
+	const ready = Array.isArray(backtests) ? backtests.find((item) => item?.status === 'READY' && item?.strategyType === expectedType) : null;
+	if (!ready) {
+		const missing = Array.isArray(backtests) ? backtests.find((item) => item?.status === 'NO_BACKTEST_DATA') : null;
+		return (
+			<section className="backtest-section">
+				<div className="nybox-backtest-head">
+					<div>
+						<strong>{strategy.title}</strong>
+						<p>{strategy.description}</p>
+					</div>
+					<StatusBadge tone="muted">NO_REAL_DATA</StatusBadge>
+				</div>
+				<div className="backtest-footnote">
+					<p>아직 수신된 백테스트 데이터가 없습니다.</p>
+					<p className="backtest-debug-line">strategy_id: {missing?.strategyId || strategy.strategyId || '-'}</p>
+					<p className="backtest-debug-line">symbol: {missing?.symbol || '-'}</p>
+					<p className="backtest-debug-line">timeframe: {missing?.timeframe || '-'}</p>
+				</div>
+			</section>
+		);
+	}
 	return (
 		<section className="backtest-section">
 			<div className="nybox-backtest-head">
 				<div>
-					<strong>{strategy.title}</strong>
+					<strong>{ready.stats?.displayName || strategy.title}</strong>
 					<p>{strategy.description}</p>
 				</div>
-				<StatusBadge tone={state.status === 'READY' ? 'up' : state.status === 'ERROR' ? 'down' : 'muted'}>{state.status}</StatusBadge>
+				<StatusBadge tone="up">READY</StatusBadge>
 			</div>
-			{state.status === 'LOADING' ? <div className="backtest-footnote">백테스트 데이터를 불러오는 중입니다.</div> : null}
-			{state.status !== 'LOADING' && bestRows.length === 0 ? (
-				<div className="backtest-footnote">
-					<p>{state.status === 'ERROR' ? state.error || '백테스트 API를 불러오지 못했습니다.' : '동일 조건의 백테스트 데이터가 없습니다.'}</p>
-				</div>
-			) : null}
-			{bestRows.length ? (
-				<div className="backtest-table-wrap">
-					<table className="backtest-table">
-						<thead>
-							<tr>
-								<th>기간</th>
-								<th>TP</th>
-								<th>방향</th>
-								<th>승률</th>
-								<th>수익률</th>
-							</tr>
-						</thead>
-						<tbody>
-							{bestRows.slice(0, 8).map((item) => (
-								<tr key={item.id || `${item.strategyId}-${item.symbol}-${item.direction}-${item.tpPct}-${item.period}`}>
-									<td>{item.period}</td>
-									<td>{formatPercent(item.tpPct)}</td>
-									<td>{item.directionLabel || item.direction}</td>
-									<td>{formatPercent(item.winratePct)}</td>
-									<td className={Number(item.netPnlPct) >= 0 ? 'backtest-cell-positive' : 'backtest-cell-negative'}>{formatPercent(item.netPnlPct, 2, true)}</td>
-								</tr>
-							))}
-						</tbody>
-					</table>
-				</div>
-			) : null}
-			<div className="backtest-footnote">
-				<p>TradingView QBT_STATS_V1 public backtest API의 실데이터만 표시합니다. 더미나 fixture fallback은 사용하지 않습니다.</p>
-			</div>
+			{expectedType === 'grid' ? <BacktestGridTable stats={ready.stats} /> : <BacktestAlgorithmTable stats={ready.stats} />}
+			<BacktestFootnote ready={ready} />
+			<BacktestBestCasePanel stats={ready.stats} />
+			<BacktestFootnote ready={ready} />
 		</section>
 	);
 }
 
-function DetailSection({ title, rows }) {
+function DetailSection({ title, description, rows }) {
 	return (
 		<div className="zone-list modal-detail-section">
 			<div className="nybox-section-header">
 				<strong>{title}</strong>
+				{description ? <span>{description}</span> : null}
 			</div>
 			{rows.map((row) => (
 				<div className="zone-row nybox-kv-row modal-detail-kv-row" key={`${title}-${row.label}`}>
@@ -410,7 +849,7 @@ function ModalActionRow() {
 	return (
 		<div className="modal-cta-row">
 			<a className="icon-text-button primary" href="/take-profit-search">
-				로그인 후 익절 조건 검색
+				익절 조건 검색
 			</a>
 			<a className="icon-text-button" href="/login">
 				회원 로그인
@@ -419,81 +858,195 @@ function ModalActionRow() {
 	);
 }
 
-function NyBoxDetail({ row, activeTab }) {
-	const position = nyBoxPosition(row);
+function NyBoxDetail({ detail, row, activeTab }) {
+	const state = detail?.state || row;
+	const modal = detail?.nyBoxModal;
 	const overviewRows = [
-		{ label: '현재가', value: formatPrice(row?.currentPrice) },
-		{ label: '박스 상단', value: formatPrice(row?.boxTop) },
-		{ label: '박스 하단', value: formatPrice(row?.boxBottom) },
-		{ label: '현재 위치', value: position.label },
-		{ label: '기준 세션', value: row?.currentSessionLabel || row?.nySessionLabel || '-' },
-		{ label: '업데이트', value: formatDateTime(getUpdatedAt(row)) }
+		{ label: '종목명', value: displayAssetText(state?.symbol, state?.baseAsset) },
+		{ label: '전략명', value: '뉴욕 박스 그리드' },
+		{ label: '기준 세션', value: modal?.currentSessionLabel || '-' },
+		{ label: '최근 완료 뉴욕 세션', value: modal?.baselineNySessionDate || '-' }
 	];
+	const restoredSections = (modal?.sections || [])
+		.map((section) => ({
+			...section,
+			rows: (section.rows || []).filter((item) => item.dataLabel !== '현재 위치')
+		}))
+		.filter((section) => section.rows.length > 0);
+	const disclaimerStart = modal?.nySessionStartKst || modal?.baselineNySessionDate || '-';
+	const disclaimerEnd = modal?.nySessionEndKst || modal?.nyDataCalculatedAtKst || '-';
 
 	return (
 		<>
 			{activeTab === 'overview' ? (
 				<div className="modal-overview-layout">
-					<NyBoxGauge row={row} />
-					<DetailSection title="NY Box 공개 데이터" rows={overviewRows} />
+					<NyBoxGauge row={state} />
+					<DetailSection title="기본 정보" description="RingLevel detail API에서 내려온 종목과 세션 기준입니다." rows={overviewRows} />
+					{modal?.isNySessionActive ? (
+						<div className="zone-list">
+							<div className="zone-row">
+								<span>안내</span>
+								<strong>{modal.notice || '-'}</strong>
+							</div>
+						</div>
+					) : null}
+					{restoredSections.length
+						? restoredSections.map((section) => (
+								<div className="zone-list nybox-modal-section" key={section.category}>
+									<div className="nybox-section-header">
+										<strong>{section.category}</strong>
+										<span>{section.categoryDescription}</span>
+									</div>
+									{section.rows.map((item) => (
+										<div className="zone-row nybox-kv-row" key={`${section.category}-${item.dataLabel}`}>
+											<span>{item.dataLabel}</span>
+											<strong>{item.value ?? '-'}</strong>
+										</div>
+									))}
+								</div>
+							))
+						: null}
 					<div className="modal-disclaimer">
-						<p>뉴욕 세션에서 계산된 박스 상단과 하단을 기준으로 현재 위치를 표시합니다.</p>
-						<p>이 화면은 공개 데이터 확인용이며 주문이나 포지션을 생성하지 않습니다.</p>
+						<p>한국시간 기준 {disclaimerStart}부터 {disclaimerEnd}까지의 뉴욕 세션 거래 데이터를 기반으로 작성했습니다.</p>
+						<p>이 데이터는 정보 제공 목적이며 주문이나 포지션을 만들지 않습니다.</p>
 					</div>
 				</div>
 			) : null}
 			{activeTab === 'strategy' ? (
 				<div className="nybox-strategy-layout">
 					<div className="nybox-strategy-message">
-						<strong>박스 기준 Grid 전략 흐름</strong>
-						<p>상단과 하단을 기준으로 양방향 조건을 관찰하고, 회원 영역에서는 별도 봇 설정과 Grid Exit 운영 규칙으로 이어집니다.</p>
-						<p>공개 화면에서는 전략 설명과 백테스트 참고만 제공하며 실제 주문 설정은 보호된 회원 화면에서 진행됩니다.</p>
+						<strong>뉴욕 박스 그리드 전략</strong>
+						<p>
+							{modal?.isNySessionActive
+								? `현재 뉴욕 세션 데이터가 집계 중입니다. 다음 체크 시각은 ${modal?.nyDataCalculatedAtKst || '-'}입니다.`
+								: state?.gridStrategyAvailable
+									? `${state?.symbol}은 현재 뉴욕 박스 그리드 참고 조건을 만족합니다.`
+									: `${state?.symbol}은 현재 뉴욕 박스 그리드 참고 조건을 만족하지 않습니다.`}
+						</p>
+						<p>실제 Bot 설치와 주문 설정은 로그인 후 보호된 화면에서만 진행됩니다.</p>
+					</div>
+					<div className="strategy-placeholder">전략 설명 이미지 영역</div>
+					<div className="strategy-nav">
+						{['작동원리 1', '작동원리 2', '작동원리 3', '강점', 'Risk'].map((label) => (
+							<button key={label} type="button">
+								{label}
+							</button>
+						))}
 					</div>
 					<ModalActionRow />
 				</div>
 			) : null}
-			{activeTab === 'backtest' ? <BacktestPanel row={row} itemType="ny_box" /> : null}
+			{activeTab === 'backtest' ? <BacktestPanel row={state} itemType="ny_box" backtests={detail?.backtests} /> : null}
 		</>
 	);
 }
 
-function FearGreedDetail({ row, activeTab }) {
-	const eventRows = [
-		{ label: '현재가', value: formatPrice(row?.currentPrice) },
-		{ label: '단기', value: row?.shortTrendLabel || '-' },
-		{ label: '중기', value: row?.midTrendLabel || '-' },
-		{ label: '장기', value: row?.longTrendLabel || '-' },
-		{ label: '공포 상태', value: `${row?.fearStatusLabel || '-'} / ${row?.fearResolvedLabel || '-'}` },
-		{ label: '탐욕 상태', value: `${row?.greedStatusLabel || '-'} / ${row?.greedResolvedLabel || '-'}` }
-	];
+function FearGreedDetail({ detail, row, activeTab }) {
+	const baseState = detail?.state || row;
+	const [selectedPeriod, setSelectedPeriod] = useState(baseState?.timeframe || 'short');
+
+	useEffect(() => {
+		setSelectedPeriod(baseState?.timeframe || 'short');
+	}, [baseState?.symbol, baseState?.timeframe]);
+
+	const periodStates = detail?.periodStates || { [baseState?.timeframe || 'short']: baseState };
+	const state = periodStates[selectedPeriod] || baseState;
+	const selectedPeriodLabel = TIMEFRAMES.find((period) => period.value === selectedPeriod)?.label || '단기';
+	const activeState = latestFearGreedEvent(state).state;
+	const priceChangeFrom = (eventPrice) => {
+		if (!state?.currentPrice || !eventPrice || eventPrice <= 0) return '-';
+		return formatPercent(((state.currentPrice - eventPrice) / eventPrice) * 100, 2, true);
+	};
+	const coverageText = state?.candleCoverage
+		? `${state.candleCoverage.candleCount}/${state.candleCoverage.requiredCount}개 ${state.candleCoverage.ready ? '준비됨' : '수집 중'}`
+		: state?.sourceStatus === 'INSUFFICIENT_DATA'
+			? '수집 중'
+			: '준비됨';
+	const fearStateText = activeState === '공포' ? '공포' : activeState === '수집 중' ? '수집 중' : activeState === '-' ? '-' : '정상';
+	const greedStateText = activeState === '탐욕' ? '탐욕' : activeState === '수집 중' ? '수집 중' : activeState === '-' ? '-' : '정상';
 
 	return (
 		<>
 			{activeTab === 'overview' ? (
 				<div className="modal-overview-layout">
-					<DetailSection title="공포·탐욕 이벤트" rows={eventRows} />
+					<div className="modal-period-controls" role="tablist" aria-label="공포/탐욕 기간 선택">
+						{TIMEFRAMES.map((period) => (
+							<button key={period.value} type="button" className={selectedPeriod === period.value ? 'active' : ''} disabled={!periodStates?.[period.value]} onClick={() => setSelectedPeriod(period.value)}>
+								{period.label}
+							</button>
+						))}
+					</div>
 					<DetailSection
-						title="최근 이벤트 가격"
+						title="현재가"
+						description="현재 row에 포함된 가격 정보입니다."
 						rows={[
-							{ label: '공포 시작', value: `${formatDateTime(row?.fearStartedAt)} · ${formatPrice(row?.fearStartedPrice)}` },
-							{ label: '공포 해소', value: `${formatDateTime(row?.fearResolvedAt)} · ${formatPrice(row?.fearResolvedPrice)}` },
-							{ label: '탐욕 시작', value: `${formatDateTime(row?.greedStartedAt)} · ${formatPrice(row?.greedStartedPrice)}` },
-							{ label: '탐욕 해소', value: `${formatDateTime(row?.greedResolvedAt)} · ${formatPrice(row?.greedResolvedPrice)}` }
+							{ label: '종목명', value: displayAssetText(state?.symbol, state?.baseAsset) },
+							{ label: '현재가', value: formatPrice(state?.currentPrice) },
+							{ label: '24시간 변동률', value: formatPercent(state?.currentPriceChange24hPct, 2, true) },
+							{ label: '공포/탐욕 현재 상태', value: activeState },
+							{ label: '전략명', value: 'ATF+VIXFIX' },
+							{ label: '기준 기간 / 데이터 기준', value: state?.calculationWindow?.label || '-' },
+							{ label: '캔들 수집', value: coverageText }
 						]}
 					/>
+					<DetailSection
+						title="공포"
+						description="공포 이벤트 발생과 해소 기준입니다."
+						rows={[
+							{ label: '현재 상태', value: fearStateText },
+							{ label: '최근 공포 발생 시간', value: formatKstMonthDayTime(state?.fearStartedAt) },
+							{ label: '최근 공포 해소 시간', value: formatKstMonthDayTime(state?.fearResolvedAt) },
+							{ label: '공포 발생가', value: formatPrice(state?.fearStartedPrice) },
+							{ label: '공포 해소가', value: formatPrice(state?.fearResolvedPrice) },
+							{ label: '공포 발생가 대비 현재가', value: priceChangeFrom(state?.fearStartedPrice) },
+							{ label: '공포 해소가 대비 현재가', value: priceChangeFrom(state?.fearResolvedPrice) }
+						]}
+					/>
+					<DetailSection
+						title="탐욕"
+						description="탐욕 이벤트 발생과 해소 기준입니다."
+						rows={[
+							{ label: '현재 상태', value: greedStateText },
+							{ label: '최근 탐욕 발생 시간', value: formatKstMonthDayTime(state?.greedStartedAt) },
+							{ label: '최근 탐욕 해소 시간', value: formatKstMonthDayTime(state?.greedResolvedAt) },
+							{ label: '탐욕 발생가', value: formatPrice(state?.greedStartedPrice) },
+							{ label: '탐욕 해소가', value: formatPrice(state?.greedResolvedPrice) },
+							{ label: '탐욕 발생가 대비 현재가', value: priceChangeFrom(state?.greedStartedPrice) },
+							{ label: '탐욕 해소가 대비 현재가', value: priceChangeFrom(state?.greedResolvedPrice) }
+						]}
+					/>
+					<DetailSection
+						title="추세"
+						description="ATF 기준 추세 계산 결과입니다."
+						rows={[
+							{ label: `${selectedPeriodLabel} 추세`, value: state?.sourceStatus === 'INSUFFICIENT_DATA' ? '데이터 수집 중' : state?.currentTrendLabel || '데이터 부족' },
+							{ label: 'ATF 기준', value: state?.calculationWindow?.label || '-' }
+						]}
+					/>
+					<div className="modal-disclaimer">
+						<p>공포/탐욕 정보는 과도한 가격 변동과 추세 상태를 이해하기 위한 참고 정보입니다.</p>
+					</div>
 				</div>
 			) : null}
 			{activeTab === 'strategy' ? (
 				<div className="nybox-strategy-layout">
 					<div className="nybox-strategy-message">
 						<strong>ATF+VIXFIX 전략 참고</strong>
-						<p>공포와 탐욕 이벤트는 Algorithm 전략의 매수·매도 조건 참고 데이터로 사용됩니다.</p>
-						<p>공개 화면에서는 신호와 백테스트를 확인하고, Bot 추가는 로그인 후 보호 화면에서 진행합니다.</p>
+						<p>ATF+VIXFIX는 과도한 공포 또는 탐욕 이벤트가 발생한 뒤 가격 변동이 해소되는 흐름을 확인하는 알고리즘 전략입니다.</p>
+						<p>실제 Bot 설치와 주문 설정은 로그인 후 보호된 화면에서만 진행됩니다.</p>
+					</div>
+					<div className="strategy-placeholder">전략 설명 이미지 영역</div>
+					<div className="strategy-nav">
+						{['작동원리 1', '작동원리 2', '작동원리 3', '강점', 'Risk'].map((label) => (
+							<button key={label} type="button">
+								{label}
+							</button>
+						))}
 					</div>
 					<ModalActionRow />
 				</div>
 			) : null}
-			{activeTab === 'backtest' ? <BacktestPanel row={row} itemType="fear_greed" /> : null}
+			{activeTab === 'backtest' ? <BacktestPanel row={state} itemType="fear_greed" backtests={detail?.backtests} /> : null}
 		</>
 	);
 }
@@ -501,30 +1054,17 @@ function FearGreedDetail({ row, activeTab }) {
 function SupportResistanceDetail({ row, activeTab }) {
 	const support = publicSupport(row);
 	const resistance = publicResistance(row);
-	const markers = [
-		{ label: '현재가', value: getPrice(row), kind: 'price' },
-		{ label: '지지선', value: support?.mid, kind: 'support' },
-		{ label: '저항선', value: resistance?.mid, kind: 'resistance' }
-	];
-	const zones = [
-		support ? { ...support, kind: 'support' } : null,
-		resistance ? { ...resistance, kind: 'resistance' } : null
-	].filter(Boolean);
-
 	return (
 		<>
 			{activeTab === 'overview' ? (
 				<div className="modal-overview-layout">
-					<RangeBar markers={markers} zones={zones} />
 					<DetailSection
 						title="지지·저항선 위치"
 						rows={[
 							{ label: '현재가', value: formatPrice(getPrice(row)) },
 							{ label: '지지선', value: formatPrice(support?.mid) },
 							{ label: '저항선', value: formatPrice(resistance?.mid) },
-							{ label: '현재 상태', value: row?.userPriceState || '-' },
-							{ label: '지지선 이동', value: `${row?.supportMovementDirection || '-'} ${formatPercent(row?.supportMovementPct)}` },
-							{ label: '저항선 이동', value: `${row?.resistanceMovementDirection || '-'} ${formatPercent(row?.resistanceMovementPct)}` }
+							{ label: '현재 상태', value: row?.userPriceState || '-' }
 						]}
 					/>
 				</div>
@@ -533,10 +1073,8 @@ function SupportResistanceDetail({ row, activeTab }) {
 				<div className="nybox-strategy-layout">
 					<div className="nybox-strategy-message">
 						<strong>가격대 분석 참고</strong>
-						<p>지지선과 저항선은 공개 가격·거래량 데이터에서 의미 있는 구간을 추려 보여줍니다.</p>
-						<p>자동매매 설정은 보호된 회원 화면에서만 이어집니다.</p>
+						<p>지지선과 저항선은 공개 가격·거래량 데이터에서 추출한 참고 구간입니다.</p>
 					</div>
-					<ModalActionRow />
 				</div>
 			) : null}
 			{activeTab === 'backtest' ? <BacktestPanel row={row} itemType="support_resistance" /> : null}
@@ -544,10 +1082,15 @@ function SupportResistanceDetail({ row, activeTab }) {
 	);
 }
 
-function LevelModal({ row, itemType, onClose }) {
+function LevelModal({ row, itemType, detail, loading, error, onClose }) {
 	const [activeTab, setActiveTab] = useState('overview');
-	if (!row) return null;
+	useEffect(() => {
+		setActiveTab('overview');
+	}, [itemType, row?.symbol]);
+
+	if (!row && !detail && !loading) return null;
 	const config = PUBLIC_ITEM_TYPES.find((item) => item.key === itemType) || PUBLIC_ITEM_TYPES[0];
+	const detailState = detail?.state || row;
 	const strategyTabLabel = itemType === 'ny_box' ? '뉴욕 박스 그리드 전략' : itemType === 'fear_greed' ? '공포/탐욕 전략' : '지지/저항선 전략';
 	const backtestTabLabel = itemType === 'ny_box' ? '뉴욕 박스 그리드 전략 백테스트' : itemType === 'fear_greed' ? '공포/탐욕 백테스트' : '지지/저항선 백테스트';
 
@@ -557,7 +1100,9 @@ function LevelModal({ row, itemType, onClose }) {
 				<header className="modal-header">
 					<div>
 						<p className="modal-kicker">{config.kicker}</p>
-						<h2>{getDisplaySymbol(row)} · {config.label}</h2>
+						<h2>
+							{displayAssetText(detailState?.symbol, detailState?.baseAsset)} · {config.label}
+						</h2>
 					</div>
 					<button className="icon-button" type="button" onClick={onClose} title="닫기" aria-label="닫기">
 						×
@@ -576,9 +1121,11 @@ function LevelModal({ row, itemType, onClose }) {
 					</button>
 				</div>
 
-				{itemType === 'ny_box' ? <NyBoxDetail row={row} activeTab={activeTab} /> : null}
-				{itemType === 'fear_greed' ? <FearGreedDetail row={row} activeTab={activeTab} /> : null}
-				{itemType === 'support_resistance' ? <SupportResistanceDetail row={row} activeTab={activeTab} /> : null}
+				{loading ? <div className="modal-loading">상세 데이터를 불러오는 중입니다.</div> : null}
+				{!loading && error ? <div className="empty-state"><strong>상세 데이터를 불러오지 못했습니다.</strong><p>{error}</p></div> : null}
+				{!loading && !error && itemType === 'ny_box' ? <NyBoxDetail detail={detail} row={row} activeTab={activeTab} /> : null}
+				{!loading && !error && itemType === 'fear_greed' ? <FearGreedDetail detail={detail} row={row} activeTab={activeTab} /> : null}
+				{!loading && !error && itemType === 'support_resistance' ? <SupportResistanceDetail row={row} activeTab={activeTab} /> : null}
 			</article>
 		</div>
 	);
@@ -588,7 +1135,7 @@ function EmptyState({ status, error }) {
 	return (
 		<div className="empty-state">
 			<strong>{status === 'ERROR' ? '데이터를 불러오지 못했습니다.' : '아직 수신된 공개 데이터가 없습니다.'}</strong>
-			<p>{status === 'ERROR' ? error || 'public realtime API request failed' : 'RingLevel 공개 데이터 수신 후 이곳에 표시됩니다.'}</p>
+			<p>{status === 'ERROR' ? error || 'public realtime API request failed' : 'RingLevel 공개 데이터가 수신된 뒤 표시됩니다.'}</p>
 		</div>
 	);
 }
@@ -599,10 +1146,9 @@ function renderTableHeader(itemType) {
 			<tr>
 				<th>종목</th>
 				<th>현재가</th>
-				<th>박스 상단</th>
-				<th>박스 하단</th>
+				<th>박스상단</th>
+				<th>박스하단</th>
 				<th>현재 위치</th>
-				<th>업데이트</th>
 			</tr>
 		);
 	}
@@ -611,10 +1157,9 @@ function renderTableHeader(itemType) {
 			<tr>
 				<th>종목</th>
 				<th>현재가</th>
-				<th>단기</th>
-				<th>중기</th>
-				<th>장기</th>
-				<th>최근 이벤트</th>
+				{TIMEFRAMES.map((period) => (
+					<th key={period.value}>{period.label}</th>
+				))}
 			</tr>
 		);
 	}
@@ -630,21 +1175,23 @@ function renderTableHeader(itemType) {
 	);
 }
 
-function renderRow(row, itemType, onOpen) {
+function renderRow(row, itemType, onOpen, context = {}) {
 	const symbol = getSymbol(row);
+	const label = getDisplaySymbolLabel(symbol, row?.baseAsset);
 	if (itemType === 'ny_box') {
 		const position = nyBoxPosition(row);
 		return (
 			<tr key={`${itemType}-${symbol}-${getUpdatedAt(row)}`} onClick={() => onOpen(row)}>
 				<td data-label="종목">
-					<strong>{getDisplaySymbol(row)}</strong>
-					<span>{symbol}</span>
+					<span className="table-symbol-cell" title={label.secondarySymbol}>
+						<strong>{label.primaryName}</strong>
+						<small>{label.secondarySymbol}</small>
+					</span>
 				</td>
 				<td data-label="현재가"><PriceWithChange price={row?.currentPrice} pct={row?.currentPriceChange24hPct} /></td>
-				<td data-label="박스 상단">{formatPrice(row?.boxTop)}</td>
-				<td data-label="박스 하단">{formatPrice(row?.boxBottom)}</td>
+				<td data-label="박스상단">{formatPrice(row?.boxTop)}</td>
+				<td data-label="박스하단">{formatPrice(row?.boxBottom)}</td>
 				<td data-label="현재 위치"><StatusBadge tone={position.className}>{position.label}</StatusBadge></td>
-				<td data-label="업데이트">{formatDateTime(getUpdatedAt(row))}</td>
 			</tr>
 		);
 	}
@@ -652,14 +1199,23 @@ function renderRow(row, itemType, onOpen) {
 		return (
 			<tr key={`${itemType}-${symbol}-${getUpdatedAt(row)}`} onClick={() => onOpen(row)}>
 				<td data-label="종목">
-					<strong>{getDisplaySymbol(row)}</strong>
-					<span>{symbol}</span>
+					<span className="table-symbol-cell" title={label.secondarySymbol}>
+						<strong>{label.primaryName}</strong>
+						<small>{label.secondarySymbol}</small>
+					</span>
 				</td>
 				<td data-label="현재가"><PriceWithChange price={row?.currentPrice} pct={row?.currentPriceChange24hPct} /></td>
-				<td data-label="단기"><StatusBadge tone={statusTone(row?.shortTrendLabel)}>{row?.shortTrendLabel || '-'}</StatusBadge></td>
-				<td data-label="중기"><StatusBadge tone={statusTone(row?.midTrendLabel)}>{row?.midTrendLabel || '-'}</StatusBadge></td>
-				<td data-label="장기"><StatusBadge tone={statusTone(row?.longTrendLabel)}>{row?.longTrendLabel || '-'}</StatusBadge></td>
-				<td data-label="최근 이벤트">공포 {row?.fearStatusLabel || '-'} · 탐욕 {row?.greedStatusLabel || '-'}</td>
+				{TIMEFRAMES.map((period) => {
+					const periodDisplay = fearGreedPeriodState(row, context.fearGreedPeriodMap, period.value);
+					return (
+						<td key={period.value} data-label={period.label}>
+							<span className="period-state-cell">
+								<StatusBadge tone={statusTone(periodDisplay.state)}>{periodDisplay.state}</StatusBadge>
+								<small>{periodDisplay.relativeTime}</small>
+							</span>
+						</td>
+					);
+				})}
 			</tr>
 		);
 	}
@@ -668,8 +1224,10 @@ function renderRow(row, itemType, onOpen) {
 	return (
 		<tr key={`${itemType}-${symbol}-${getUpdatedAt(row)}`} onClick={() => onOpen(row)}>
 			<td data-label="종목">
-				<strong>{getDisplaySymbol(row)}</strong>
-				<span>{symbol}</span>
+				<span className="table-symbol-cell" title={label.secondarySymbol}>
+					<strong>{label.primaryName}</strong>
+					<small>{label.secondarySymbol}</small>
+				</span>
 			</td>
 			<td data-label="현재가"><PriceWithChange price={getPrice(row)} pct={row?.priceChange24hPct} /></td>
 			<td data-label="지지선">{formatPrice(support?.mid)}</td>
@@ -687,6 +1245,7 @@ function RealtimeDataPage() {
 	const [nyBoxFilter, setNyBoxFilter] = useState(null);
 	const [state, setState] = useState({ status: 'LOADING', rows: [], raw: null, error: '' });
 	const [selectedRow, setSelectedRow] = useState(null);
+	const [detailState, setDetailState] = useState({ loading: false, detail: null, error: '' });
 
 	useEffect(() => {
 		let cancelled = false;
@@ -713,22 +1272,43 @@ function RealtimeDataPage() {
 		};
 	}, [itemType, timeframe]);
 
+	const fearGreedPeriodMap = useMemo(() => buildFearGreedPeriodMapFromRaw(state.raw, timeframe, state.rows), [state.raw, state.rows, timeframe]);
 	const config = PUBLIC_ITEM_TYPES.find((item) => item.key === itemType) || PUBLIC_ITEM_TYPES[0];
 	const filteredRows = useMemo(() => {
 		const search = normalizeSearch(symbolSearch);
-		return (state.rows || [])
+		const rows = (state.rows || [])
+			.filter(isPublicVisibleRow)
 			.filter((row) => (itemType === 'ny_box' ? matchesNyBoxFilter(row, nyBoxFilter) : true))
 			.filter((row) => {
 				if (!search) return true;
 				return normalizeSearch(getSymbol(row)).includes(search) || normalizeSearch(getDisplaySymbol(row)).includes(search);
-			})
-			.slice(0, 200);
+			});
+		return (itemType === 'ny_box' || itemType === 'fear_greed' ? sortByPublicPriority(rows) : rows).slice(0, 200);
 	}, [itemType, nyBoxFilter, state.rows, symbolSearch]);
 
 	const selectedForChart = selectedRow || filteredRows[0] || null;
 	const chartSymbol = chartSymbolFor(selectedForChart);
 	const updatedAt = state.raw?.updatedAt || state.raw?.meta?.livePriceUpdatedAtKst || state.raw?.nyBoxCacheMeta?.calculatedAtKst || state.raw?.nyBoxCoverage?.calculatedAtKst;
 	const activeSession = state.raw?.meta?.currentSessionLabel || '-';
+	const calculationWindowLabel = windowLabel(filteredRows, itemType, state.raw);
+
+	const openDetail = async (row) => {
+		setSelectedRow(row);
+		setDetailState({ loading: true, detail: null, error: '' });
+		const symbol = getSymbol(row);
+		const params = itemType === 'fear_greed' ? { timeframe } : itemType === 'support_resistance' ? { timeframe, logic: 'vp' } : {};
+		const res =
+			itemType === 'ny_box'
+				? await publicRealtime.nyBoxSymbol(symbol, params)
+				: itemType === 'fear_greed'
+					? await publicRealtime.fearGreedSymbol(symbol, params)
+					: await publicRealtime.supportResistanceSymbol(symbol, params);
+		if (!res.ok || !res.raw) {
+			setDetailState({ loading: false, detail: null, error: res.error || 'detail API request failed' });
+			return;
+		}
+		setDetailState({ loading: false, detail: res.raw, error: '' });
+	};
 
 	return (
 		<div className="ring-public-app">
@@ -754,6 +1334,7 @@ function RealtimeDataPage() {
 								onClick={() => {
 									setItemType(item.key);
 									setSelectedRow(null);
+									setDetailState({ loading: false, detail: null, error: '' });
 									setSymbolSearch('');
 									if (item.key === 'fear_greed') setTimeframe('short');
 									if (item.key === 'support_resistance') setTimeframe('long');
@@ -782,8 +1363,8 @@ function RealtimeDataPage() {
 					<div className="data-table-card">
 						<div className="data-toolbar">
 							<div>
-								<p className="table-title">{config.label}</p>
-								<span>행을 클릭하면 RingLevel 상세 모달, 전략 설명, 관련 백테스트를 확인합니다.</span>
+								<p className="table-title">전체 {config.label} 표</p>
+								<span>행을 클릭하면 RingLevel detail API 기반 상세 모달을 엽니다.</span>
 							</div>
 							<div className="toolbar-controls">
 								<label className="nybox-search">
@@ -817,6 +1398,9 @@ function RealtimeDataPage() {
 								<span>
 									Session <strong>{activeSession}</strong>
 								</span>
+								<span>
+									Window <strong>{calculationWindowLabel}</strong>
+								</span>
 							</div>
 							{itemType === 'ny_box' ? (
 								<div className="filter-chip-row">
@@ -834,20 +1418,30 @@ function RealtimeDataPage() {
 							) : null}
 						</div>
 
-						{state.status === 'LOADING' ? <div className="modal-loading">불러오는 중</div> : null}
+						{state.status === 'LOADING' ? <div className="modal-loading">불러오는 중입니다.</div> : null}
 						{state.status !== 'LOADING' && filteredRows.length === 0 ? <EmptyState status={state.status} error={state.error} /> : null}
 						{filteredRows.length ? (
 							<div className="table-wrap">
 								<table className={`public-data-table ${itemType}`}>
 									<thead>{renderTableHeader(itemType)}</thead>
-									<tbody>{filteredRows.map((row) => renderRow(row, itemType, setSelectedRow))}</tbody>
+									<tbody>{filteredRows.map((row) => renderRow(row, itemType, openDetail, { fearGreedPeriodMap }))}</tbody>
 								</table>
 							</div>
 						) : null}
 					</div>
 				</section>
 			</div>
-			<LevelModal row={selectedRow} itemType={itemType} onClose={() => setSelectedRow(null)} />
+			<LevelModal
+				row={selectedRow}
+				itemType={itemType}
+				detail={detailState.detail}
+				loading={detailState.loading}
+				error={detailState.error}
+				onClose={() => {
+					setSelectedRow(null);
+					setDetailState({ loading: false, detail: null, error: '' });
+				}}
+			/>
 		</div>
 	);
 }

@@ -60,19 +60,19 @@ export const publicRealtime = {
 	nyBoxSnapshot(params = {}) {
 		return requestPublicRealtime('/api/items/ny-box/snapshot', params);
 	},
-	nyBoxSymbol(symbol) {
-		return requestPublicRealtime(`/api/items/ny-box/symbol/${encodeURIComponent(symbol)}`);
+	nyBoxSymbol(symbol, params = {}) {
+		return requestPublicRealtime(`/api/items/ny-box/symbol/${encodeURIComponent(symbol)}`, params);
 	},
 	fearGreedSnapshot(params = {}) {
 		return requestPublicRealtime('/api/items/fear-greed/snapshot', params);
 	},
-	fearGreedSymbol(symbol) {
-		return requestPublicRealtime(`/api/items/fear-greed/symbol/${encodeURIComponent(symbol)}`);
+	fearGreedSymbol(symbol, params = {}) {
+		return requestPublicRealtime(`/api/items/fear-greed/symbol/${encodeURIComponent(symbol)}`, params);
 	},
 	supportResistanceSnapshot(params = {}) {
 		return requestPublicRealtime('/api/items/support-resistance/snapshot', params);
 	},
-	supportResistanceSymbol(symbol) {
-		return requestPublicRealtime(`/api/items/support-resistance/symbol/${encodeURIComponent(symbol)}`);
+	supportResistanceSymbol(symbol, params = {}) {
+		return requestPublicRealtime(`/api/items/support-resistance/symbol/${encodeURIComponent(symbol)}`, params);
 	}
 };

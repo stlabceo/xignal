@@ -378,6 +378,33 @@
 	font-size: 11px;
 }
 
+.ring-public-app .table-symbol-cell,
+.ring-public-app .asset-title {
+	display: grid;
+	gap: 2px;
+	min-width: 0;
+	max-width: 220px;
+}
+
+.ring-public-app .table-symbol-cell strong,
+.ring-public-app .table-symbol-cell small,
+.ring-public-app .asset-title span,
+.ring-public-app .asset-title small {
+	min-width: 0;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	word-break: keep-all;
+	white-space: nowrap;
+}
+
+.ring-public-app .table-symbol-cell small,
+.ring-public-app .asset-title small {
+	color: #94a3b8;
+	font-size: 12px;
+	font-weight: 650;
+}
+
 .ring-public-app .price-with-change {
 	display: inline-grid;
 	gap: 2px;
@@ -580,6 +607,15 @@
 	font-weight: 950;
 }
 
+.ring-public-app .nybox-section-header span {
+	display: block;
+	margin-top: 4px;
+	color: #64748b;
+	font-size: 12px;
+	font-weight: 650;
+	line-height: 1.45;
+}
+
 .ring-public-app .zone-row,
 .ring-public-app .nybox-kv-row {
 	display: flex;
@@ -647,6 +683,71 @@
 	color: #334155;
 	font-size: 14px;
 	line-height: 1.65;
+}
+
+.ring-public-app .strategy-placeholder {
+	display: grid;
+	min-height: 220px;
+	place-items: center;
+	border: 1px solid #e2e8f0;
+	border-radius: 16px;
+	background: #f1f5f9;
+	color: #64748b;
+	font-size: 13px;
+	font-weight: 850;
+}
+
+.ring-public-app .strategy-nav {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.ring-public-app .strategy-nav button {
+	min-height: 34px;
+	padding: 0 12px;
+	border: 1px solid #cbd5e1;
+	border-radius: 999px;
+	background: #fff;
+	color: #475569;
+	font-size: 12px;
+	font-weight: 850;
+}
+
+.ring-public-app .strategy-nav button:first-child,
+.ring-public-app .strategy-nav button.active {
+	border-color: #2563eb;
+	background: #eff6ff;
+	color: #1d4ed8;
+}
+
+.ring-public-app .modal-period-controls {
+	display: inline-flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.ring-public-app .modal-period-controls button {
+	min-height: 34px;
+	padding: 0 12px;
+	border: 1px solid #cbd5e1;
+	border-radius: 999px;
+	background: #fff;
+	color: #475569;
+	font-size: 12px;
+	font-weight: 850;
+	cursor: pointer;
+}
+
+.ring-public-app .modal-period-controls button.active {
+	border-color: #2563eb;
+	background: #eff6ff;
+	color: #1d4ed8;
+}
+
+.ring-public-app .modal-period-controls button:disabled {
+	cursor: default;
+	opacity: 0.55;
 }
 
 .ring-public-app .modal-cta-row {
@@ -832,7 +933,7 @@
 
 .ring-public-app .backtest-table {
 	width: 100%;
-	min-width: 560px;
+	min-width: 760px;
 	border-collapse: collapse;
 }
 
@@ -855,6 +956,114 @@
 	color: #334155;
 	font-size: 13px;
 	font-weight: 750;
+}
+
+.ring-public-app .backtest-side-toggle {
+	display: inline-flex;
+	width: fit-content;
+	gap: 4px;
+	padding: 4px;
+	border: 1px solid #e2e8f0;
+	border-radius: 12px;
+	background: #f1f5f9;
+}
+
+.ring-public-app .backtest-side-toggle button {
+	min-width: 72px;
+	min-height: 32px;
+	border: 0;
+	border-radius: 9px;
+	background: transparent;
+	color: #64748b;
+	font-size: 12px;
+	font-weight: 850;
+	cursor: pointer;
+}
+
+.ring-public-app .backtest-side-toggle button.active {
+	background: #fff;
+	color: #1d4ed8;
+	box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
+}
+
+.ring-public-app .backtest-algorithm-panel {
+	display: grid;
+	gap: 12px;
+}
+
+.ring-public-app .backtest-bestcase-panel {
+	display: grid;
+	gap: 14px;
+	padding: 14px;
+	border: 1px solid #e2e8f0;
+	border-radius: 16px;
+	background: #fff;
+}
+
+.ring-public-app .backtest-bestcase-panel h3,
+.ring-public-app .backtest-bestcase-panel h4 {
+	margin: 0;
+	color: #0f172a;
+}
+
+.ring-public-app .backtest-bestcase-panel h3 {
+	font-size: 15px;
+	font-weight: 950;
+}
+
+.ring-public-app .backtest-bestcase-panel h4 {
+	font-size: 12px;
+	font-weight: 900;
+}
+
+.ring-public-app .backtest-bestcase-block {
+	display: grid;
+	gap: 8px;
+}
+
+.ring-public-app .backtest-bestcase-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 12px;
+}
+
+.ring-public-app .backtest-bestcase-table th,
+.ring-public-app .backtest-bestcase-table td {
+	padding: 8px 10px;
+	border-bottom: 1px solid #eef2f7;
+	text-align: right;
+	white-space: nowrap;
+}
+
+.ring-public-app .backtest-bestcase-table th:first-child,
+.ring-public-app .backtest-bestcase-table td:first-child {
+	text-align: left;
+}
+
+.ring-public-app .backtest-bestcase-table th {
+	color: #64748b;
+	background: #f8fafc;
+	font-weight: 900;
+}
+
+.ring-public-app .backtest-debug-line {
+	color: #94a3b8;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.ring-public-app .period-state-cell {
+	display: inline-grid;
+	justify-items: center;
+	gap: 4px;
+	min-width: 118px;
+	line-height: 1.25;
+}
+
+.ring-public-app .period-state-cell small {
+	color: #64748b;
+	font-size: 11px;
+	font-weight: 650;
+	white-space: nowrap;
 }
 
 @media (max-width: 860px) {
