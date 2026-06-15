@@ -21,11 +21,7 @@ const PUBLIC_ITEM_CONFIGS = [
 		kicker: '뉴욕 박스',
 		title: '뉴욕 세션 기준 박스와 현재 위치',
 		lead: '전일 뉴욕 세션에서 만들어진 상단과 하단을 기준으로 현재 가격이 박스 안, 상단 돌파, 하단 이탈 중 어디에 있는지 확인합니다.',
-		help: [
-			'박스상단/박스하단은 최근 완료된 뉴욕 세션 후반부 가격 범위입니다.',
-			'상세 모달은 RingLevel detail API의 뉴욕 박스 섹션과 백테스트를 그대로 표시합니다.',
-			'주문이나 PID를 만들지 않고 공개 데이터와 백테스트 참고 정보만 보여줍니다.'
-		]
+		help: []
 	},
 	{
 		key: 'fear_greed',
@@ -845,41 +841,6 @@ function PriceWithChange({ price, pct }) {
 	);
 }
 
-function NyBoxGauge({ row }) {
-	const current = Number(row?.currentPrice);
-	const bottom = Number(row?.boxBottom);
-	const top = Number(row?.boxTop);
-	const hasGaugeData = Number.isFinite(current) && Number.isFinite(bottom) && Number.isFinite(top) && top > bottom;
-	const position = nyBoxPosition(row);
-	const rawPct = hasGaugeData ? ((current - bottom) / (top - bottom)) * 100 : 50;
-	const pct = Math.max(0, Math.min(100, rawPct));
-	const markerLeft = rawPct > 100 ? 'calc(100% + 14px)' : rawPct < 0 ? 'calc(0% - 14px)' : `${pct}%`;
-	const pricePlacement = rawPct > 100 ? 'breakout-high' : rawPct < 0 ? 'breakout-low' : pct < 10 ? 'left-outside' : pct > 90 ? 'right-outside' : 'center';
-
-	return (
-		<section className={`bear-bull-box-gauge position-${pricePlacement}`} aria-label={`${getSymbol(row)} NY Box position gauge`}>
-			<div className="nybox-gauge-stage">
-				<div className="nybox-gauge-icon bear-icon">BEAR</div>
-				<div className="nybox-gauge-bar" aria-hidden="true">
-					<span className="price-marker" style={{ left: markerLeft }} />
-					<strong className="nybox-gauge-current" style={{ left: markerLeft }}>
-						{formatPrice(row?.currentPrice)}
-					</strong>
-				</div>
-				<div className="nybox-gauge-icon bull-icon">BULL</div>
-			</div>
-			<div className="nybox-gauge-values">
-				<span>{formatPrice(row?.boxBottom)}</span>
-				<span>{formatPrice(row?.boxTop)}</span>
-			</div>
-			<div className="nybox-gauge-meta">
-				<StatusBadge tone={position.className}>{position.label}</StatusBadge>
-				<span>박스 폭 {formatPercent(row?.boxWidthPct)}</span>
-			</div>
-		</section>
-	);
-}
-
 const BACKTEST_PERIOD_ORDER = ['2w', '1m', '2m', '3m', '6m', '1y', 'all'];
 const BACKTEST_STATUS_LABELS = {
 	OK: '정상',
@@ -1060,65 +1021,12 @@ function BacktestBestCasePanel({ stats }) {
 	);
 }
 
-function BacktestFootnote({ ready }) {
-	return (
-		<div className="backtest-footnote">
-			<p>
-				기준: TradingView 수신 백테스트 데이터 · 종목: {displayAssetText(ready.symbol)} · 타임프레임: {ready.timeframe}m · 마지막 수신: {formatKstMonthDayTime(ready.updatedAt)}
-			</p>
-			<p>수수료, 슬리피지, 펀딩비는 반영하지 않은 참고 데이터입니다.</p>
-		</div>
-	);
-}
-
 function normalizeBacktestStrategyType(value) {
 	return String(value || '').trim().toLowerCase();
 }
 
 function isReadyBacktestForType(item, expectedType) {
 	return item?.status === 'READY' && normalizeBacktestStrategyType(item?.strategyType) === expectedType;
-}
-
-function collectBestcaseEntries(stats) {
-	const bestcase = stats?.bestcase || {};
-	const entries = [];
-	if (isAlgorithmBestCase(bestcase)) {
-		for (const side of ['buy', 'sell']) {
-			for (const entry of Object.values(bestcase[side] || {})) {
-				if (isRealBacktestCell(entry)) entries.push({ ...entry, side });
-			}
-		}
-		return entries;
-	}
-	for (const entry of Object.values(bestcase)) {
-		if (isRealBacktestCell(entry)) entries.push(entry);
-	}
-	return entries;
-}
-
-function BacktestLiveSummary({ ready }) {
-	const stats = ready?.stats || {};
-	const best = collectBestcaseEntries(stats).sort((a, b) => Number(b.netPnlPct) - Number(a.netPnlPct))[0] || null;
-	const receivedAt = stats.receivedAt || ready?.updatedAt;
-	return (
-		<div className="backtest-live-summary" aria-label="실제 백테스트 수신 요약">
-			<div>
-				<span>데이터</span>
-				<strong>QBT_STATS_V1 실데이터</strong>
-				<small>{formatKstMonthDayTime(receivedAt)}</small>
-			</div>
-			<div>
-				<span>전략</span>
-				<strong>{stats.strategyName || ready?.strategyId || '-'}</strong>
-				<small>{normalizeBacktestStrategyType(stats.strategyType || ready?.strategyType).toUpperCase()}</small>
-			</div>
-			<div>
-				<span>최고 수익률</span>
-				<strong className={best && Number(best.netPnlPct) >= 0 ? 'backtest-cell-positive' : 'backtest-cell-negative'}>{best ? formatPercent(best.netPnlPct, 2, true) : '-'}</strong>
-				<small>{best ? `${periodLabel(best.period)} · TP ${tpLabel(best.tpPct)} · 승률 ${backtestWinrateText(best)}` : '수신값 없음'}</small>
-			</div>
-		</div>
-	);
 }
 
 function BacktestGridTable({ stats }) {
@@ -1266,13 +1174,9 @@ function BacktestPanel({ itemType, backtests }) {
 					<strong>{ready.stats?.displayName || strategy.title}</strong>
 					<p>{strategy.description}</p>
 				</div>
-				<StatusBadge tone="up">READY</StatusBadge>
 			</div>
-			<BacktestLiveSummary ready={ready} />
 			{expectedType === 'grid' ? <BacktestGridTable stats={ready.stats} /> : <BacktestAlgorithmTable stats={ready.stats} />}
-			<BacktestFootnote ready={ready} />
 			<BacktestBestCasePanel stats={ready.stats} />
-			<BacktestFootnote ready={ready} />
 		</section>
 	);
 }
@@ -1334,7 +1238,6 @@ function NyBoxDetail({ detail, row, activeTab, autoTradeEligible, backtestEligib
 		<>
 			{activeTab === 'overview' ? (
 				<div className="modal-overview-layout">
-					<NyBoxGauge row={state} />
 					{modal?.isNySessionActive ? (
 						<div className="zone-list">
 							<div className="zone-row">
