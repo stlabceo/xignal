@@ -527,6 +527,142 @@ function nyBoxPosition(row) {
 	return { label, className: 'muted' };
 }
 
+function isNyBoxBreakout(row) {
+	const position = row?.currentBoxPosition;
+	return position === 'ABOVE_BOX' || position === 'BREAK_ABOVE' || position === 'BELOW_BOX' || position === 'BREAK_BELOW';
+}
+
+function nyBoxPositionDisplay(row, modal) {
+	const position = row?.currentBoxPosition;
+	const apiLabel = modal?.currentBoxPositionModalLabel || row?.currentBoxPositionLabel;
+	if (position === 'ABOVE_BOX' || position === 'BREAK_ABOVE') return { label: apiLabel || '상단돌파', tone: 'up' };
+	if (position === 'BELOW_BOX' || position === 'BREAK_BELOW') return { label: apiLabel || '하단돌파', tone: 'down' };
+	if (position === 'INSIDE_BOX') return { label: apiLabel || '박스안', tone: 'box-inside' };
+	return { label: apiLabel || position || '-', tone: 'muted' };
+}
+
+function percentTone(value) {
+	const numeric = Number(value);
+	if (!Number.isFinite(numeric)) return 'neutral';
+	if (numeric > 0) return 'up';
+	if (numeric < 0) return 'down';
+	return 'neutral';
+}
+
+function nyBoxSection(modal, category) {
+	return (modal?.sections || []).find((section) => section.category === category) || null;
+}
+
+function nyBoxSectionValue(modal, category, label, fallback = '-') {
+	const section = nyBoxSection(modal, category);
+	const row = (section?.rows || []).find((item) => item.dataLabel === label);
+	return row?.value ?? fallback;
+}
+
+function nyBoxExplicitBreakoutTime(row = {}) {
+	return (
+		row.breakoutDetectedAt ||
+		row.breakoutAt ||
+		row.confirmedBreakAt ||
+		row.nyBoxBreakoutAt ||
+		row.boxBreakoutAt ||
+		row.boxBreakoutDetectedAt ||
+		null
+	);
+}
+
+function nyBoxBreakoutTimeRow(row, modal) {
+	if (!isNyBoxBreakout(row)) return null;
+	const explicit = nyBoxExplicitBreakoutTime(row);
+	const fallback = row?.updatedAt || modal?.livePriceUpdatedAtKst || modal?.nyDataCalculatedAtKst || null;
+	return {
+		label: explicit ? '돌파 발생 시간' : '돌파 확인 시간',
+		value: formatDateTime(explicit || fallback),
+		tone: 'muted'
+	};
+}
+
+function DeltaValue({ value, delta, summary }) {
+	const tone = percentTone(delta);
+	const showDelta = Number.isFinite(Number(delta)) || summary;
+	return (
+		<span className={`value-with-delta tone-${tone}`}>
+			<span>{value ?? '-'}</span>
+			{showDelta ? <em className={`delta-pill ${tone}`}>{summary || formatPercent(delta, 2, true)}</em> : null}
+		</span>
+	);
+}
+
+function buildNyBoxOverviewSections(state, modal) {
+	const position = nyBoxPositionDisplay(state, modal);
+	const currentRows = [
+		{ label: '가격', value: modal?.currentPriceLabel || formatPrice(state?.currentPrice) },
+		{
+			label: '현재 상태',
+			valueNode: <span className={`position-pill ${position.tone}`}>{position.label}</span>,
+			tone: position.tone
+		}
+	];
+	const breakoutRow = nyBoxBreakoutTimeRow(state, modal);
+	if (breakoutRow) currentRows.push(breakoutRow);
+
+	return [
+		{
+			title: '현재가',
+			description: '현재 가격과 뉴욕 박스 기준 위치입니다.',
+			rows: currentRows
+		},
+		{
+			title: '뉴욕 박스',
+			description: '최근 완료된 뉴욕 세션의 고점과 저점으로 만든 박스입니다.',
+			rows: [
+				{ label: '상단', value: nyBoxSectionValue(modal, '뉴욕 박스', '상단', formatPrice(state?.boxTop)) },
+				{ label: '하단', value: nyBoxSectionValue(modal, '뉴욕 박스', '하단', formatPrice(state?.boxBottom)) },
+				{ label: '폭', value: nyBoxSectionValue(modal, '뉴욕 박스', '폭', formatPercent(state?.boxWidthPct)) }
+			]
+		},
+		{
+			title: '뉴욕 세션 가격',
+			description: '뉴욕 세션의 시작 가격과 종료 가격 변화입니다.',
+			rows: [
+				{ label: '시가', value: nyBoxSectionValue(modal, '뉴욕 세션 가격', '시가') },
+				{
+					label: '종가',
+					valueNode: <DeltaValue value={nyBoxSectionValue(modal, '뉴욕 세션 가격', '종가')} delta={modal?.nySessionChangePct} summary={modal?.nySessionChangeSummary} />,
+					tone: percentTone(modal?.nySessionChangePct)
+				},
+				{ label: '가격 변화', value: nyBoxSectionValue(modal, '뉴욕 세션 가격', '가격 변화'), tone: percentTone(modal?.nySessionChangePct) }
+			]
+		},
+		{
+			title: '뉴욕 세션 고점',
+			description: '뉴욕 세션 초반과 후반의 고점 이동입니다.',
+			rows: [
+				{ label: '장초반 고점', value: nyBoxSectionValue(modal, '뉴욕 세션 고점', '장초반 고점') },
+				{
+					label: '장후반 고점',
+					valueNode: <DeltaValue value={nyBoxSectionValue(modal, '뉴욕 세션 고점', '장후반 고점')} delta={modal?.highMovePct} summary={modal?.highMoveSummary} />,
+					tone: percentTone(modal?.highMovePct)
+				},
+				{ label: '고점 이동', value: nyBoxSectionValue(modal, '뉴욕 세션 고점', '고점 이동'), tone: percentTone(modal?.highMovePct) }
+			]
+		},
+		{
+			title: '뉴욕 세션 저점',
+			description: '뉴욕 세션 초반과 후반의 저점 이동입니다.',
+			rows: [
+				{ label: '장초반 저점', value: nyBoxSectionValue(modal, '뉴욕 세션 저점', '장초반 저점') },
+				{
+					label: '장후반 저점',
+					valueNode: <DeltaValue value={nyBoxSectionValue(modal, '뉴욕 세션 저점', '장후반 저점')} delta={modal?.lowMovePct} summary={modal?.lowMoveSummary} />,
+					tone: percentTone(modal?.lowMovePct)
+				},
+				{ label: '저점 이동', value: nyBoxSectionValue(modal, '뉴욕 세션 저점', '저점 이동'), tone: percentTone(modal?.lowMovePct) }
+			]
+		}
+	].filter((section) => section.rows.some((row) => row.valueNode || (row.value !== null && row.value !== undefined && row.value !== '-')));
+}
+
 function matchesNyBoxFilter(row, filter) {
 	if (!filter) return true;
 	const position = row?.currentBoxPosition;
@@ -709,7 +845,8 @@ function NyBoxGauge({ row }) {
 	const top = Number(row?.boxTop);
 	const hasGaugeData = Number.isFinite(current) && Number.isFinite(bottom) && Number.isFinite(top) && top > bottom;
 	const position = nyBoxPosition(row);
-	const pct = hasGaugeData ? Math.max(0, Math.min(100, ((current - bottom) / (top - bottom)) * 100)) : 50;
+	const rawPct = hasGaugeData ? ((current - bottom) / (top - bottom)) * 100 : 50;
+	const pct = Math.max(0, Math.min(100, rawPct));
 	const pricePlacement = pct < 10 ? 'left-outside' : pct > 90 ? 'right-outside' : 'center';
 
 	return (
@@ -718,12 +855,14 @@ function NyBoxGauge({ row }) {
 				<div className="nybox-gauge-icon bear-icon">BEAR</div>
 				<div className="nybox-gauge-bar" aria-hidden="true">
 					<span className="price-marker" style={{ left: `${pct}%` }} />
+					<strong className="nybox-gauge-current" style={{ left: `${pct}%` }}>
+						{formatPrice(row?.currentPrice)}
+					</strong>
 				</div>
 				<div className="nybox-gauge-icon bull-icon">BULL</div>
 			</div>
 			<div className="nybox-gauge-values">
 				<span>{formatPrice(row?.boxBottom)}</span>
-				<strong>{formatPrice(row?.currentPrice)}</strong>
 				<span>{formatPrice(row?.boxTop)}</span>
 			</div>
 			<div className="nybox-gauge-meta">
@@ -1050,7 +1189,7 @@ function DetailSection({ title, description, rows }) {
 			{rows.map((row) => (
 				<div className="zone-row nybox-kv-row modal-detail-kv-row" key={`${title}-${row.label}`}>
 					<span>{row.label}</span>
-					<strong>{row.value ?? '-'}</strong>
+					<strong className={row.tone ? `value-tone ${row.tone}` : undefined}>{row.valueNode ?? row.value ?? '-'}</strong>
 				</div>
 			))}
 		</div>
@@ -1085,18 +1224,7 @@ function NyBoxDetail({ detail, row, activeTab, autoTradeEligible, backtestEligib
 	const modal = detail?.nyBoxModal;
 	const [selectedStrategyImageLabel, setSelectedStrategyImageLabel] = useState(NY_BOX_STRATEGY_IMAGES[0].label);
 	const selectedStrategyImage = NY_BOX_STRATEGY_IMAGES.find((image) => image.label === selectedStrategyImageLabel) || NY_BOX_STRATEGY_IMAGES[0];
-	const overviewRows = [
-		{ label: '종목명', value: displayAssetText(state?.symbol, state?.baseAsset) },
-		{ label: '전략명', value: '뉴욕 박스 그리드' },
-		{ label: '기준 세션', value: modal?.currentSessionLabel || '-' },
-		{ label: '최근 완료 뉴욕 세션', value: modal?.baselineNySessionDate || '-' }
-	];
-	const restoredSections = (modal?.sections || [])
-		.map((section) => ({
-			...section,
-			rows: (section.rows || []).filter((item) => item.dataLabel !== '현재 위치')
-		}))
-		.filter((section) => section.rows.length > 0);
+	const overviewSections = buildNyBoxOverviewSections(state, modal);
 	const disclaimerStart = modal?.nySessionStartKst || modal?.baselineNySessionDate || '-';
 	const disclaimerEnd = modal?.nySessionEndKst || modal?.nyDataCalculatedAtKst || '-';
 
@@ -1109,7 +1237,6 @@ function NyBoxDetail({ detail, row, activeTab, autoTradeEligible, backtestEligib
 			{activeTab === 'overview' ? (
 				<div className="modal-overview-layout">
 					<NyBoxGauge row={state} />
-					<DetailSection title="기본 정보" description="RingLevel detail API에서 내려온 종목과 세션 기준입니다." rows={overviewRows} />
 					{modal?.isNySessionActive ? (
 						<div className="zone-list">
 							<div className="zone-row">
@@ -1118,21 +1245,8 @@ function NyBoxDetail({ detail, row, activeTab, autoTradeEligible, backtestEligib
 							</div>
 						</div>
 					) : null}
-					{restoredSections.length
-						? restoredSections.map((section) => (
-								<div className="zone-list nybox-modal-section" key={section.category}>
-									<div className="nybox-section-header">
-										<strong>{section.category}</strong>
-										<span>{section.categoryDescription}</span>
-									</div>
-									{section.rows.map((item) => (
-										<div className="zone-row nybox-kv-row" key={`${section.category}-${item.dataLabel}`}>
-											<span>{item.dataLabel}</span>
-											<strong>{item.value ?? '-'}</strong>
-										</div>
-									))}
-								</div>
-							))
+					{overviewSections.length
+						? overviewSections.map((section) => <DetailSection key={section.title} title={section.title} description={section.description} rows={section.rows} />)
 						: null}
 					<div className="modal-disclaimer">
 						<p>한국시간 기준 {disclaimerStart}부터 {disclaimerEnd}까지의 뉴욕 세션 거래 데이터를 기반으로 작성했습니다.</p>

@@ -644,6 +644,66 @@
 	text-align: right;
 }
 
+.ring-public-app .zone-row strong.value-tone.up,
+.ring-public-app .value-with-delta.tone-up {
+	color: #047857;
+}
+
+.ring-public-app .zone-row strong.value-tone.down,
+.ring-public-app .value-with-delta.tone-down {
+	color: #dc2626;
+}
+
+.ring-public-app .zone-row strong.value-tone.box-inside,
+.ring-public-app .value-with-delta.tone-neutral {
+	color: #2563eb;
+}
+
+.ring-public-app .value-with-delta {
+	display: inline-flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 7px;
+}
+
+.ring-public-app .delta-pill,
+.ring-public-app .position-pill {
+	display: inline-flex;
+	align-items: center;
+	min-height: 24px;
+	padding: 4px 9px;
+	border-radius: 999px;
+	font-size: 11px;
+	font-style: normal;
+	font-weight: 950;
+	line-height: 1;
+	white-space: nowrap;
+}
+
+.ring-public-app .delta-pill.up,
+.ring-public-app .position-pill.up {
+	background: #dcfce7;
+	color: #047857;
+}
+
+.ring-public-app .delta-pill.down,
+.ring-public-app .position-pill.down {
+	background: #fee2e2;
+	color: #b91c1c;
+}
+
+.ring-public-app .delta-pill.neutral,
+.ring-public-app .position-pill.muted {
+	background: #f1f5f9;
+	color: #475569;
+}
+
+.ring-public-app .position-pill.box-inside {
+	background: #dbeafe;
+	color: #1d4ed8;
+}
+
 .ring-public-app .modal-disclaimer,
 .ring-public-app .modal-detail-note,
 .ring-public-app .backtest-footnote {
@@ -826,6 +886,7 @@
 .ring-public-app .nybox-gauge-bar {
 	position: relative;
 	height: 12px;
+	margin-bottom: 18px;
 	border-radius: 999px;
 	background: linear-gradient(90deg, #ef4444 0%, #e2e8f0 50%, #22c55e 100%);
 }
@@ -840,6 +901,26 @@
 	background: #2563eb;
 	box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
 	transform: translate(-50%, -50%);
+}
+
+.ring-public-app .nybox-gauge-current {
+	position: absolute;
+	top: 21px;
+	z-index: 1;
+	color: #0f172a;
+	font-size: 14px;
+	font-weight: 950;
+	line-height: 1;
+	white-space: nowrap;
+	transform: translateX(-50%);
+}
+
+.ring-public-app .bear-bull-box-gauge.position-left-outside .nybox-gauge-current {
+	transform: translateX(0);
+}
+
+.ring-public-app .bear-bull-box-gauge.position-right-outside .nybox-gauge-current {
+	transform: translateX(-100%);
 }
 
 .ring-public-app .nybox-gauge-values,
