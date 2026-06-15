@@ -107,6 +107,14 @@ const LoginPage = () => {
 						{submitting ? '로그인 중...' : '로그인'}
 					</PrimaryAuthButton>
 				</form>
+				<div className="grid gap-2 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4 text-sm">
+					<a href="/realtime-data" className="font-bold text-[#2563EB]">
+						실시간 데이터 보기
+					</a>
+					<a href="/take-profit-search" className="font-semibold text-[#64748B]">
+						백테스트 보기
+					</a>
+				</div>
 			</div>
 		</AuthLayout>
 	);

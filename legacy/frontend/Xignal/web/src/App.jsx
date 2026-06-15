@@ -23,6 +23,7 @@ import SignUpComplete from './pages/authpage/SignUpComplete.jsx';
 import AdminConsole from './pages/admin/AdminConsole.jsx';
 import MenuPlaceholderPage from './pages/placeholder/MenuPlaceholderPage.jsx';
 import TakeProfitSearchPage from './pages/takeProfitSearch/TakeProfitSearchPage.jsx';
+import RealtimeDataPage from './pages/realtimeData/RealtimeDataPage.jsx';
 import { clearSessionAuth, getSessionSnapshot } from './utils/sessionAuth.js';
 import { getDevSuperUser, isDevSuperLoginActive } from './utils/devSuperLogin.js';
 
@@ -229,6 +230,9 @@ function App() {
 								</>
 							}
 						/>
+						<Route path="/realtime-data" element={<RealtimeDataPage />} />
+						<Route path="/take-profit-search" element={<TakeProfitSearchPage />} />
+						<Route path="/tp-search" element={<TakeProfitSearchPage />} />
 						<Route element={<AppLayout />}>
 							<Route
 								path="/"

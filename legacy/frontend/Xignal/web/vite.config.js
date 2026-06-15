@@ -8,6 +8,7 @@ export default defineConfig(({ mode }) => {
 	const env = loadEnv(mode, process.cwd(), '');
 	const apiTarget = env.VITE_API_URL || 'http://127.0.0.1:3000';
 	const publicBacktestApiTarget = env.VITE_PUBLIC_BACKTEST_API_BASE || 'http://127.0.0.1:8787';
+	const publicRealtimeApiTarget = env.VITE_PUBLIC_REALTIME_API_BASE || publicBacktestApiTarget;
 
 	return {
 		plugins: [react(), tailwindcss()],
@@ -16,6 +17,11 @@ export default defineConfig(({ mode }) => {
 			proxy: {
 				'/api/public/backtests': {
 					target: publicBacktestApiTarget,
+					changeOrigin: true,
+					secure: false
+				},
+				'/api/items': {
+					target: publicRealtimeApiTarget,
 					changeOrigin: true,
 					secure: false
 				},
