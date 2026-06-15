@@ -645,6 +645,7 @@
 }
 
 .ring-public-app .modal-disclaimer,
+.ring-public-app .modal-detail-note,
 .ring-public-app .backtest-footnote {
 	padding: 14px 15px;
 	border: 1px solid #e2e8f0;
@@ -656,13 +657,23 @@
 }
 
 .ring-public-app .modal-disclaimer p,
+.ring-public-app .modal-detail-note p,
 .ring-public-app .backtest-footnote p {
 	margin: 0 0 5px;
 }
 
 .ring-public-app .modal-disclaimer p:last-child,
+.ring-public-app .modal-detail-note p:last-child,
 .ring-public-app .backtest-footnote p:last-child {
 	margin-bottom: 0;
+}
+
+.ring-public-app .modal-detail-note strong {
+	display: block;
+	margin-bottom: 6px;
+	color: #0f172a;
+	font-size: 13px;
+	font-weight: 950;
 }
 
 .ring-public-app .nybox-strategy-message {
@@ -754,6 +765,11 @@
 	display: flex;
 	flex-wrap: wrap;
 	gap: 10px;
+	margin: 0 24px 24px;
+}
+
+.ring-public-app .nybox-strategy-layout .modal-cta-row {
+	margin: 0;
 }
 
 .ring-public-app .bear-bull-box-gauge {
@@ -1066,7 +1082,7 @@
 	white-space: nowrap;
 }
 
-@media (max-width: 860px) {
+@media (max-width: 720px) {
 	.ring-public-app .app-shell {
 		width: min(100% - 20px, 760px);
 		padding-top: 14px;

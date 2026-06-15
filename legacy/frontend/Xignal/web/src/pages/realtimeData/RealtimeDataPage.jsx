@@ -65,6 +65,10 @@ const FUTURES_TO_DISPLAY_BASE = {
 };
 
 const KOREAN_ASSET_NAMES = {
+	'0G': '제로지',
+	'1INCH': '1인치네트워크',
+	'1MBABYDOGE': '밀리베이비도지',
+	'2Z': '더블제로',
 	BTC: '비트코인',
 	ETH: '이더리움',
 	BNB: '비앤비',
@@ -124,6 +128,65 @@ const KOREAN_ASSET_NAMES = {
 	XMR: '모네로',
 	ZEC: '지캐시'
 };
+
+const digitNames = {
+	0: '제로',
+	1: '원',
+	2: '투',
+	3: '쓰리',
+	4: '포',
+	5: '파이브',
+	6: '식스',
+	7: '세븐',
+	8: '에이트',
+	9: '나인'
+};
+
+const letterNames = {
+	A: '에이',
+	B: '비',
+	C: '씨',
+	D: '디',
+	E: '이',
+	F: '에프',
+	G: '지',
+	H: '에이치',
+	I: '아이',
+	J: '제이',
+	K: '케이',
+	L: '엘',
+	M: '엠',
+	N: '엔',
+	O: '오',
+	P: '피',
+	Q: '큐',
+	R: '알',
+	S: '에스',
+	T: '티',
+	U: '유',
+	V: '브이',
+	W: '더블유',
+	X: '엑스',
+	Y: '와이',
+	Z: '지'
+};
+
+const romanChunks = [
+	['BABYDOGE', '베이비도지'],
+	['BANANA', '바나나'],
+	['CHEEMS', '치임스'],
+	['ALICE', '앨리스'],
+	['AUDIO', '오디오'],
+	['FLOKI', '플로키'],
+	['BONK', '봉크'],
+	['PEPE', '페페'],
+	['SHIB', '시바'],
+	['DOGE', '도지'],
+	['CAT', '캣'],
+	['RATS', '랫츠'],
+	['SATS', '사츠'],
+	['AI', '에이아이']
+];
 
 const STABLE_OR_PEGGED_BASE_ASSETS = new Set(['USDT', 'USDC', 'FDUSD', 'TUSD', 'DAI', 'USDE', 'USDS', 'USDD', 'PYUSD', 'USD1', 'USDG', 'RLUSD', 'EURC', 'FRAX', 'GUSD', 'LUSD', 'USDP', 'EURS', 'AEUR', 'BUSD', 'BFUSD', 'XAUT', 'PAXG', 'XAU', 'STABLE']);
 
@@ -283,26 +346,64 @@ const formatKstMonthDayTime = (value) => {
 
 const getSymbol = (row) => row?.symbol || row?.baseAsset || '-';
 
+function normalizeCanonicalSymbol(symbol) {
+	const value = String(symbol || '').trim().toUpperCase();
+	if (!value || value === '-') return '';
+	const withoutExchange = value.includes(':') ? value.split(':').pop() || value : value;
+	return withoutExchange.replace(/\.P$/i, '');
+}
+
 function baseAssetFromSymbol(symbol, baseAsset) {
-	const raw = String(baseAsset || symbol || '')
-		.replace(/\.P$/i, '')
-		.replace(/USDT$/i, '')
-		.toUpperCase();
+	const rawBase = String(baseAsset || '').trim().toUpperCase();
+	const raw = rawBase || normalizeCanonicalSymbol(symbol).replace(/USDT$/i, '');
 	return FUTURES_TO_DISPLAY_BASE[raw] || raw;
 }
 
 const getDisplaySymbol = (row) => baseAssetFromSymbol(getSymbol(row), row?.baseAsset) || '-';
 const getPrice = (row) => row?.currentPrice ?? row?.price ?? null;
 const getUpdatedAt = (row) => row?.updatedAt || row?.calculatedAtKst || row?.lastUpdatedAt || null;
-const publicSupport = (row) => (row?.supportProvenance?.source === 'vp' || row?.support ? row?.support : null);
-const publicResistance = (row) => row?.resistance || null;
+const publicSupport = (row) => (row?.supportProvenance?.source === 'vp' ? row?.support : null);
+const publicResistance = (row) => (row?.resistanceProvenance?.source === 'vp' ? row?.resistance : null);
+
+function isStableLikeBaseAsset(baseAsset) {
+	const base = String(baseAsset || '').trim().toUpperCase();
+	return Boolean(base && (STABLE_OR_PEGGED_BASE_ASSETS.has(base) || base.includes('STABLE')));
+}
+
+function isInvalidPublicSymbol(symbol) {
+	const normalized = normalizeCanonicalSymbol(symbol);
+	return !/^[A-Z0-9]+USDT$/.test(normalized);
+}
+
+function transliterateUnknownBase(baseAsset) {
+	let source = String(baseAsset || '').toUpperCase();
+	let result = '';
+	while (source.length > 0) {
+		const chunk = romanChunks.find(([token]) => source.startsWith(token));
+		if (chunk) {
+			result += chunk[1];
+			source = source.slice(chunk[0].length);
+			continue;
+		}
+		const char = source[0];
+		result += digitNames[char] || letterNames[char] || char;
+		source = source.slice(1);
+	}
+	return result || '-';
+}
+
+function getKoreanAssetName(symbol, baseAsset) {
+	const displayBase = baseAssetFromSymbol(symbol, baseAsset);
+	return KOREAN_ASSET_NAMES[displayBase] || transliterateUnknownBase(displayBase);
+}
 
 function getDisplaySymbolLabel(symbol, baseAsset) {
 	const displayBase = baseAssetFromSymbol(symbol, baseAsset);
-	const primaryName = KOREAN_ASSET_NAMES[displayBase] || displayBase || '-';
+	const ticker = normalizeCanonicalSymbol(symbol) || (displayBase ? `${displayBase}USDT` : '');
+	const primaryName = getKoreanAssetName(symbol, baseAsset);
 	return {
-		primaryName,
-		secondarySymbol: symbol || displayBase || '-',
+		primaryName: primaryName || displayBase || '-',
+		secondarySymbol: ticker || displayBase || '-',
 		displayBase
 	};
 }
@@ -314,8 +415,9 @@ function displayAssetText(symbol, baseAsset) {
 
 function isPublicVisibleRow(row) {
 	const label = getDisplaySymbolLabel(row?.symbol, row?.baseAsset);
-	if (!label.displayBase || STABLE_OR_PEGGED_BASE_ASSETS.has(label.displayBase)) return false;
-	if (!/^[A-Z0-9]+$/.test(label.displayBase)) return false;
+	const rawBase = String(row?.baseAsset || normalizeCanonicalSymbol(row?.symbol).replace(/USDT$/i, '')).toUpperCase();
+	if (!label.displayBase || isInvalidPublicSymbol(row?.symbol)) return false;
+	if (isStableLikeBaseAsset(rawBase) || isStableLikeBaseAsset(label.displayBase)) return false;
 	return true;
 }
 
@@ -323,14 +425,54 @@ function sortByPublicPriority(rows) {
 	return [...rows].sort((a, b) => {
 		const aLabel = getDisplaySymbolLabel(a?.symbol, a?.baseAsset);
 		const bLabel = getDisplaySymbolLabel(b?.symbol, b?.baseAsset);
-		const aPriority = PUBLIC_PRIORITY[aLabel.displayBase] ?? Infinity;
-		const bPriority = PUBLIC_PRIORITY[bLabel.displayBase] ?? Infinity;
-		if (aPriority !== bPriority) return aPriority - bPriority;
-		const aRank = Number.isFinite(Number(a?.marketCapRank)) ? Number(a.marketCapRank) : Infinity;
-		const bRank = Number.isFinite(Number(b?.marketCapRank)) ? Number(b.marketCapRank) : Infinity;
+		const aRankValue = a?.marketCapRank === null || a?.marketCapRank === undefined || a?.marketCapRank === '' ? null : Number(a.marketCapRank);
+		const bRankValue = b?.marketCapRank === null || b?.marketCapRank === undefined || b?.marketCapRank === '' ? null : Number(b.marketCapRank);
+		const aRank = Number.isFinite(aRankValue) ? aRankValue : (PUBLIC_PRIORITY[aLabel.displayBase] ?? Infinity);
+		const bRank = Number.isFinite(bRankValue) ? bRankValue : (PUBLIC_PRIORITY[bLabel.displayBase] ?? Infinity);
 		if (aRank !== bRank) return aRank - bRank;
+		const aCapValue = a?.marketCapUsd === null || a?.marketCapUsd === undefined || a?.marketCapUsd === '' ? null : Number(a.marketCapUsd);
+		const bCapValue = b?.marketCapUsd === null || b?.marketCapUsd === undefined || b?.marketCapUsd === '' ? null : Number(b.marketCapUsd);
+		const aCap = Number.isFinite(aCapValue) ? aCapValue : null;
+		const bCap = Number.isFinite(bCapValue) ? bCapValue : null;
+		if (aCap !== null && bCap === null) return -1;
+		if (aCap === null && bCap !== null) return 1;
+		if (aCap !== null && bCap !== null && aCap !== bCap) return bCap - aCap;
 		return aLabel.displayBase.localeCompare(bLabel.displayBase);
 	});
+}
+
+function isMarketCapTop100Candidate(row) {
+	const label = getDisplaySymbolLabel(row?.symbol, row?.baseAsset);
+	const rank = Number.isFinite(Number(row?.marketCapRank)) ? Number(row.marketCapRank) : null;
+	if (rank !== null && rank > 0 && rank <= 100) return true;
+	return label.displayBase in PUBLIC_PRIORITY;
+}
+
+function isAutoTradeEligible(row) {
+	return Boolean(row && isPublicVisibleRow(row) && isMarketCapTop100Candidate(row));
+}
+
+function isBacktestEligible(row) {
+	return Boolean(row && isPublicVisibleRow(row) && isMarketCapTop100Candidate(row));
+}
+
+function isCompleteNyBoxRow(row) {
+	return Number.isFinite(Number(row?.currentPrice)) && Number.isFinite(Number(row?.boxTop)) && Number.isFinite(Number(row?.boxBottom));
+}
+
+function isCompleteFearGreedRow(row) {
+	return Boolean(getDisplaySymbolLabel(row?.symbol, row?.baseAsset).primaryName) && Number.isFinite(Number(row?.currentPrice));
+}
+
+function isCompleteSupportRow(row) {
+	return Number(getPrice(row)) > 0 && Boolean(publicSupport(row)) && Boolean(publicResistance(row));
+}
+
+function isCompletePublicRow(row, itemType) {
+	if (itemType === 'ny_box') return isCompleteNyBoxRow(row);
+	if (itemType === 'fear_greed') return isCompleteFearGreedRow(row);
+	if (itemType === 'support_resistance') return isCompleteSupportRow(row);
+	return true;
 }
 
 function nyBoxPosition(row) {
@@ -361,6 +503,30 @@ function statusTone(text) {
 	if (value.includes('하락') || value.includes('이탈') || value.includes('공포') || value.includes('하단')) return 'down';
 	if (value.includes('박스') || value.includes('정상')) return 'box-inside';
 	return 'muted';
+}
+
+function srDisplayState(row) {
+	return publicSupport(row) && publicResistance(row) ? row?.userPriceState || '-' : '-';
+}
+
+function formatElapsedBreakoutTime(value) {
+	if (!value) return '-';
+	const timestamp = Date.parse(value);
+	if (!Number.isFinite(timestamp)) return String(value);
+	const elapsedMinutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60000));
+	if (elapsedMinutes < 1) return '방금 전';
+	if (elapsedMinutes < 60) return `${elapsedMinutes}분 전`;
+	const elapsedHours = Math.floor(elapsedMinutes / 60);
+	if (elapsedHours < 24) return `${elapsedHours}시간 전`;
+	return `${Math.floor(elapsedHours / 24)}일 전`;
+}
+
+function breakoutTime(row) {
+	const state = srDisplayState(row);
+	if (state === '저항선 상승 돌파 발생' || state === '지지선 하락 돌파 발생') {
+		return formatElapsedBreakoutTime(row?.breakoutDetectedAt || row?.breakoutAt || row?.confirmedBreakAt);
+	}
+	return '-';
 }
 
 function latestFearGreedEvent(row = {}) {
@@ -845,20 +1011,30 @@ function DetailSection({ title, description, rows }) {
 	);
 }
 
-function ModalActionRow() {
+function EligibilityNotice({ type }) {
+	return (
+		<div className="backtest-footnote">
+			<p>{type === 'backtest' ? '이 종목은 현재 1차 백테스트 제공 대상이 아닙니다.' : '이 종목은 현재 1차 자동매매 제공 대상이 아닙니다.'}</p>
+		</div>
+	);
+}
+
+function ModalActionRow({ autoTradeEligible = true }) {
 	return (
 		<div className="modal-cta-row">
-			<a className="icon-text-button primary" href="/take-profit-search">
-				익절 조건 검색
-			</a>
-			<a className="icon-text-button" href="/login">
-				회원 로그인
+			{autoTradeEligible ? (
+				<a className="icon-text-button primary" href="/take-profit-search">
+					자동매매 하기
+				</a>
+			) : null}
+			<a className="icon-text-button" href="#tradingview-chart">
+				트레이딩뷰 차트 사용하기
 			</a>
 		</div>
 	);
 }
 
-function NyBoxDetail({ detail, row, activeTab }) {
+function NyBoxDetail({ detail, row, activeTab, autoTradeEligible, backtestEligible }) {
 	const state = detail?.state || row;
 	const modal = detail?.nyBoxModal;
 	const overviewRows = [
@@ -933,15 +1109,22 @@ function NyBoxDetail({ detail, row, activeTab }) {
 							</button>
 						))}
 					</div>
-					<ModalActionRow />
+					{autoTradeEligible ? null : <EligibilityNotice type="autoTrade" />}
+					<ModalActionRow autoTradeEligible={autoTradeEligible} />
 				</div>
 			) : null}
-			{activeTab === 'backtest' ? <BacktestPanel row={state} itemType="ny_box" backtests={detail?.backtests} /> : null}
+			{activeTab === 'backtest' ? (
+				<>
+					{backtestEligible ? <BacktestPanel row={state} itemType="ny_box" backtests={detail?.backtests} /> : <EligibilityNotice type="backtest" />}
+					{autoTradeEligible ? null : <EligibilityNotice type="autoTrade" />}
+					<ModalActionRow autoTradeEligible={autoTradeEligible} />
+				</>
+			) : null}
 		</>
 	);
 }
 
-function FearGreedDetail({ detail, row, activeTab }) {
+function FearGreedDetail({ detail, row, activeTab, autoTradeEligible, backtestEligible }) {
 	const baseState = detail?.state || row;
 	const [selectedPeriod, setSelectedPeriod] = useState(baseState?.timeframe || 'short');
 
@@ -1043,30 +1226,155 @@ function FearGreedDetail({ detail, row, activeTab }) {
 							</button>
 						))}
 					</div>
-					<ModalActionRow />
+					{autoTradeEligible ? null : <EligibilityNotice type="autoTrade" />}
+					<ModalActionRow autoTradeEligible={autoTradeEligible} />
 				</div>
 			) : null}
-			{activeTab === 'backtest' ? <BacktestPanel row={state} itemType="fear_greed" backtests={detail?.backtests} /> : null}
+			{activeTab === 'backtest' ? (
+				<>
+					{backtestEligible ? <BacktestPanel row={state} itemType="fear_greed" backtests={detail?.backtests} /> : <EligibilityNotice type="backtest" />}
+					{autoTradeEligible ? null : <EligibilityNotice type="autoTrade" />}
+					<ModalActionRow autoTradeEligible={autoTradeEligible} />
+				</>
+			) : null}
 		</>
 	);
 }
 
-function SupportResistanceDetail({ row, activeTab }) {
-	const support = publicSupport(row);
-	const resistance = publicResistance(row);
+function markerPercent(value, min, max) {
+	if (!Number.isFinite(value) || !Number.isFinite(min) || !Number.isFinite(max) || max <= min) return 50;
+	return Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
+}
+
+function RangeBar({ markers = [], zones = [] }) {
+	const values = [
+		...markers.map((marker) => Number(marker.value)),
+		...zones.flatMap((zone) => [Number(zone.low), Number(zone.high)])
+	].filter(Number.isFinite);
+	const min = values.length ? Math.min(...values) : 0;
+	const max = values.length ? Math.max(...values) : 1;
+	return (
+		<div className="range-wrap">
+			<div className="range-track">
+				{zones.map((zone, index) => (
+					<span
+						key={`${zone.kind}-${index}`}
+						className={`range-zone ${zone.kind}`}
+						style={{
+							left: `${markerPercent(Number(zone.low), min, max)}%`,
+							width: `${Math.max(2, markerPercent(Number(zone.high), min, max) - markerPercent(Number(zone.low), min, max))}%`
+						}}
+					/>
+				))}
+				{markers.map((marker) => (
+					<span key={`${marker.label}-${marker.value}`} className={`range-marker ${marker.kind}`} style={{ left: `${markerPercent(Number(marker.value), min, max)}%` }}>
+						<span>{marker.label}</span>
+					</span>
+				))}
+			</div>
+			<div className="range-scale">
+				<span>{formatPrice(min)}</span>
+				<span>{formatPrice(max)}</span>
+			</div>
+		</div>
+	);
+}
+
+function formatUsdM(value) {
+	const numeric = Number(value);
+	if (!Number.isFinite(numeric) || numeric < 0) return '-';
+	return `$${numeric.toFixed(numeric >= 100 ? 0 : 1)}M`;
+}
+
+function zoneText(level, missingText) {
+	if (!level) return missingText;
+	const parts = [`${formatPrice(level.low)} ~ ${formatPrice(level.high)}`];
+	if (level.zoneNotionalUsdM !== undefined) parts.push(`거래대금 ${formatUsdM(level.zoneNotionalUsdM)}`);
+	if (level.zoneSharePct !== undefined) parts.push(`전체 비중 ${formatPercent(level.zoneSharePct)}`);
+	if (level.shareChangePctPoint !== undefined) parts.push(`전일 대비 ${formatPercent(level.shareChangePctPoint, 2, true)}p`);
+	if (level.zoneHeightPct !== undefined) parts.push(`높이 ${formatPercent(level.zoneHeightPct)}`);
+	return parts.join(' / ');
+}
+
+function movementText(direction, pct) {
+	const numeric = Number(pct);
+	if (!direction || direction === '비교 불가' || !Number.isFinite(numeric)) return '비교 불가';
+	return `${direction} (${formatPercent(numeric, 2, true)})`;
+}
+
+function SupportResistanceDetail({ detail, row, activeTab }) {
+	const detailState = detail?.state || row;
+	const periodStates = detail?.periods || { [detailState?.timeframe || 'long']: detailState };
+	const [activePeriod, setActivePeriod] = useState('long');
+	const activeState = periodStates?.[activePeriod] || detailState || {};
+	const support = publicSupport(activeState);
+	const resistance = publicResistance(activeState);
+	const currentPrice = getPrice(activeState);
+	const markers = [
+		support ? { label: '지지 Zone', value: support.mid, kind: 'support' } : null,
+		Number.isFinite(Number(currentPrice)) ? { label: '현재가', value: currentPrice, kind: 'price' } : null,
+		resistance ? { label: '저항 Zone', value: resistance.mid, kind: 'resistance' } : null
+	].filter(Boolean);
+	const zones = [support, resistance]
+		.filter(Boolean)
+		.map((level) => ({
+			low: level.low,
+			high: level.high,
+			kind: Number(level.mid) < Number(currentPrice) ? 'support' : 'resistance'
+		}));
+	const periodRows = (period) => {
+		const state = periodStates?.[period];
+		if (!state) {
+			return [
+				{ label: '지지 Zone', value: '지지 Zone 없음' },
+				{ label: '저항 Zone', value: '저항 Zone 없음' },
+				{ label: '구간 폭', value: '-' }
+			];
+		}
+		return [
+			{ label: '지지 Zone', value: zoneText(publicSupport(state), '지지 Zone 없음') },
+			{ label: '저항 Zone', value: zoneText(publicResistance(state), '저항 Zone 없음') },
+			{ label: '구간 폭', value: formatPercent(state?.range?.widthPct) }
+		];
+	};
+	const movementRows = TIMEFRAMES.flatMap((period) => {
+		const state = periodStates?.[period.value];
+		return [
+			{ label: `${period.windowLabel} 매물대 이동 [지지선]`, value: state ? movementText(state.supportMovementDirection, state.supportMovementPct) : '비교 불가' },
+			{ label: `${period.windowLabel} 매물대 이동 [저항선]`, value: state ? movementText(state.resistanceMovementDirection, state.resistanceMovementPct) : '비교 불가' }
+		];
+	});
 	return (
 		<>
 			{activeTab === 'overview' ? (
 				<div className="modal-overview-layout">
+					<div className="modal-period-controls" aria-label="지지선/저항선 상세 기간">
+						{TIMEFRAMES.map((period) => (
+							<button key={period.value} type="button" className={activePeriod === period.value ? 'active' : ''} onClick={() => setActivePeriod(period.value)}>
+								{period.windowLabel}
+							</button>
+						))}
+					</div>
+					<RangeBar markers={markers} zones={zones} />
 					<DetailSection
-						title="지지·저항선 위치"
+						title="현재가"
+						description="현재 row에 포함된 가격 정보입니다."
 						rows={[
-							{ label: '현재가', value: formatPrice(getPrice(row)) },
-							{ label: '지지선', value: formatPrice(support?.mid) },
-							{ label: '저항선', value: formatPrice(resistance?.mid) },
-							{ label: '현재 상태', value: row?.userPriceState || '-' }
+							{ label: '현재가', value: formatPrice(currentPrice) },
+							{ label: '현재 상태', value: support && resistance ? activeState?.userPriceState || '-' : '-' }
 						]}
 					/>
+					<DetailSection title="1일 매물대" description="10m 캔들 144개 기준 매물대입니다." rows={periodRows('short')} />
+					<DetailSection title="7일 매물대" description="30m 캔들 336개 기준 매물대입니다." rows={periodRows('mid')} />
+					<DetailSection title="30일 매물대" description="1h 캔들 720개 기준 매물대입니다." rows={periodRows('long')} />
+					<DetailSection title="대표 매물대 위치 이동" description="현재 대표 Zone과 전일 대표 Zone 위치 비교입니다." rows={movementRows} />
+					<div className="modal-detail-note">
+						<strong>1 day trading tip</strong>
+						<p>현재가가 지지 Zone과 저항 Zone 사이에서 어느 쪽에 가까운지 확인하세요. 특정 Zone의 거래대금 비중 변화는 매수 또는 매도 지시가 아닙니다.</p>
+					</div>
+					<div className="modal-disclaimer">
+						<p>기간별 매물대는 과거 공개 거래대금 기준입니다. 지지선 또는 저항선이 이동해도 미래 가격 반응을 보장하지 않습니다.</p>
+					</div>
 				</div>
 			) : null}
 			{activeTab === 'strategy' ? (
@@ -1082,7 +1390,7 @@ function SupportResistanceDetail({ row, activeTab }) {
 	);
 }
 
-function LevelModal({ row, itemType, detail, loading, error, onClose }) {
+function LevelModal({ row, itemType, detail, loading, error, autoTradeEligible = true, backtestEligible = true, onClose }) {
 	const [activeTab, setActiveTab] = useState('overview');
 	useEffect(() => {
 		setActiveTab('overview');
@@ -1123,9 +1431,9 @@ function LevelModal({ row, itemType, detail, loading, error, onClose }) {
 
 				{loading ? <div className="modal-loading">상세 데이터를 불러오는 중입니다.</div> : null}
 				{!loading && error ? <div className="empty-state"><strong>상세 데이터를 불러오지 못했습니다.</strong><p>{error}</p></div> : null}
-				{!loading && !error && itemType === 'ny_box' ? <NyBoxDetail detail={detail} row={row} activeTab={activeTab} /> : null}
-				{!loading && !error && itemType === 'fear_greed' ? <FearGreedDetail detail={detail} row={row} activeTab={activeTab} /> : null}
-				{!loading && !error && itemType === 'support_resistance' ? <SupportResistanceDetail row={row} activeTab={activeTab} /> : null}
+				{!loading && !error && itemType === 'ny_box' ? <NyBoxDetail detail={detail} row={row} activeTab={activeTab} autoTradeEligible={autoTradeEligible} backtestEligible={backtestEligible} /> : null}
+				{!loading && !error && itemType === 'fear_greed' ? <FearGreedDetail detail={detail} row={row} activeTab={activeTab} autoTradeEligible={autoTradeEligible} backtestEligible={backtestEligible} /> : null}
+				{!loading && !error && itemType === 'support_resistance' ? <SupportResistanceDetail detail={detail} row={row} activeTab={activeTab} /> : null}
 			</article>
 		</div>
 	);
@@ -1169,8 +1477,8 @@ function renderTableHeader(itemType) {
 			<th>현재가</th>
 			<th>지지선</th>
 			<th>저항선</th>
-			<th>현재 위치</th>
-			<th>돌파 시간</th>
+			<th>돌파·근접 상태</th>
+			<th>돌파 발생 시간</th>
 		</tr>
 	);
 }
@@ -1232,8 +1540,8 @@ function renderRow(row, itemType, onOpen, context = {}) {
 			<td data-label="현재가"><PriceWithChange price={getPrice(row)} pct={row?.priceChange24hPct} /></td>
 			<td data-label="지지선">{formatPrice(support?.mid)}</td>
 			<td data-label="저항선">{formatPrice(resistance?.mid)}</td>
-			<td data-label="현재 위치"><StatusBadge tone={statusTone(row?.userPriceState)}>{row?.userPriceState || '-'}</StatusBadge></td>
-			<td data-label="돌파 시간">{formatDateTime(row?.breakoutAt || row?.confirmedBreakAt || getUpdatedAt(row))}</td>
+			<td data-label="돌파·근접 상태"><StatusBadge tone={statusTone(srDisplayState(row))}>{srDisplayState(row)}</StatusBadge></td>
+			<td data-label="돌파 발생 시간">{breakoutTime(row)}</td>
 		</tr>
 	);
 }
@@ -1249,6 +1557,32 @@ function RealtimeDataPage() {
 
 	useEffect(() => {
 		let cancelled = false;
+		const streamParams = itemType === 'fear_greed' ? { timeframe } : itemType === 'support_resistance' ? { timeframe, logic: 'vp' } : {};
+		const applyStreamEvent = (event) => {
+			if (cancelled || event?.itemType !== itemType) return;
+			if (event.type === 'snapshot' && Array.isArray(event.data)) {
+				setState({
+					status: event.data.length ? 'READY' : 'NO_REAL_DATA',
+					rows: event.data,
+					raw: event,
+					error: ''
+				});
+				return;
+			}
+			if (event.type === 'patch' && event.state?.symbol) {
+				setState((prev) => {
+					const existingRows = prev.rows || [];
+					const index = existingRows.findIndex((row) => row.symbol === event.state.symbol);
+					const rows = index >= 0 ? existingRows.map((row, rowIndex) => (rowIndex === index ? event.state : row)) : [event.state, ...existingRows];
+					return {
+						...prev,
+						status: rows.length ? 'READY' : prev.status,
+						rows,
+						raw: { ...(prev.raw || {}), updatedAt: event.updatedAt || prev.raw?.updatedAt }
+					};
+				});
+			}
+		};
 		const load = async () => {
 			setState((prev) => ({ ...prev, status: 'LOADING', error: '' }));
 			const request =
@@ -1267,8 +1601,12 @@ function RealtimeDataPage() {
 			});
 		};
 		load();
+		const stopStream = publicRealtime.createItemStream(itemType, streamParams, {
+			onEvent: applyStreamEvent
+		});
 		return () => {
 			cancelled = true;
+			stopStream?.();
 		};
 	}, [itemType, timeframe]);
 
@@ -1278,6 +1616,7 @@ function RealtimeDataPage() {
 		const search = normalizeSearch(symbolSearch);
 		const rows = (state.rows || [])
 			.filter(isPublicVisibleRow)
+			.filter((row) => isCompletePublicRow(row, itemType))
 			.filter((row) => (itemType === 'ny_box' ? matchesNyBoxFilter(row, nyBoxFilter) : true))
 			.filter((row) => {
 				if (!search) return true;
@@ -1313,7 +1652,7 @@ function RealtimeDataPage() {
 	return (
 		<div className="ring-public-app">
 			<div className="app-shell">
-				<section className="chart-section">
+				<section className="chart-section" id="tradingview-chart">
 					<div className="top-strip">
 						<div className="brand-block">
 							<a className="wordmark-button" href="/realtime-data">QUANTU</a>
@@ -1437,6 +1776,8 @@ function RealtimeDataPage() {
 				detail={detailState.detail}
 				loading={detailState.loading}
 				error={detailState.error}
+				autoTradeEligible={isAutoTradeEligible(selectedRow)}
+				backtestEligible={isBacktestEligible(selectedRow)}
 				onClose={() => {
 					setSelectedRow(null);
 					setDetailState({ loading: false, detail: null, error: '' });

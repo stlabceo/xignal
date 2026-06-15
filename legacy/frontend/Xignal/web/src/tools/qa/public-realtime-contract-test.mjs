@@ -26,6 +26,9 @@ assert.match(client, /\/api\/items\/fear-greed\/snapshot/);
 assert.match(client, /\/api\/items\/fear-greed\/symbol\/\$\{encodeURIComponent\(symbol\)\}/);
 assert.match(client, /\/api\/items\/support-resistance\/snapshot/);
 assert.match(client, /\/api\/items\/support-resistance\/symbol\/\$\{encodeURIComponent\(symbol\)\}/);
+assert.match(client, /createItemStream/);
+assert.match(client, /\/api\/items\/\$\{path\}\/stream/);
+assert.match(client, /EventSource/);
 assert.doesNotMatch(client, /mock|fixture|dummy/i);
 
 assert.match(vite, /\/api\/items/);
@@ -61,6 +64,9 @@ assert.match(page, /detail\?\.backtests/);
 assert.match(page, /nyBoxModal/);
 assert.match(page, /periodStates/);
 assert.match(page, /KOREAN_ASSET_NAMES/);
+assert.match(page, /transliterateUnknownBase/);
+assert.match(page, /letterNames/);
+assert.match(page, /normalizeCanonicalSymbol/);
 assert.match(page, /displayAssetText/);
 assert.match(page, /table-symbol-cell/);
 assert.match(page, /ring-public-app/);
@@ -71,6 +77,18 @@ assert.match(page, /support_resistance:\s*false/);
 assert.match(page, /PUBLIC_ITEM_CONFIGS\.filter\(\(item\) => PUBLIC_LAUNCH_CATEGORY_VISIBILITY\[item\.key\]\)/);
 assert.match(page, /NY_QUIET_CLOSE_ASIA_BOX/);
 assert.match(page, /ATF_VIXFIX/);
+assert.match(page, /isAutoTradeEligible/);
+assert.match(page, /isBacktestEligible/);
+assert.match(page, /isMarketCapTop100Candidate/);
+assert.match(page, /supportProvenance\?\.\s*source\s*===\s*'vp'/);
+assert.match(page, /resistanceProvenance\?\.\s*source\s*===\s*'vp'/);
+assert.match(page, /이 종목은 현재 1차 백테스트 제공 대상이 아닙니다/);
+assert.match(page, /이 종목은 현재 1차 자동매매 제공 대상이 아닙니다/);
+assert.match(page, /트레이딩뷰 차트 사용하기/);
+assert.match(page, /publicRealtime\.createItemStream/);
+assert.match(page, /RangeBar/);
+assert.match(page, /대표 매물대 위치 이동/);
+assert.match(page, /돌파·근접 상태/);
 assert.doesNotMatch(page, /publicBacktest\s*\.\s*options/);
 assert.doesNotMatch(page, /order_intent_queue|GRID_LIVE_ARM|private polling|private write|order_intent_queue\.insert|direct DB/i);
 
@@ -85,12 +103,14 @@ assert.match(pageCss, /\.ring-public-app \.backtest-table/);
 assert.match(pageCss, /\.ring-public-app \.backtest-side-toggle/);
 assert.match(pageCss, /\.ring-public-app \.backtest-bestcase-panel/);
 assert.match(pageCss, /\.ring-public-app \.strategy-placeholder/);
+assert.match(pageCss, /@media \(max-width: 720px\)/);
+assert.match(pageCss, /content: attr\(data-label\)/);
 
 console.log(
 	JSON.stringify(
 		{
 			status: 'PASS',
-			tests: 57,
+			tests: 73,
 			noDummy: true,
 			tradingIsolation: true,
 			ringLevelPublicUxPort: true,
