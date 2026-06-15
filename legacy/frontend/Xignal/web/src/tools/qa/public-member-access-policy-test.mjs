@@ -30,6 +30,7 @@ assert.match(realtimePage, /href="\/take-profit-search"/);
 assert.match(realtimePage, /href="\/login"/);
 assert.match(realtimePage, /LevelModal/);
 assert.match(realtimePage, /TradingViewWidget/);
+assert.match(realtimePage, /support_resistance:\s*false/);
 assert.doesNotMatch(realtimePage, /BotSetupModal/);
 assert.doesNotMatch(realtimePage, /order_intent_queue|GRID_LIVE_ARM|private polling|private write/i);
 
@@ -41,7 +42,7 @@ console.log(
 	JSON.stringify(
 		{
 			status: 'PASS',
-			tests: 18,
+			tests: 19,
 			unauthRealtimeAllowed: true,
 			unauthTakeProfitProtected: true,
 			realtimeModalBacktestPublic: true,

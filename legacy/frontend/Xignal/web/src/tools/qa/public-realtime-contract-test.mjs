@@ -51,6 +51,11 @@ assert.match(page, /LevelModal/);
 assert.match(page, /NyBoxGauge/);
 assert.match(page, /BacktestPanel/);
 assert.match(page, /ring-public-app/);
+assert.match(page, /PUBLIC_LAUNCH_CATEGORY_VISIBILITY/);
+assert.match(page, /ny_box:\s*true/);
+assert.match(page, /fear_greed:\s*true/);
+assert.match(page, /support_resistance:\s*false/);
+assert.match(page, /PUBLIC_ITEM_CONFIGS\.filter\(\(item\) => PUBLIC_LAUNCH_CATEGORY_VISIBILITY\[item\.key\]\)/);
 assert.match(page, /NY_QUIET_CLOSE_ASIA_BOX/);
 assert.match(page, /ATF_VIXFIX/);
 assert.doesNotMatch(page, /order_intent_queue|GRID_LIVE_ARM|private polling|private write|order_intent_queue\.insert|direct DB/i);
@@ -66,10 +71,11 @@ console.log(
 	JSON.stringify(
 		{
 			status: 'PASS',
-			tests: 34,
+			tests: 39,
 			noDummy: true,
 			tradingIsolation: true,
 			ringLevelPublicUxPort: true,
+			latestRingLevelPublicLaunch: 'ny_box,fear_greed',
 			route: '/realtime-data'
 		},
 		null,

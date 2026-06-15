@@ -3,7 +3,13 @@ import { publicBacktest } from '../../services/publicBacktest';
 import { publicRealtime } from '../../services/publicRealtime';
 import './realtimeDataPage.css';
 
-const PUBLIC_ITEM_TYPES = [
+const PUBLIC_LAUNCH_CATEGORY_VISIBILITY = {
+	ny_box: true,
+	fear_greed: true,
+	support_resistance: false
+};
+
+const PUBLIC_ITEM_CONFIGS = [
 	{
 		key: 'ny_box',
 		label: '뉴욕박스',
@@ -29,6 +35,8 @@ const PUBLIC_ITEM_TYPES = [
 		help: ['지지선과 저항선은 공개 가격·거래량 기반 구간으로 계산됩니다.', '상세 모달에서 현재가 위치와 다음 구간을 한눈에 볼 수 있습니다.', '이 화면은 공개 데이터 확인용이며 주문이나 포지션을 만들지 않습니다.']
 	}
 ];
+
+const PUBLIC_ITEM_TYPES = PUBLIC_ITEM_CONFIGS.filter((item) => PUBLIC_LAUNCH_CATEGORY_VISIBILITY[item.key]);
 
 const TIMEFRAMES = [
 	{ value: 'short', label: '단기' },
