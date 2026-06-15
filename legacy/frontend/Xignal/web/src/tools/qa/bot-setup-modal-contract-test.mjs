@@ -46,7 +46,12 @@ check(dashboardSource.includes('{row.strategyName}</span>'), 'dashboard bot name
 check(dashboardSource.includes('<p className="text-sm font-semibold text-[#2563EB]">{bot.strategyName}</p>'), 'detail modal header renders strategy name');
 check(!dashboardSource.includes('Technical category'), 'detail modal does not reintroduce Algorithm/Grid category as a displayed setting');
 check(!dashboardSource.includes("import { filterTakeProfitRows, normalizeQbtStats, qbtStatsFixture }"), 'detail modal does not use local QBT fixture as production backtest');
-check(dashboardSource.includes('trading.getBacktestStats'), 'detail modal uses existing backtest API');
+check(modalSource.includes("import { publicBacktest } from '../../services/publicBacktest'"), 'setup modal reads Ring Levels public backtest API');
+check(searchSource.includes("import { publicBacktest } from '../../services/publicBacktest'"), 'TP search reads Ring Levels public backtest API');
+check(dashboardSource.includes('publicBacktest.detail'), 'detail modal uses Ring Levels public detail API');
+check(!dashboardSource.includes('trading.getBacktestStats'), 'detail modal no longer uses admin backtest stats API');
+check(!modalSource.includes('qbtStatsFixture'), 'setup modal does not use local QBT fixture as production backtest');
+check(!searchSource.includes('qbtStatsFixture'), 'TP search does not use local QBT fixture as production backtest');
 check(dashboardSource.includes('normalizeBacktestStrategyKey'), 'detail modal separates displayed strategy name from backtest query key');
 check(dashboardSource.includes('TRACK_RECORD_PERIODS'), 'detail modal has track record period filters');
 check(dashboardSource.includes('조건 수정 API 연결 필요'), 'detail modal disables edit until safe API wiring');

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { trading } from '../../services/trading';
+import { publicBacktest } from '../../services/publicBacktest';
 import { useAuthStore } from '../../store/authState';
 import BotSetupModal from './BotSetupModal';
 
@@ -144,8 +145,8 @@ const STRATEGY_NAME_MAP = {
 };
 
 const BACKTEST_STRATEGY_KEY_MAP = {
-	ATF_VIXFIX: 'ATF+VIXFIX',
-	'ATF+VIXFIX': 'ATF+VIXFIX',
+	ATF_VIXFIX: 'ATF_VIXFIX',
+	'ATF+VIXFIX': 'ATF_VIXFIX',
 	NYBOX: 'NY_QUIET_CLOSE_ASIA_BOX',
 	NY_QUIET_CLOSE_ASIA_BOX: 'NY_QUIET_CLOSE_ASIA_BOX',
 	SQZ_GRID: 'NY_QUIET_CLOSE_ASIA_BOX',
@@ -446,7 +447,7 @@ const normalizeSignalTypeForBacktest = (direction) => {
 };
 
 const normalizeBacktestStrategyKey = (strategyKey, strategyCategory) => {
-	const fallback = strategyCategory === 'GRID' ? 'NY_QUIET_CLOSE_ASIA_BOX' : 'ATF+VIXFIX';
+	const fallback = strategyCategory === 'GRID' ? 'NY_QUIET_CLOSE_ASIA_BOX' : 'ATF_VIXFIX';
 	const rawKey = String(strategyKey || '').trim();
 	if (!rawKey) return fallback;
 	const upperKey = rawKey.toUpperCase();
@@ -462,8 +463,9 @@ const getBotBacktestQuery = (bot) => {
 	const symbol = normalizeSymbol(firstValue(bot.raw.symbol, bot.raw.r_symbol, bot.symbol)).replace('.P', '');
 	const bunbong = firstValue(bot.raw.bunbong, bot.raw.timeframe, bot.raw.interval);
 	const signalType = bot.strategyCategory === 'GRID' ? 'BOTH' : normalizeSignalTypeForBacktest(bot.direction);
+	const tpPct = firstValue(bot.raw.profit, bot.raw.t_profit, bot.raw.longTakeProfitPrice, bot.raw.shortTakeProfitPrice);
 	if (!strategyKey || !symbol || !bunbong || !signalType) return null;
-	return { strategyKey, symbol, bunbong, signalType };
+	return { strategyId: strategyKey, symbol, timeframe: bunbong, direction: signalType, tpPct };
 };
 
 const formatSplitTakeProfit = (row = {}) => {
@@ -533,11 +535,11 @@ const BotDetailModal = ({ bot, trackRows, onClose }) => {
 
 		let canceled = false;
 		setBacktestLoading(true);
-		trading.getBacktestStats(backtestQuery, (res) => {
+		publicBacktest.detail(backtestQuery).then((res) => {
 			if (canceled) return;
 			const items = Array.isArray(res?.items) ? res.items : [];
 			setBacktestRows(items);
-			setBacktestLatestGeneratedAt(res?.latestGeneratedAt || null);
+			setBacktestLatestGeneratedAt(res?.meta?.latestReceivedAt || items[0]?.receivedAt || null);
 			setBacktestLoading(false);
 		});
 		return () => {
@@ -639,7 +641,7 @@ const BotDetailModal = ({ bot, trackRows, onClose }) => {
 				{tab === 'backtest' ? (
 					<div className="mt-5">
 						<div className="mb-4 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4 text-sm text-[#64748B]">
-							<p>조회 조건: {backtestQuery ? `${backtestQuery.strategyKey} / ${backtestQuery.symbol} / ${backtestQuery.bunbong} / ${backtestQuery.signalType}` : '조건 부족'}</p>
+							<p>조회 조건: {backtestQuery ? `${backtestQuery.strategyId} / ${backtestQuery.symbol} / ${backtestQuery.timeframe} / ${backtestQuery.direction}` : '조건 부족'}</p>
 							<p className="mt-1">최근 갱신: {backtestLatestGeneratedAt ? formatDateTime(backtestLatestGeneratedAt) : '-'}</p>
 						</div>
 						{backtestLoading ? (
@@ -649,9 +651,9 @@ const BotDetailModal = ({ bot, trackRows, onClose }) => {
 						) : (
 							<div className="grid gap-3 sm:grid-cols-2">
 								{backtestRows.map((row) => (
-									<div key={`${row.strategyKey}-${row.symbol}-${row.signalType}-${row.tpValue}`} className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4">
-										<p className="text-sm font-bold text-[#0F172A]">{row.strategyKey} · {row.signalType}</p>
-										<p className="mt-2 text-sm text-[#64748B]">TP {formatPlainPercent(row.tpValue)} · 승률 {formatPlainPercent(row.hitRate)} · 수익률 {formatPlainPercent(row.pnlValue)}</p>
+									<div key={row.id || `${row.strategyId}-${row.symbol}-${row.direction}-${row.period}-${row.tpPct}`} className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4">
+										<p className="text-sm font-bold text-[#0F172A]">{row.period} · {row.directionLabel}</p>
+										<p className="mt-2 text-sm text-[#64748B]">TP {formatPlainPercent(row.tpPct)} · 승률 {formatPlainPercent(row.winratePct)} · 수익률 {formatPlainPercent(row.netPnlPct)}</p>
 									</div>
 								))}
 							</div>

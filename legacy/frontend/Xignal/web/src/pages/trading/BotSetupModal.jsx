@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { trading } from '../../services/trading';
-import { filterTakeProfitRows, normalizeQbtStats, qbtStatsFixture } from '../../data/takeProfitSearchData';
+import { publicBacktest } from '../../services/publicBacktest';
 import {
 	buildCatalogItems,
 	formatCatalogStrategyLabel,
@@ -179,6 +179,9 @@ const BotSetupModal = ({ isOpen, onClose, prefill = null, source = 'dashboard' }
 	const [catalogByCategory, setCatalogByCategory] = useState({ algorithm: [], grid: [] });
 	const [form, setForm] = useState(() => buildInitialForm(prefill || {}));
 	const [message, setMessage] = useState('');
+	const [backtestRows, setBacktestRows] = useState([]);
+	const [backtestLoading, setBacktestLoading] = useState(false);
+	const [backtestDataStatus, setBacktestDataStatus] = useState('READY');
 
 	useEffect(() => {
 		if (!isOpen) return;
@@ -220,19 +223,44 @@ const BotSetupModal = ({ isOpen, onClose, prefill = null, source = 'dashboard' }
 	const isGrid = form.category === 'grid';
 	const orderAmount = toNumber(form.margin) * toNumber(form.leverage);
 	const orderAmountLabel = `${formatCompactNumber(form.margin)}$ X ${formatCompactNumber(form.leverage)} = ${formatNumber(orderAmount)} USDT`;
-	const backtestRows = useMemo(() => {
+
+	useEffect(() => {
+		if (!isOpen) return;
+		let canceled = false;
 		const strategyId = isGrid ? 'NY_QUIET_CLOSE_ASIA_BOX' : 'ATF_VIXFIX';
-		return filterTakeProfitRows(normalizeQbtStats(qbtStatsFixture), {
-			symbol: form.symbol,
-			strategyId,
-			period: 'all',
-			minWinrate: '',
-			minReturn: ''
-		})
-			.filter((row) => (isGrid ? row.direction === 'BOTH' : row.direction === form.direction))
-			.filter((row) => !form.profit || Number(row.tpPct) === Number(form.profit))
-			.slice(0, 3);
-	}, [form.direction, form.profit, form.symbol, isGrid]);
+		const direction = isGrid ? 'BOTH' : form.direction;
+		const request = form.profit
+			? publicBacktest.detail({
+					strategyId,
+					symbol: form.symbol,
+					timeframe: form.bunbong,
+					direction,
+					tpPct: form.profit
+				})
+			: publicBacktest.options({
+					strategyId,
+					symbol: form.symbol,
+					timeframe: form.bunbong,
+					direction,
+					period: 'all',
+					limit: 10
+				});
+
+		setBacktestLoading(true);
+		request.then((res) => {
+			if (canceled) return;
+			const rows = (res.items || [])
+				.filter((row) => (isGrid ? row.direction === 'BOTH' : row.direction === direction))
+				.filter((row) => !form.profit || Number(row.tpPct) === Number(form.profit))
+				.slice(0, 3);
+			setBacktestRows(rows);
+			setBacktestDataStatus(res.dataStatus || 'READY');
+			setBacktestLoading(false);
+		});
+		return () => {
+			canceled = true;
+		};
+	}, [form.bunbong, form.direction, form.profit, form.symbol, isGrid, isOpen]);
 
 	if (!isOpen) return null;
 
@@ -396,7 +424,11 @@ const BotSetupModal = ({ isOpen, onClose, prefill = null, source = 'dashboard' }
 					<h3 className="text-base font-bold text-[#0F172A]">백테스트 참고</h3>
 					<p className="mt-1 text-sm text-[#64748B]">QBT_STATS_V1 public backtest dataset 기준 참고값입니다. 거래 실행 상태와 섞지 않습니다.</p>
 					<div className="mt-4 grid gap-3 sm:grid-cols-3">
-						{backtestRows.length ? (
+						{backtestLoading ? (
+							<div className="rounded-2xl border border-dashed border-[#CBD5E1] bg-[#F8FAFC] p-5 text-sm text-[#64748B] sm:col-span-3">
+								백테스트 데이터를 불러오는 중입니다.
+							</div>
+						) : backtestRows.length ? (
 							backtestRows.map((row) => (
 								<div key={`${row.strategyId}-${row.symbol}-${row.direction}-${row.period}-${row.tpPct}`} className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4">
 									<p className="text-sm font-bold text-[#0F172A]">{row.period} · TP {formatNumber(row.tpPct)}%</p>
@@ -406,7 +438,7 @@ const BotSetupModal = ({ isOpen, onClose, prefill = null, source = 'dashboard' }
 							))
 						) : (
 							<div className="rounded-2xl border border-dashed border-[#CBD5E1] bg-[#F8FAFC] p-5 text-sm text-[#64748B] sm:col-span-3">
-								동일 조건의 백테스트 데이터가 없습니다.
+								{backtestDataStatus === 'NO_REAL_DATA' ? '아직 수신된 백테스트 데이터가 없습니다.' : '동일 조건의 백테스트 데이터가 없습니다.'}
 							</div>
 						)}
 					</div>
