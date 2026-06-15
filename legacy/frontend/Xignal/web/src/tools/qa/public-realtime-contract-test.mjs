@@ -92,10 +92,17 @@ assert.match(page, /normalizeBacktestStrategyType/);
 assert.match(page, /isRealBacktestCell/);
 assert.match(page, /displayRealPeriods/);
 assert.match(page, /displayRealGridTpList/);
+assert.match(page, /const calculationWindowLabel = itemType === 'ny_box' \? null : windowLabel/);
+assert.match(page, /itemType === 'ny_box' \? null : \(/);
 
 assert.doesNotMatch(page, /NyBoxGauge/);
 assert.doesNotMatch(page, /BacktestLiveSummary/);
 assert.doesNotMatch(page, /QBT_STATS_V1 실데이터/);
+assert.doesNotMatch(page, /nyBoxBreakoutTimeRow/);
+assert.doesNotMatch(page, /nyBoxExplicitBreakoutTime/);
+assert.doesNotMatch(page, /돌파 확인 시간/);
+assert.doesNotMatch(page, /행을 클릭하면/);
+assert.doesNotMatch(page, /disabled=\{itemType === 'ny_box'\}/);
 assert.doesNotMatch(page, /박스상단\/박스하단은 최근 완료된 뉴욕 세션 후반부 가격 범위입니다/);
 assert.doesNotMatch(page, /상세 모달은 RingLevel detail API의 뉴욕 박스 섹션과 백테스트를 그대로 표시합니다/);
 assert.doesNotMatch(page, /주문이나 PID를 만들지 않고 공개 데이터와 백테스트 참고 정보만 보여줍니다/);
@@ -133,13 +140,15 @@ console.log(
 	JSON.stringify(
 		{
 			status: 'PASS',
-			tests: 101,
+			tests: 106,
 			noDummy: true,
 			tradingIsolation: true,
 			ringLevelPublicUxPort: true,
 			fearGreedResolvedDisplay: true,
 			nyBoxLocationDiagramRemoved: true,
 			nyBoxBacktestSummaryCardsRemoved: true,
+			nyBoxFakeBreakoutTimeRemoved: true,
+			nyBoxTimeframeControlHidden: true,
 			latestRingLevelPublicLaunch: 'ny_box,fear_greed',
 			detailBacktestSource: 'ring-level detail.backtests',
 			route: '/realtime-data'

@@ -529,11 +529,6 @@ function nyBoxPosition(row) {
 	return { label, className: 'muted' };
 }
 
-function isNyBoxBreakout(row) {
-	const position = row?.currentBoxPosition;
-	return position === 'ABOVE_BOX' || position === 'BREAK_ABOVE' || position === 'BELOW_BOX' || position === 'BREAK_BELOW';
-}
-
 function nyBoxPositionDisplay(row, modal) {
 	const position = row?.currentBoxPosition;
 	const apiLabel = modal?.currentBoxPositionModalLabel || row?.currentBoxPositionLabel;
@@ -561,29 +556,6 @@ function nyBoxSectionValue(modal, category, label, fallback = '-') {
 	return row?.value ?? fallback;
 }
 
-function nyBoxExplicitBreakoutTime(row = {}) {
-	return (
-		row.breakoutDetectedAt ||
-		row.breakoutAt ||
-		row.confirmedBreakAt ||
-		row.nyBoxBreakoutAt ||
-		row.boxBreakoutAt ||
-		row.boxBreakoutDetectedAt ||
-		null
-	);
-}
-
-function nyBoxBreakoutTimeRow(row, modal) {
-	if (!isNyBoxBreakout(row)) return null;
-	const explicit = nyBoxExplicitBreakoutTime(row);
-	const fallback = row?.updatedAt || modal?.livePriceUpdatedAtKst || modal?.nyDataCalculatedAtKst || null;
-	return {
-		label: explicit ? '돌파 발생 시간' : '돌파 확인 시간',
-		value: formatDateTime(explicit || fallback),
-		tone: 'muted'
-	};
-}
-
 function DeltaValue({ value, delta, summary }) {
 	const tone = percentTone(delta);
 	const showDelta = Number.isFinite(Number(delta)) || summary;
@@ -605,9 +577,6 @@ function buildNyBoxOverviewSections(state, modal) {
 			tone: position.tone
 		}
 	];
-	const breakoutRow = nyBoxBreakoutTimeRow(state, modal);
-	if (breakoutRow) currentRows.push(breakoutRow);
-
 	return [
 		{
 			title: '현재가',
@@ -1811,7 +1780,7 @@ function RealtimeDataPage() {
 	const chartSymbol = chartSymbolFor(selectedForChart);
 	const updatedAt = state.raw?.updatedAt || state.raw?.meta?.livePriceUpdatedAtKst || state.raw?.nyBoxCacheMeta?.calculatedAtKst || state.raw?.nyBoxCoverage?.calculatedAtKst;
 	const activeSession = state.raw?.meta?.currentSessionLabel || '-';
-	const calculationWindowLabel = windowLabel(filteredRows, itemType, state.raw);
+	const calculationWindowLabel = itemType === 'ny_box' ? null : windowLabel(filteredRows, itemType, state.raw);
 
 	const openDetail = async (row) => {
 		setSelectedRow(row);
@@ -1885,23 +1854,24 @@ function RealtimeDataPage() {
 						<div className="data-toolbar">
 							<div>
 								<p className="table-title">전체 {config.label} 표</p>
-								<span>행을 클릭하면 RingLevel detail API 기반 상세 모달을 엽니다.</span>
 							</div>
 							<div className="toolbar-controls">
 								<label className="nybox-search">
 									<span>Symbol</span>
 									<input value={symbolSearch} onChange={(event) => setSymbolSearch(event.target.value)} placeholder="BTCUSDT" />
 								</label>
-								<label className="nybox-filter-grid">
-									<span>Timeframe</span>
-									<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)} disabled={itemType === 'ny_box'}>
-										{(itemType === 'support_resistance' ? SR_TIMEFRAMES : TIMEFRAMES).map((option) => (
-											<option key={option.value} value={option.value}>
-												{option.label}
-											</option>
-										))}
-									</select>
-								</label>
+								{itemType === 'ny_box' ? null : (
+									<label className="nybox-filter-grid">
+										<span>Timeframe</span>
+										<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)}>
+											{(itemType === 'support_resistance' ? SR_TIMEFRAMES : TIMEFRAMES).map((option) => (
+												<option key={option.value} value={option.value}>
+													{option.label}
+												</option>
+											))}
+										</select>
+									</label>
+								)}
 							</div>
 						</div>
 
@@ -1919,9 +1889,11 @@ function RealtimeDataPage() {
 								<span>
 									Session <strong>{activeSession}</strong>
 								</span>
-								<span>
-									Window <strong>{calculationWindowLabel}</strong>
-								</span>
+								{calculationWindowLabel ? (
+									<span>
+										Window <strong>{calculationWindowLabel}</strong>
+									</span>
+								) : null}
 							</div>
 							{itemType === 'ny_box' ? (
 								<div className="filter-chip-row">
