@@ -4111,6 +4111,7 @@ const loadGridReservationOwnedExitExecutionsFromExchange = async ({
                     clientOrderId: String(targetOrder?.clientOrderId || reservation.clientOrderId || '').trim(),
                     orderId: Number(targetOrder?.orderId || 0) || null,
                     tradeId: tradeIds.length === 1 ? tradeIds[0] : null,
+                    reservationKind: String(reservation?.reservationKind || '').trim().toUpperCase() || null,
                     qty,
                     fee,
                     realizedPnl,
@@ -5566,6 +5567,12 @@ exports.recoverGridExitFillFromExchange = async ({
     return {
         ...primaryExecution,
         recoveredReservationClientOrderIds: Array.from(matchedReservationClientOrderIds),
+        recoveredReservationKinds: Array.from(new Set(
+            reservationCandidates
+                .filter((reservation) => matchedReservationClientOrderIds.has(String(reservation?.clientOrderId || '').trim()))
+                .map((reservation) => String(reservation?.reservationKind || '').trim().toUpperCase())
+                .filter(Boolean)
+        )),
         appliedFillCount,
         duplicateFillCount,
         evidenceTerminalizedReservationCount,

@@ -35,7 +35,59 @@ const GRID_SL_REASON = Object.freeze({
   OPPOSITE_CLOSE_REQUIRED: "GRID_SL_OPPOSITE_CLOSE_REQUIRED",
 });
 
+const GRID_EXIT_RECOVERY_KIND = Object.freeze({
+  TAKE_PROFIT: "GRID_TP",
+  STOP: "GRID_STOP",
+  MANUAL: "GRID_MANUAL_OFF",
+  GRID_EXIT: "GRID_EXIT_MARKET_CLOSE",
+  UNKNOWN: "UNKNOWN",
+});
+
 const getLegCode = (leg) => String(leg || "").toUpperCase() === "SHORT" ? "S" : "L";
+
+const classifyGridExitRecoveryKind = (source = {}) => {
+  const reservationKind = String(source?.reservationKind || source?.kind || "").trim().toUpperCase();
+  if (reservationKind === GRID_EXIT_RECOVERY_KIND.TAKE_PROFIT) {
+    return GRID_EXIT_RECOVERY_KIND.TAKE_PROFIT;
+  }
+  if (reservationKind === GRID_EXIT_RECOVERY_KIND.STOP) {
+    return GRID_EXIT_RECOVERY_KIND.STOP;
+  }
+  if (reservationKind === GRID_EXIT_RECOVERY_KIND.MANUAL) {
+    return GRID_EXIT_RECOVERY_KIND.MANUAL;
+  }
+  if (reservationKind === GRID_EXIT_RECOVERY_KIND.GRID_EXIT) {
+    return GRID_EXIT_RECOVERY_KIND.GRID_EXIT;
+  }
+
+  const clientOrderIds = []
+    .concat(source?.clientOrderId || [])
+    .concat(source?.sourceClientOrderId || [])
+    .concat(source?.takeProfitClientOrderId || [])
+    .concat(source?.recoveredReservationClientOrderIds || [])
+    .filter(Boolean)
+    .map((value) => String(value).trim().toUpperCase());
+
+  if (clientOrderIds.some((value) => value.startsWith("GTP_"))) {
+    return GRID_EXIT_RECOVERY_KIND.TAKE_PROFIT;
+  }
+  if (clientOrderIds.some((value) => value.startsWith("GSTOP_"))) {
+    return GRID_EXIT_RECOVERY_KIND.STOP;
+  }
+  if (clientOrderIds.some((value) => value.startsWith("GMANUAL_"))) {
+    return GRID_EXIT_RECOVERY_KIND.MANUAL;
+  }
+  if (clientOrderIds.some((value) => value.startsWith("GEXIT_"))) {
+    return GRID_EXIT_RECOVERY_KIND.GRID_EXIT;
+  }
+  return GRID_EXIT_RECOVERY_KIND.UNKNOWN;
+};
+
+const isRecoveredTakeProfit = (source = {}) =>
+  classifyGridExitRecoveryKind(source) === GRID_EXIT_RECOVERY_KIND.TAKE_PROFIT;
+
+const isRecoveredStop = (source = {}) =>
+  classifyGridExitRecoveryKind(source) === GRID_EXIT_RECOVERY_KIND.STOP;
 
 const buildGridReentryIntentSeed = (row = {}, leg, source = {}) => [
   row.uid || "",
@@ -73,6 +125,7 @@ const isSlCriticalState = (row = {}) =>
   Object.values(GRID_SL_STATE).includes(String(row?.regimeStatus || "").trim().toUpperCase());
 
 module.exports = {
+  GRID_EXIT_RECOVERY_KIND,
   GRID_REENTRY_REASON,
   GRID_REENTRY_STATE,
   GRID_SL_REASON,
@@ -80,7 +133,10 @@ module.exports = {
   buildGridReentryClientOrderId,
   buildGridReentryIntentSeed,
   buildGridReentryIntentSuffix,
+  classifyGridExitRecoveryKind,
   getReentryPriceDecision,
+  isRecoveredStop,
+  isRecoveredTakeProfit,
   isReentryCriticalState,
   isSlCriticalState,
 };

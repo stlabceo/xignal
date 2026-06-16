@@ -1185,6 +1185,82 @@ const loadLiveGridLegProtectionState = async (row, leg) => {
   };
 };
 
+const buildRecoveredTakeProfitReentryData = (recoveredExecution = {}) => {
+  const fills = Array.isArray(recoveredExecution?.fills) ? recoveredExecution.fills : [];
+  const firstFill = fills[0] || {};
+  return {
+    c: recoveredExecution.clientOrderId || firstFill.clientOrderId || null,
+    i: recoveredExecution.orderId || firstFill.orderId || null,
+    t: recoveredExecution.tradeId || firstFill.tradeId || null,
+    T: recoveredExecution.tradeTime || firstFill.tradeTime || null,
+    l: recoveredExecution.qty || firstFill.qty || null,
+    z: recoveredExecution.qty || firstFill.qty || null,
+    L: recoveredExecution.price || firstFill.price || null,
+    ap: recoveredExecution.price || firstFill.price || null,
+    p: recoveredExecution.price || firstFill.price || null,
+    n: recoveredExecution.fee || firstFill.fee || null,
+    rp: recoveredExecution.realizedPnl || firstFill.realizedPnl || null,
+    X: "FILLED",
+  };
+};
+
+const enqueueRecoveredTakeProfitReentryIfAllowed = async ({
+  row,
+  leg,
+  recoveredExecution,
+  logScope,
+} = {}) => {
+  if (!row?.id || !leg || !recoveredExecution) {
+    return { handled: false, reason: "RECOVERED_TP_REENTRY_INVALID_INPUT" };
+  }
+
+  const recoveryKind = gridReentrySlPolicy.classifyGridExitRecoveryKind(recoveredExecution);
+  const triggerPrice = getGridLegTriggerPrice(row, leg);
+  await appendGridRuntimeLog(
+    row,
+    logScope || "gridRecoveredTpReentry",
+    "RECOVERED_EXIT_REENTRY_DECISION",
+    `leg:${leg}, recoveryKind:${recoveryKind}, clientOrderId:${recoveredExecution.clientOrderId || "NONE"}, trigger:${triggerPrice}`,
+    leg
+  );
+
+  if (recoveryKind !== gridReentrySlPolicy.GRID_EXIT_RECOVERY_KIND.TAKE_PROFIT) {
+    return { handled: false, reason: `RECOVERED_EXIT_REENTRY_SKIPPED_${recoveryKind}` };
+  }
+
+  const refreshed = (await loadGridItem("LIVE", row.id)) || row;
+  if (!canArmEntriesForRow(refreshed)) {
+    await appendGridRuntimeLog(
+      refreshed,
+      logScope || "gridRecoveredTpReentry",
+      "RECOVERED_TP_REENTRY_SKIPPED",
+      `leg:${leg}, reason:REGIME_NOT_ARMABLE, regimeStatus:${refreshed.regimeStatus || "NONE"}, regimeEndReason:${refreshed.regimeEndReason || "NONE"}`,
+      leg
+    );
+    return { handled: false, reason: "RECOVERED_TP_REENTRY_SKIPPED_REGIME_NOT_ARMABLE" };
+  }
+
+  const reentry = await enqueueLiveReentryIntentAfterTakeProfit(
+    refreshed,
+    {
+      uid: refreshed.uid,
+      pid: refreshed.id,
+      leg,
+      type: "GTP",
+      clientOrderId: recoveredExecution.clientOrderId,
+    },
+    buildRecoveredTakeProfitReentryData(recoveredExecution)
+  );
+  await appendGridRuntimeLog(
+    refreshed,
+    logScope || "gridRecoveredTpReentry",
+    reentry.pending ? "RECOVERED_TP_REENTRY_INTENT_PENDING" : reentry.reason,
+    `leg:${leg}, recoveredTp:${recoveredExecution.clientOrderId || "NONE"}, reentry:${reentry.clientOrderId || "NONE"}, trigger:${triggerPrice}, intent:${reentry.intentSummary?.intent?.intentKey || "NONE"}`,
+    leg
+  );
+  return { handled: Boolean(reentry.pending), reason: reentry.reason, reentry };
+};
+
 const convergeLiveGridLegToExchangeFlat = async (
   row,
   leg,
@@ -1349,6 +1425,28 @@ const convergeLiveGridLegToExchangeFlat = async (
 
   if (!shouldFlatten) {
     return false;
+  }
+
+  if (recoveredExecution) {
+    const reentryResult = await enqueueRecoveredTakeProfitReentryIfAllowed({
+      row: current,
+      leg,
+      recoveredExecution,
+      logScope,
+    });
+    if (reentryResult.handled) {
+      logGridRuntimeTrace("GRID_RECOVERED_TP_REENTRY_INTENT_PENDING", {
+        uid: current.uid,
+        pid: current.id,
+        symbol: current.symbol,
+        positionSide: leg,
+        recoveredClientOrderId: recoveredExecution.clientOrderId || null,
+        recoveredOrderId: recoveredExecution.orderId || null,
+        reentryClientOrderId: reentryResult.reentry?.clientOrderId || null,
+        intentKey: reentryResult.reentry?.intentSummary?.intent?.intentKey || null,
+      });
+      return true;
+    }
   }
 
   let correctionResult = null;
