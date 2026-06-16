@@ -10,6 +10,7 @@ const orderIntentQueue = require("../../order-intent-queue");
 
 const repoRoot = path.resolve(__dirname, "../../..");
 const gridEngineSource = fs.readFileSync(path.resolve(repoRoot, "backend/grid-engine.js"), "utf8");
+const coinSource = fs.readFileSync(path.resolve(repoRoot, "backend/coin.js"), "utf8");
 
 let tests = 0;
 const check = (name, fn) => {
@@ -70,20 +71,44 @@ check("NY_BOX_GRID_* ARM accepts side trigger payload", () => {
   const result = gridRuntime.validateGridWebhookPayload({
     eventType: "GRID_ARM",
     strategySignal: "NY_BOX_GRID_35_65",
-    symbol: "BTCUSDT",
+    symbol: "HBARUSDT.P",
     timeframe: "15",
-    supportPrice: 100,
-    resistancePrice: 110,
-    triggerPrice: 105,
-    longTriggerPrice: 103.5,
-    shortTriggerPrice: 106.5,
+    supportPrice: 0.082,
+    resistancePrice: 0.084,
+    triggerPrice: 0.083,
+    longTriggerPrice: 0.0827,
+    shortTriggerPrice: 0.0833,
     triggerProfile: "35_65",
-    gridRegimeKey: "GRIDREGIME|v1|NY_BOX_GRID_35_65|BTCUSDT|15MIN|100|110|105|2026-06-15T10:00:00",
+    gridRegimeKey: "GRIDREGIME|v1|NY_BOX_GRID_35_65|HBARUSDT.P|15MIN|0.082|0.084|0.083|2026-06-15T10:00:00",
     signalTime: "2026-06-15T10:00:00",
   }, { env: { GRID_EXIT_CONTRACT_MODE: "SHADOW" } });
   assert.strictEqual(result.ok, true);
-  assert.strictEqual(result.payload.longTriggerPrice, 103.5);
-  assert.strictEqual(result.payload.shortTriggerPrice, 106.5);
+  assert.strictEqual(result.payload.symbol, "HBARUSDT.P");
+  assert.strictEqual(result.payload.longTriggerPrice, 0.0827);
+  assert.strictEqual(result.payload.shortTriggerPrice, 0.0833);
+  assert.strictEqual(result.payload.canonicalGridRegimeKey, "GRIDREGIME|v1|NY_BOX_GRID_35_65|HBARUSDT.P|15MIN|0.082|0.084|0.083|2026-06-15T10:00:00");
+});
+
+check("NY_BOX_GRID_50_50 HBARUSDT.P ARM preserves equal side triggers", () => {
+  const result = gridRuntime.validateGridWebhookPayload({
+    eventType: "GRID_ARM",
+    strategySignal: "NY_BOX_GRID_50_50",
+    symbol: "HBARUSDT.P",
+    timeframe: "15",
+    supportPrice: 0.082,
+    resistancePrice: 0.084,
+    triggerPrice: 0.083,
+    longTriggerPrice: 0.083,
+    shortTriggerPrice: 0.083,
+    triggerProfile: "50_50",
+    gridRegimeKey: "GRIDREGIME|v1|NY_BOX_GRID_50_50|HBARUSDT.P|15MIN|0.082|0.084|0.083|2026-06-15T10:00:00",
+    signalTime: "2026-06-15T10:00:00",
+  }, { env: { GRID_EXIT_CONTRACT_MODE: "SHADOW" } });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.payload.symbol, "HBARUSDT.P");
+  assert.strictEqual(result.payload.longTriggerPrice, 0.083);
+  assert.strictEqual(result.payload.shortTriggerPrice, 0.083);
+  assert.strictEqual(result.payload.triggerProfile, "50_50");
 });
 
 check("legacy non-NY_BOX_GRID ARM still falls back to triggerPrice", () => {
@@ -113,30 +138,32 @@ check("GRID_ARM queue payload hash includes side trigger contract", () => {
   const targetItem = {
     uid: 156,
     pid: 204,
-    symbol: "BTCUSDT",
+    symbol: "HBARUSDT.P",
     bunbong: "15MIN",
   };
   const basePayload = {
     strategySignal: "NY_BOX_GRID_35_65",
-    symbol: "BTCUSDT",
+    symbol: "HBARUSDT.P",
     bunbong: "15MIN",
     signalTime: "2026-06-15T10:00:00",
-    supportPrice: 100,
-    resistancePrice: 110,
-    triggerPrice: 105,
-    longTriggerPrice: 103.5,
-    shortTriggerPrice: 106.5,
+    supportPrice: 0.082,
+    resistancePrice: 0.084,
+    triggerPrice: 0.083,
+    longTriggerPrice: 0.0827,
+    shortTriggerPrice: 0.0833,
     triggerProfile: "35_65",
   };
   const originalHash = orderIntentQueue.buildGridArmIntentPayloadHash({ payload: basePayload, targetItem });
+  const originalKey = orderIntentQueue.buildGridArmIntentKey({ payload: basePayload, targetItem });
   const changedLongHash = orderIntentQueue.buildGridArmIntentPayloadHash({
-    payload: { ...basePayload, longTriggerPrice: 104 },
+    payload: { ...basePayload, longTriggerPrice: 0.0828 },
     targetItem,
   });
   const changedShortHash = orderIntentQueue.buildGridArmIntentPayloadHash({
-    payload: { ...basePayload, shortTriggerPrice: 107 },
+    payload: { ...basePayload, shortTriggerPrice: 0.0834 },
     targetItem,
   });
+  assert.ok(originalKey.includes("HBARUSDT.P"));
   assert.notStrictEqual(originalHash, changedLongHash);
   assert.notStrictEqual(originalHash, changedShortHash);
 });
@@ -171,6 +198,40 @@ check("GRID_REENTRY hash uses side-selected triggerPrice", () => {
     },
   });
   assert.notStrictEqual(longHash, shortHash);
+});
+
+check("GRID_EXIT parent intent preserves HBARUSDT.P scope symbol", () => {
+  const normalized = orderIntentQueue.normalizeGridExitParentIntentPayload({
+    payload: {
+      eventType: "GRID_EXIT",
+      strategySignal: "NY_BOX_GRID_35_65",
+      symbol: "HBARUSDT.P",
+      timeframe: "15MIN",
+      exitReason: "BOX_TOUCH",
+      touchedBoundary: "SUPPORT",
+      exitPrice: 0.082,
+    },
+    targetItem: {
+      uid: 156,
+      pid: 204,
+      symbol: "HBARUSDT.P",
+      strategySignal: "NY_BOX_GRID_35_65",
+      timeframe: "15MIN",
+    },
+  });
+  const intentKey = orderIntentQueue.buildGridExitParentIntentKey({
+    payload: normalized.gridPayload,
+    targetItem: normalized.targetItem,
+  });
+  assert.strictEqual(normalized.symbol, "HBARUSDT.P");
+  assert.ok(intentKey.includes("HBARUSDT.P"));
+});
+
+check("Binance adapter converts perp suffix only at API boundary", () => {
+  assert.ok(coinSource.includes("const normalizeBinanceFuturesSymbol"));
+  assert.ok(coinSource.includes("futuresOrder(type, side, exchangeSymbol"));
+  assert.ok(coinSource.includes("futuresCancel(exchangeSymbol"));
+  assert.ok(coinSource.includes("exchangeSymbol: params?.symbol ? requestParams.symbol : null"));
 });
 
 check("static test performs no DB mutation or Binance write", () => {

@@ -2615,8 +2615,7 @@ const normalizeGridArmSymbol = (value) =>
   String(value || "")
     .trim()
     .toUpperCase()
-    .replace(/^[A-Z0-9_]+:/, "")
-    .replace(/\.P$/i, "");
+    .replace(/^[A-Z0-9_]+:/, "");
 
 const pickFirstNonEmpty = (...values) => {
   for (const value of values) {

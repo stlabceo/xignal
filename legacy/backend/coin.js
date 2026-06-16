@@ -132,7 +132,16 @@ const isQaReplayMockBinanceClient = (uid) => Boolean(binance?.[uid]?.__qaMockBin
 const normalizeQaScopedGridSymbol = (value = '') => String(value || '')
     .trim()
     .toUpperCase()
+    .replace(/^[A-Z0-9_]+:/, '');
+const normalizeBinanceFuturesSymbol = (value = '') => String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/^[A-Z0-9_]+:/, '')
     .replace(/\.P$/i, '');
+const toBinanceFuturesParams = (params = {}) => ({
+    ...params,
+    symbol: params?.symbol ? normalizeBinanceFuturesSymbol(params.symbol) : params?.symbol,
+});
 
 const isTruthyEnv = (value) =>
     ['1', 'true', 'y', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
@@ -383,10 +392,12 @@ const assertBinanceWriteAllowedOrLog = async (context = {}) => {
 };
 
 const submitFuturesOrder = async (context = {}, type, side, symbol, qty, price, options = {}) => {
+    const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
     await assertBinanceWriteAllowedOrLog({
         ...context,
         action: context.action || 'WRITE_CREATE_ORDER',
         symbol,
+        exchangeSymbol,
         side,
         positionSide: options?.positionSide || context.positionSide || null,
         clientOrderId: options?.newClientOrderId || context.clientOrderId || null,
@@ -397,38 +408,44 @@ const submitFuturesOrder = async (context = {}, type, side, symbol, qty, price, 
         {
             ...context,
             symbol,
+            exchangeSymbol,
             side,
             positionSide: options?.positionSide || context.positionSide || null,
             clientOrderId: options?.newClientOrderId || context.clientOrderId || null,
             orderType: type,
             quantity: qty,
         },
-        () => binance[context.uid].futuresOrder(type, side, symbol, qty, price, options)
+        () => binance[context.uid].futuresOrder(type, side, exchangeSymbol, qty, price, options)
     );
 };
 
 const cancelFuturesOrder = async (context = {}, symbol, orderId) => {
+    const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
     await assertBinanceWriteAllowedOrLog({
         ...context,
         action: context.action || 'WRITE_CANCEL_ORDER',
         symbol,
+        exchangeSymbol,
         orderId,
     });
     return await runBinanceWriteWithTimeSync(
         {
             ...context,
             symbol,
+            exchangeSymbol,
             orderId,
         },
-        () => binance[context.uid].futuresCancel(symbol, orderId)
+        () => binance[context.uid].futuresCancel(exchangeSymbol, orderId)
     );
 };
 
 const privateFuturesClientWrite = async (context = {}, endpoint, params = {}, method = 'POST') => {
+    const requestParams = toBinanceFuturesParams(params);
     await assertBinanceWriteAllowedOrLog({
         ...context,
         action: context.action || `PRIVATE_FUTURES_${String(method || 'POST').toUpperCase()}`,
         symbol: params?.symbol || context.symbol || null,
+        exchangeSymbol: params?.symbol ? requestParams.symbol : null,
         clientOrderId: params?.clientAlgoId || params?.newClientOrderId || context.clientOrderId || null,
         orderId: params?.orderId || params?.algoId || context.orderId || null,
     });
@@ -438,10 +455,11 @@ const privateFuturesClientWrite = async (context = {}, endpoint, params = {}, me
             endpoint,
             method,
             symbol: params?.symbol || context.symbol || null,
+            exchangeSymbol: params?.symbol ? requestParams.symbol : null,
             clientOrderId: params?.clientAlgoId || params?.newClientOrderId || context.clientOrderId || null,
             orderId: params?.orderId || params?.algoId || context.orderId || null,
         },
-        () => binance[context.uid].privateFuturesRequest(endpoint, params, method)
+        () => binance[context.uid].privateFuturesRequest(endpoint, requestParams, method)
     );
 };
 
@@ -501,12 +519,13 @@ const ensurePriceSlot = (symbol) => {
 
 const hydratePriceSlotFromBookTicker = async (symbol) => {
     const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+    const exchangeSymbol = normalizeBinanceFuturesSymbol(normalizedSymbol);
     if(!normalizedSymbol){
         return dt.getPrice(symbol);
     }
 
     const response = await axios.get(`${FUTURES_BASE_URL}/fapi/v1/ticker/bookTicker`, {
-        params: { symbol: normalizedSymbol },
+        params: { symbol: exchangeSymbol },
         timeout: 5000,
     });
     const data = response?.data || {};
@@ -535,12 +554,13 @@ const hydratePriceSlotFromBookTicker = async (symbol) => {
 
 const hydratePriceSlotFromMarkPrice = async (symbol) => {
     const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+    const exchangeSymbol = normalizeBinanceFuturesSymbol(normalizedSymbol);
     if(!normalizedSymbol){
         return dt.getPrice(symbol);
     }
 
     const response = await axios.get(`${FUTURES_BASE_URL}/fapi/v1/premiumIndex`, {
-        params: { symbol: normalizedSymbol },
+        params: { symbol: exchangeSymbol },
         timeout: 5000,
     });
     const data = response?.data || {};
@@ -2464,11 +2484,13 @@ const ensureBinanceApiClient = async (uid, options = {}) => {
 
 const privateFuturesSignedRequest = async (uid, path, params = {}, method = 'GET') => {
     const normalizedMethod = String(method || 'GET').trim().toUpperCase();
+    const requestParams = toBinanceFuturesParams(params);
     if(normalizedMethod !== 'GET'){
         await assertBinanceWriteAllowedOrLog({
             uid,
             action: `SIGNED_${normalizedMethod}`,
             symbol: params?.symbol || null,
+            exchangeSymbol: params?.symbol ? requestParams.symbol : null,
             clientOrderId: params?.clientAlgoId || params?.newClientOrderId || params?.origClientOrderId || null,
             orderId: params?.orderId || params?.algoId || null,
             caller: `coin.privateFuturesSignedRequest:${path}`,
@@ -2502,7 +2524,7 @@ const privateFuturesSignedRequest = async (uid, path, params = {}, method = 'GET
 
     const requestOnce = async () => {
         const signedQuery = buildSignedQuery(credentials.appSecret, {
-            ...params,
+            ...requestParams,
             recvWindow: binanceWriteTimeSync.DEFAULT_RECV_WINDOW_MS,
             timestamp: getFuturesTimestamp(),
         });
@@ -3066,7 +3088,8 @@ const listOpenBoundExitOrders = async (uid, symbol, pid) => {
     }
 
     try{
-        const openOrders = await binance[uid].futuresOpenOrders(symbol);
+        const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
+        const openOrders = await binance[uid].futuresOpenOrders(exchangeSymbol);
         const futuresOrders = (openOrders || [])
             .filter((order) => {
                 const clientOrderId = String(order.clientOrderId || order.origClientOrderId || '');
@@ -3245,7 +3268,7 @@ const loadRecentSignalCloseExecutionFromExchange = async ({
 
     let exchangeOrders = [];
     try{
-        exchangeOrders = await binance[uid].futuresAllOrders(symbol, { limit: 100 });
+        exchangeOrders = await binance[uid].futuresAllOrders(normalizeBinanceFuturesSymbol(symbol), { limit: 100 });
     }catch(error){
         return null;
     }
@@ -3298,7 +3321,7 @@ const loadRecentSignalCloseExecutionFromExchange = async ({
 
     let relatedTrades = [];
     try{
-        relatedTrades = await binance[uid].futuresUserTrades(symbol, { limit: 100 });
+        relatedTrades = await binance[uid].futuresUserTrades(normalizeBinanceFuturesSymbol(symbol), { limit: 100 });
     }catch(error){
         relatedTrades = [];
     }
@@ -3544,7 +3567,7 @@ const loadRecentSignalEntryExecutionFromExchange = async ({
 
     let exchangeOrders = [];
     try{
-        exchangeOrders = await binance[uid].futuresAllOrders(symbol, { limit: 50 });
+        exchangeOrders = await binance[uid].futuresAllOrders(normalizeBinanceFuturesSymbol(symbol), { limit: 50 });
     }catch(error){
         return null;
     }
@@ -3588,7 +3611,7 @@ const loadRecentSignalEntryExecutionFromExchange = async ({
 
     let relatedTrades = [];
     try{
-        relatedTrades = await binance[uid].futuresUserTrades(symbol, { limit: 100 });
+        relatedTrades = await binance[uid].futuresUserTrades(normalizeBinanceFuturesSymbol(symbol), { limit: 100 });
     }catch(error){
         relatedTrades = [];
     }
@@ -3722,7 +3745,7 @@ const loadRecentGridCloseExecutionFromExchange = async ({
 
     let exchangeOrders = [];
     try{
-        exchangeOrders = await binance[uid].futuresAllOrders(symbol, { limit: 100 });
+        exchangeOrders = await binance[uid].futuresAllOrders(normalizeBinanceFuturesSymbol(symbol), { limit: 100 });
     }catch(error){
         return null;
     }
@@ -3766,7 +3789,7 @@ const loadRecentGridCloseExecutionFromExchange = async ({
 
     let relatedTrades = [];
     try{
-        relatedTrades = await binance[uid].futuresUserTrades(symbol, { limit: 100 });
+        relatedTrades = await binance[uid].futuresUserTrades(normalizeBinanceFuturesSymbol(symbol), { limit: 100 });
     }catch(error){
         relatedTrades = [];
     }
@@ -3966,14 +3989,14 @@ const loadGridReservationOwnedExitExecutionsFromExchange = async ({
 
     let exchangeOrders = [];
     try{
-        exchangeOrders = await binance[uid].futuresAllOrders(symbol, { limit: 200 });
+        exchangeOrders = await binance[uid].futuresAllOrders(normalizeBinanceFuturesSymbol(symbol), { limit: 200 });
     }catch(error){
         return [];
     }
 
     let relatedTrades = [];
     try{
-        relatedTrades = await binance[uid].futuresUserTrades(symbol, { limit: 200 });
+        relatedTrades = await binance[uid].futuresUserTrades(normalizeBinanceFuturesSymbol(symbol), { limit: 200 });
     }catch(error){
         relatedTrades = [];
     }
@@ -4212,14 +4235,14 @@ const recoverGridExternalManualCloseFromExchange = async ({
 
     let exchangeOrders = [];
     try{
-        exchangeOrders = await binance[uid].futuresAllOrders(row.symbol, { limit: 200 });
+        exchangeOrders = await binance[uid].futuresAllOrders(normalizeBinanceFuturesSymbol(row.symbol), { limit: 200 });
     }catch(error){
         return null;
     }
 
     let relatedTrades = [];
     try{
-        relatedTrades = await binance[uid].futuresUserTrades(row.symbol, { limit: 200 });
+        relatedTrades = await binance[uid].futuresUserTrades(normalizeBinanceFuturesSymbol(row.symbol), { limit: 200 });
     }catch(error){
         relatedTrades = [];
     }
@@ -4443,7 +4466,7 @@ const loadRecentGridEntryExecutionFromExchange = async ({
 
     let exchangeOrders = [];
     try{
-        exchangeOrders = await binance[uid].futuresAllOrders(symbol, { limit: 100 });
+        exchangeOrders = await binance[uid].futuresAllOrders(normalizeBinanceFuturesSymbol(symbol), { limit: 100 });
     }catch(error){
         return null;
     }
@@ -4491,7 +4514,7 @@ const loadRecentGridEntryExecutionFromExchange = async ({
 
     let relatedTrades = [];
     try{
-        relatedTrades = await binance[uid].futuresUserTrades(symbol, { limit: 100 });
+        relatedTrades = await binance[uid].futuresUserTrades(normalizeBinanceFuturesSymbol(symbol), { limit: 100 });
     }catch(error){
         relatedTrades = [];
     }
@@ -5758,8 +5781,7 @@ const getReservationRemainingQty = (reservation = {}) => Math.max(
 const normalizeRuntimeReservationSymbol = (value = '') => String(value || '')
     .trim()
     .toUpperCase()
-    .replace(/^BINANCE:/, '')
-    .replace(/\.P$/, '');
+    .replace(/^BINANCE:/, '');
 
 const loadPidExitReservationsForRuntimeGuard = async ({
     uid,
@@ -5997,8 +6019,9 @@ const getGridExchangePosition = async (uid, symbol, leg, options = {}) => {
     }
 
     try{
+        const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
         const positions = await binance[uid].futuresPositionRisk();
-        const matched = (positions || []).find((item) => item.symbol === symbol && item.positionSide === leg);
+        const matched = (positions || []).find((item) => item.symbol === exchangeSymbol && item.positionSide === leg);
         if(!matched){
             return null;
         }
@@ -6599,7 +6622,8 @@ const listOpenGridOrders = async (uid, symbol, pid, leg = null) => {
         return true;
     };
 
-    const regularOrders = await binance[uid].futuresOpenOrders(symbol).catch(() => []);
+    const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
+    const regularOrders = await binance[uid].futuresOpenOrders(exchangeSymbol).catch(() => []);
     const openOrders = (regularOrders || [])
         .filter((order) => matchesGridOrder(order.clientOrderId))
         .map((order) => ({
@@ -6644,9 +6668,10 @@ const getExchangePositionSnapshot = async (uid, symbol) => {
     }
 
     try{
+        const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
         const positions = await binance[uid].futuresPositionRisk();
         for(const item of (positions || [])){
-            if(item.symbol !== symbol){
+            if(item.symbol !== exchangeSymbol){
                 continue;
             }
 

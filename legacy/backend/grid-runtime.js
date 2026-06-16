@@ -29,8 +29,7 @@ const normalizeGridSymbol = (value) =>
   String(value || "")
     .trim()
     .toUpperCase()
-    .replace(/^[A-Z0-9_]+:/, "")
-    .replace(/\.P$/i, "");
+    .replace(/^[A-Z0-9_]+:/, "");
 
 const GRID_BUNBONG_ALIAS_MAP = new Map([
   ["1", "1MIN"],

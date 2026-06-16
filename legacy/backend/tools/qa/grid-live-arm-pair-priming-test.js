@@ -13,7 +13,7 @@ const check = (name, fn) => {
 const baseRow = (overrides = {}) => ({
   id: 204,
   uid: 156,
-  symbol: "PUMPUSDT",
+  symbol: "PUMPUSDT.P",
   bunbong: "30MIN",
   enabled: "Y",
   regimeStatus: "WAITING_WEBHOOK",
@@ -46,7 +46,7 @@ const baseTarget = (overrides = {}) => ({
   resistancePrice: 0.001525,
   triggerPrice: 0.001495,
   signalTime: "2026-06-08T10:18:07.000Z",
-  gridRegimeKey: "GRIDREGIME|v1|SQZ+GRID|PUMPUSDT|30MIN|0.001465|0.001525|0.001495|2026-06-08T10:18:07",
+  gridRegimeKey: "GRIDREGIME|v1|SQZ+GRID|PUMPUSDT.P|30MIN|0.001465|0.001525|0.001495|2026-06-08T10:18:07",
   gridPayload: {
     symbol: "PUMPUSDT.P",
     timeframe: "30MIN",
@@ -54,7 +54,7 @@ const baseTarget = (overrides = {}) => ({
     resistancePrice: 0.001525,
     triggerPrice: 0.001495,
     signalTime: "2026-06-08T10:18:07.000Z",
-    gridRegimeKey: "GRIDREGIME|v1|SQZ+GRID|PUMPUSDT|30MIN|0.001465|0.001525|0.001495|2026-06-08T10:18:07",
+    gridRegimeKey: "GRIDREGIME|v1|SQZ+GRID|PUMPUSDT.P|30MIN|0.001465|0.001525|0.001495|2026-06-08T10:18:07",
   },
   ...overrides,
 });
@@ -109,7 +109,7 @@ check("35/65 side trigger prices are preserved per leg", () => {
     },
   });
   const plan = gridEngine.buildLiveGridArmPairPrimingPlan({
-    row: baseRow({ symbol: "BTCUSDT", supportPrice: null, resistancePrice: null, triggerPrice: null }),
+    row: baseRow({ symbol: "BTCUSDT.P", supportPrice: null, resistancePrice: null, triggerPrice: null }),
     targetItem: target,
   });
   assert.strictEqual(plan.ok, true);
@@ -143,7 +143,7 @@ check("50/50 side trigger prices can match legacy center trigger", () => {
     },
   });
   const plan = gridEngine.buildLiveGridArmPairPrimingPlan({
-    row: baseRow({ symbol: "BTCUSDT" }),
+    row: baseRow({ symbol: "BTCUSDT.P" }),
     targetItem: target,
   });
   assert.strictEqual(plan.ok, true);
@@ -163,9 +163,48 @@ check("minimum PUMP notional path stays above 5 USDT", () => {
   assert.ok(plan.notional <= 6.0000001);
 });
 
-check("PUMPUSDT.P and PUMPUSDT normalize to the same target", () => {
+check("PUMPUSDT.P and PUMPUSDT are distinct runtime scope symbols", () => {
   const plan = buildPlan({ symbol: "PUMPUSDT" }, { symbol: "PUMPUSDT.P" });
+  assert.strictEqual(plan.ok, false);
+  assert.strictEqual(plan.reason, "GRID_LIVE_ARM_SYMBOL_MISMATCH");
+  assert.strictEqual(plan.rowSymbol, "PUMPUSDT");
+  assert.strictEqual(plan.targetSymbol, "PUMPUSDT.P");
+});
+
+check("HBARUSDT.P side trigger prices are preserved per strategy profile", () => {
+  const target = baseTarget({
+    strategySignal: "NY_BOX_GRID_35_65",
+    symbol: "HBARUSDT.P",
+    supportPrice: 0.082,
+    resistancePrice: 0.084,
+    triggerPrice: 0.083,
+    longTriggerPrice: 0.0827,
+    shortTriggerPrice: 0.0833,
+    triggerProfile: "35_65",
+    gridRegimeKey: "GRIDREGIME|v1|NY_BOX_GRID_35_65|HBARUSDT.P|15MIN|0.082|0.084|0.083|2026-06-16T10:00:00",
+    gridPayload: {
+      ...baseTarget().gridPayload,
+      strategySignal: "NY_BOX_GRID_35_65",
+      symbol: "HBARUSDT.P",
+      timeframe: "15MIN",
+      supportPrice: 0.082,
+      resistancePrice: 0.084,
+      triggerPrice: 0.083,
+      longTriggerPrice: 0.0827,
+      shortTriggerPrice: 0.0833,
+      triggerProfile: "35_65",
+      gridRegimeKey: "GRIDREGIME|v1|NY_BOX_GRID_35_65|HBARUSDT.P|15MIN|0.082|0.084|0.083|2026-06-16T10:00:00",
+    },
+  });
+  const plan = gridEngine.buildLiveGridArmPairPrimingPlan({
+    row: baseRow({ symbol: "HBARUSDT.P", bunbong: "15MIN", supportPrice: null, resistancePrice: null, triggerPrice: null }),
+    targetItem: target,
+  });
   assert.strictEqual(plan.ok, true);
+  assert.strictEqual(plan.longTriggerPrice, 0.0827);
+  assert.strictEqual(plan.shortTriggerPrice, 0.0833);
+  assert.strictEqual(plan.legs.find((leg) => leg.leg === "LONG").triggerPrice, 0.0827);
+  assert.strictEqual(plan.legs.find((leg) => leg.leg === "SHORT").triggerPrice, 0.0833);
 });
 
 check("missing notional blocks pair priming", () => {
@@ -199,7 +238,7 @@ check("side trigger outside box is rejected", () => {
       shortTriggerPrice: 106.5,
     },
   });
-  const plan = gridEngine.buildLiveGridArmPairPrimingPlan({ row: baseRow({ symbol: "BTCUSDT" }), targetItem: target });
+  const plan = gridEngine.buildLiveGridArmPairPrimingPlan({ row: baseRow({ symbol: "BTCUSDT.P" }), targetItem: target });
   assert.strictEqual(plan.ok, false);
   assert.strictEqual(plan.reason, "GRID_LIVE_ARM_LONG_TRIGGER_OUTSIDE_BOX");
 });

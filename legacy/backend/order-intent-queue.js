@@ -73,6 +73,9 @@ const sha1 = (value) =>
 const normalizeSymbol = (symbol) =>
   String(symbol || "").trim().toUpperCase().replace(/\.P$/i, "");
 
+const normalizeGridSymbol = (symbol) =>
+  String(symbol || "").trim().toUpperCase().replace(/^[A-Z0-9_]+:/, "");
+
 const normalizeTimeframe = (value) => String(value || "").trim().toUpperCase();
 
 const ensureOrderIntentSchema = async () => {
@@ -138,7 +141,7 @@ const buildGridArmIntentPayloadHash = ({ payload = {}, targetItem = {} } = {}) =
       uid: targetItem.uid,
       pid: targetItem.pid,
       strategySignal: payload.strategySignal,
-      symbol: normalizeSymbol(payload.symbol || targetItem.symbol),
+      symbol: normalizeGridSymbol(payload.symbol || targetItem.symbol),
       bunbong: normalizeTimeframe(payload.bunbong || targetItem.bunbong),
       signalTime: payload.signalTime || payload.time || null,
       supportPrice: payload.supportPrice,
@@ -155,7 +158,7 @@ const buildGridArmIntentKey = ({ payload = {}, targetItem = {} } = {}) =>
     INTENT_TYPE.GRID_LIVE_ARM,
     Number(targetItem.uid || 0),
     Number(targetItem.pid || 0),
-    normalizeSymbol(payload.symbol || targetItem.symbol),
+    normalizeGridSymbol(payload.symbol || targetItem.symbol),
     normalizeTimeframe(payload.bunbong || targetItem.bunbong),
     buildGridArmIntentPayloadHash({ payload, targetItem }),
   ].join(":");
@@ -205,7 +208,7 @@ const normalizeGridExitParentIntentPayload = ({
 } = {}) => {
   const uid = Number(targetItem.uid || payload.uid || 0);
   const pid = Number(targetItem.pid || payload.pid || 0);
-  const symbol = normalizeSymbol(payload.symbol || targetItem.symbol);
+  const symbol = normalizeGridSymbol(payload.symbol || targetItem.symbol);
   const timeframe = normalizeTimeframe(
     payload.timeframe || payload.bunbong || targetItem.timeframe || targetItem.bunbong
   );
@@ -440,7 +443,7 @@ const resolveGridExitParentContext = (parentCandidate = {}, regimeRuntimeSnapsho
         regimeRuntimeSnapshot.strategySignal ||
         ""
     ).trim(),
-    symbol: normalizeSymbol(parentCandidate.symbol || intentPayload.symbol || regimeRuntimeSnapshot.symbol),
+    symbol: normalizeGridSymbol(parentCandidate.symbol || intentPayload.symbol || regimeRuntimeSnapshot.symbol),
     timeframe: normalizeTimeframe(
       parentCandidate.timeframe || intentPayload.timeframe || regimeRuntimeSnapshot.timeframe
     ),
@@ -731,7 +734,7 @@ const buildGridExitParentQueueRowCandidate = (parentCandidate = {}, mode = "DRY_
     pid: Number(parentCandidate.pid || 0),
     strategyCategory: "grid",
     strategySignal: parentCandidate.strategySignal || null,
-    symbol: normalizeSymbol(parentCandidate.symbol),
+    symbol: normalizeGridSymbol(parentCandidate.symbol),
     timeframe: normalizeTimeframe(parentCandidate.timeframe),
     gridRegimeKey: parentCandidate.gridRegimeKey || null,
     source: "GRID_EXIT_QUEUE_JOIN_DRY_RUN",
@@ -783,7 +786,7 @@ const buildGridExitChildQueueRowCandidate = (childCandidate = {}, parentRowCandi
     pid: Number(childCandidate.pid || parentRowCandidate.pid || 0),
     strategyCategory: "grid",
     strategySignal: childCandidate.strategySignal || parentRowCandidate.strategySignal || null,
-    symbol: normalizeSymbol(childCandidate.symbol || parentRowCandidate.symbol),
+    symbol: normalizeGridSymbol(childCandidate.symbol || parentRowCandidate.symbol),
     timeframe: normalizeTimeframe(childCandidate.timeframe || parentRowCandidate.timeframe),
     gridRegimeKey: childCandidate.gridRegimeKey || parentRowCandidate.gridRegimeKey || null,
     positionSide: normalizeGridExitChildSide(childCandidate.positionSide),
@@ -1102,7 +1105,7 @@ const normalizeGridExitCancelTarget = ({ childIntent = {}, cancelCandidate = {} 
     childNaturalKey: String(payload.childNaturalKey || childIntent.childNaturalKey || childIntent.intentKey || "").trim(),
     gridRegimeKey: String(payload.gridRegimeKey || payload.grid_regime_key || "").trim(),
     strategySignal: String(payload.strategySignal || "").trim(),
-    symbol: normalizeSymbol(payload.symbol),
+    symbol: normalizeGridSymbol(payload.symbol),
     timeframe: normalizeTimeframe(payload.timeframe || payload.bunbong),
     positionSide: String(payload.positionSide || payload.side || "").trim().toUpperCase(),
     orderRole,
@@ -1655,8 +1658,8 @@ const isGridExitNonTerminalState = (value) => {
 const matchesGridExitPidSymbolSide = (row = {}, context = {}) => {
   const rowPid = Number(row.pid || row.playId || row.livePlayId || 0);
   const contextPid = Number(context.pid || 0);
-  const rowSymbol = normalizeSymbol(row.symbol || row.s || "");
-  const contextSymbol = normalizeSymbol(context.symbol || "");
+  const rowSymbol = normalizeGridSymbol(row.symbol || row.s || "");
+  const contextSymbol = normalizeGridSymbol(context.symbol || "");
   const rowSide = normalizeGridExitChildSide(row.positionSide || row.side || row.direction || "");
   const contextSide = normalizeGridExitChildSide(context.positionSide || context.side || "");
   return (
@@ -1763,7 +1766,7 @@ const resolveGridExitRemainingExposureContext = (parentCandidate = {}) => {
   const context = resolveGridExitParentContext(parentCandidate, {});
   const uid = Number(parentCandidate.uid || payload.uid || context.uid || 0);
   const pid = Number(parentCandidate.pid || payload.pid || context.pid || 0);
-  const symbol = normalizeSymbol(parentCandidate.symbol || payload.symbol || context.symbol || "");
+  const symbol = normalizeGridSymbol(parentCandidate.symbol || payload.symbol || context.symbol || "");
   const timeframe = normalizeTimeframe(parentCandidate.timeframe || payload.timeframe || context.timeframe || "");
   const gridRegimeKey = String(parentCandidate.gridRegimeKey || payload.gridRegimeKey || context.gridRegimeKey || "").trim();
   const parentNaturalKey = String(
@@ -2158,7 +2161,7 @@ const validateGridExitMarketCloseTarget = (candidate = {}) => {
   if (!Number(candidate.pid || 0)) {
     errors.push("GRID_EXIT_MARKET_CLOSE_PID_REQUIRED");
   }
-  if (!normalizeSymbol(candidate.symbol)) {
+  if (!normalizeGridSymbol(candidate.symbol)) {
     errors.push("GRID_EXIT_MARKET_CLOSE_SYMBOL_REQUIRED");
   }
   if (!normalizeGridExitChildSide(candidate.positionSide)) {
@@ -2215,7 +2218,7 @@ const buildGridExitMarketCloseRequestPreview = (candidate = {}, sourcePlanKey = 
   type: "GRID_EXIT_MARKET_CLOSE_DRY_RUN",
   uid: candidate.uid,
   pid: candidate.pid,
-  symbol: normalizeSymbol(candidate.symbol),
+  symbol: normalizeGridSymbol(candidate.symbol),
   positionSide: normalizeGridExitChildSide(candidate.positionSide),
   remainingPidOwnedQty: roundGridExitQty(candidate.remainingPidOwnedQty),
   closeQty: roundGridExitQty(candidate.closeQty),
@@ -2227,7 +2230,7 @@ const buildGridExitMarketCloseRequestPreview = (candidate = {}, sourcePlanKey = 
     GRID_EXIT_MARKET_CLOSE_PLAN_TYPE,
     candidate.uid,
     candidate.pid,
-    normalizeSymbol(candidate.symbol),
+    normalizeGridSymbol(candidate.symbol),
     normalizeGridExitChildSide(candidate.positionSide),
     candidate.gridRegimeKey,
   ].join(":"),
@@ -2414,7 +2417,7 @@ const resolveGridExitMarketClosePlanTarget = (marketClosePlan = {}) => {
   return {
     uid: Number(candidate.uid || 0),
     pid: Number(candidate.pid || 0),
-    symbol: normalizeSymbol(candidate.symbol || ""),
+    symbol: normalizeGridSymbol(candidate.symbol || ""),
     positionSide: normalizeGridExitChildSide(candidate.positionSide || ""),
     closeQty: roundGridExitQty(candidate.closeQty),
     maxAllowedQty: roundGridExitQty(candidate.maxAllowedQty || candidate.closeQty),
@@ -2423,7 +2426,7 @@ const resolveGridExitMarketClosePlanTarget = (marketClosePlan = {}) => {
 
 const matchesGridExitMarketCloseObservationTarget = (target = {}, event = {}) => {
   const eventPid = Number(event.pid || event.playId || 0);
-  const eventSymbol = normalizeSymbol(event.symbol || "");
+  const eventSymbol = normalizeGridSymbol(event.symbol || "");
   const eventSide = normalizeGridExitChildSide(event.positionSide || event.side || "");
   return (
     (!target.pid || !eventPid || target.pid === eventPid) &&
@@ -2532,7 +2535,7 @@ const classifyGridExitMarketCloseObservation = ({
 const normalizeGridExitConvergenceInitialState = (initialState = {}) => ({
   uid: Number(initialState.uid || 0),
   pid: Number(initialState.pid || 0),
-  symbol: normalizeSymbol(initialState.symbol || ""),
+  symbol: normalizeGridSymbol(initialState.symbol || ""),
   positionSide: normalizeGridExitChildSide(initialState.positionSide || ""),
   ownerOpenQty: roundGridExitQty(initialState.ownerOpenQty),
   snapshotOpenQty: roundGridExitQty(initialState.snapshotOpenQty),
@@ -2562,7 +2565,7 @@ const simulateGridExitCloseConvergence = ({
   for (const observation of closeFillObservations || []) {
     const sourceTradeId = observation.sourceTradeId || observation.tradeId || null;
     const eventPid = Number(observation.pid || 0);
-    const eventSymbol = normalizeSymbol(observation.symbol || state.symbol);
+    const eventSymbol = normalizeGridSymbol(observation.symbol || state.symbol);
     const eventSide = normalizeGridExitChildSide(observation.positionSide || state.positionSide);
     if (
       (eventPid && state.pid && eventPid !== state.pid) ||
@@ -2928,7 +2931,7 @@ const resolveGridStopEmergencyContext = (gridRegime = {}) => {
   return {
     uid: Number(gridRegime.uid || stoppedLeg.uid || 0),
     pid: Number(gridRegime.pid || stoppedLeg.pid || 0),
-    symbol: normalizeSymbol(gridRegime.symbol || stoppedLeg.symbol || ""),
+    symbol: normalizeGridSymbol(gridRegime.symbol || stoppedLeg.symbol || ""),
     positionSide: normalizeGridExitChildSide(gridRegime.positionSide || stoppedLeg.positionSide || stoppedLeg.side || ""),
     gridRegimeKey: String(gridRegime.gridRegimeKey || stoppedLeg.gridRegimeKey || "").trim(),
     strategySignal: String(gridRegime.strategySignal || stoppedLeg.strategySignal || "").trim(),
@@ -2937,7 +2940,7 @@ const resolveGridStopEmergencyContext = (gridRegime = {}) => {
 
 const matchesGridStopEmergencyTarget = (context = {}, event = {}) => {
   const eventPid = Number(event.pid || event.playId || 0);
-  const eventSymbol = normalizeSymbol(event.symbol || "");
+  const eventSymbol = normalizeGridSymbol(event.symbol || "");
   const eventSide = normalizeGridExitChildSide(event.positionSide || event.side || "");
   return (
     (!context.pid || !eventPid || context.pid === eventPid) &&
@@ -3126,7 +3129,7 @@ const scanGridStopSiblingExposureMock = ({
   const context = {
     uid: Number(siblingLeg.uid || stoppedLeg.uid || 0),
     pid: Number(siblingLeg.pid || stoppedLeg.pid || 0),
-    symbol: normalizeSymbol(siblingLeg.symbol || stoppedLeg.symbol || ""),
+    symbol: normalizeGridSymbol(siblingLeg.symbol || stoppedLeg.symbol || ""),
     positionSide: normalizeGridExitChildSide(siblingLeg.positionSide || siblingLeg.side || ""),
   };
   const siblingOwnerQty = roundGridExitQty(sumGridExitOwnerOpenQty(ownerSnapshot, context));
@@ -3160,7 +3163,7 @@ const scanGridStopSiblingExposureMock = ({
 const normalizeGridStopEmergencyInitialState = (initialState = {}) => ({
   uid: Number(initialState.uid || 0),
   pid: Number(initialState.pid || 0),
-  symbol: normalizeSymbol(initialState.symbol || ""),
+  symbol: normalizeGridSymbol(initialState.symbol || ""),
   positionSide: normalizeGridExitChildSide(initialState.positionSide || ""),
   ownerOpenQty: roundGridExitQty(initialState.ownerOpenQty),
   snapshotOpenQty: roundGridExitQty(initialState.snapshotOpenQty),
@@ -4583,7 +4586,7 @@ const normalizeProtectionIntentPayload = (payload = {}) => ({
   uid: Number(payload.uid || 0),
   pid: Number(payload.pid || 0),
   strategyCategory: "grid",
-  symbol: normalizeSymbol(payload.symbol),
+  symbol: normalizeGridSymbol(payload.symbol),
   positionSide: normalizePositionSide(payload.positionSide || payload.leg),
   qty: Number(payload.qty || payload.ownedQty || 0),
   ownedQty: Number(payload.ownedQty || payload.qty || 0),
@@ -4648,7 +4651,7 @@ const normalizeReentryIntentPayload = (payload = {}) => ({
   uid: Number(payload.uid || 0),
   pid: Number(payload.pid || 0),
   strategyCategory: "grid",
-  symbol: normalizeSymbol(payload.symbol),
+  symbol: normalizeGridSymbol(payload.symbol),
   timeframe: normalizeTimeframe(payload.timeframe || payload.bunbong),
   positionSide: normalizePositionSide(payload.positionSide || payload.leg),
   regimeId: payload.regimeId || payload.gridRowId || payload.pid || null,
@@ -4667,7 +4670,7 @@ const normalizeCancelIntentPayload = (payload = {}) => ({
   uid: Number(payload.uid || 0),
   pid: Number(payload.pid || 0),
   strategyCategory: "grid",
-  symbol: normalizeSymbol(payload.symbol),
+  symbol: normalizeGridSymbol(payload.symbol),
   positionSide: normalizePositionSide(payload.positionSide || payload.leg),
   regimeId: payload.regimeId || payload.gridRowId || payload.pid || null,
   targetType: String(payload.targetType || "ALL_FOR_REGIME").trim().toUpperCase(),
@@ -4685,7 +4688,7 @@ const normalizeCloseIntentPayload = (payload = {}) => {
     uid: Number(payload.uid || 0),
     pid: Number(payload.pid || 0),
     strategyCategory: "grid",
-    symbol: normalizeSymbol(payload.symbol),
+    symbol: normalizeGridSymbol(payload.symbol),
     positionSide: normalizePositionSide(payload.positionSide || payload.leg),
     regimeId: payload.regimeId || payload.gridRowId || payload.pid || null,
     qty: Number(payload.qty || payload.ownedQtyBasis || payload.ownedQty || 0),
@@ -4839,7 +4842,7 @@ const buildGridCloseClientOrderId = (payload = {}) => {
     safeJsonStringify({
       uid: Number(payload.uid || 0),
       pid: Number(payload.pid || 0),
-      symbol: normalizeSymbol(payload.symbol),
+      symbol: normalizeGridSymbol(payload.symbol),
       positionSide: normalizePositionSide(payload.positionSide || payload.leg),
       reason: payload.reason || null,
       sourceEventId: payload.sourceEventId || null,

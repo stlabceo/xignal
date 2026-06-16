@@ -11,7 +11,7 @@ const usersRouteSource = fs.readFileSync(path.resolve(repoRoot, "backend/routes/
 
 let dbWriteCount = 0;
 let binanceWriteCount = 0;
-const sharedKey = "GRIDREGIME|v1|MEAN_REVERT_GRID|ADAUSDT|10MIN|1.1987|1.2345|1.2166|2026-06-05T12:00:00";
+const sharedKey = "GRIDREGIME|v1|MEAN_REVERT_GRID|ADAUSDT.P|10MIN|1.1987|1.2345|1.2166|2026-06-05T12:00:00";
 
 const mockRowsByTable = {
   live_grid_strategy_list: [
@@ -20,7 +20,7 @@ const mockRowsByTable = {
       uid: 156,
       a_name: "Grid A",
       strategySignal: "Mean Revert Grid",
-      symbol: "ADAUSDT",
+      symbol: "ADAUSDT.P",
       bunbong: "10MIN",
       enabled: "Y",
       regimeStatus: "ACTIVE",
@@ -34,7 +34,7 @@ const mockRowsByTable = {
       uid: 156,
       a_name: "Grid B",
       strategySignal: "Mean Revert Grid",
-      symbol: "ADAUSDT",
+      symbol: "ADAUSDT.P",
       bunbong: "10MIN",
       enabled: "Y",
       regimeStatus: "GRID_SINGLE_LEG_ACTIVE_OPPOSITE_RESTING",
@@ -48,7 +48,7 @@ const mockRowsByTable = {
       uid: 156,
       a_name: "Grid C",
       strategySignal: "Mean Revert Grid",
-      symbol: "ADAUSDT",
+      symbol: "ADAUSDT.P",
       bunbong: "10MIN",
       enabled: "Y",
       regimeStatus: "ACTIVE",
@@ -62,7 +62,7 @@ const mockRowsByTable = {
       uid: 156,
       a_name: "Grid D",
       strategySignal: "Other Grid",
-      symbol: "ADAUSDT",
+      symbol: "ADAUSDT.P",
       bunbong: "10MIN",
       enabled: "Y",
       regimeStatus: "ACTIVE",
@@ -76,7 +76,7 @@ const mockRowsByTable = {
       uid: 156,
       a_name: "Grid E",
       strategySignal: "Mean Revert Grid",
-      symbol: "ADAUSDT",
+      symbol: "ADAUSDT.P",
       bunbong: "10MIN",
       enabled: "N",
       regimeStatus: "ACTIVE",
@@ -90,7 +90,7 @@ const mockRowsByTable = {
       uid: 156,
       a_name: "Grid 50/50",
       strategySignal: "NY_BOX_GRID_50_50",
-      symbol: "BTCUSDT",
+      symbol: "BTCUSDT.P",
       bunbong: "15MIN",
       enabled: "Y",
       regimeStatus: "ACTIVE",
@@ -98,7 +98,7 @@ const mockRowsByTable = {
       resistancePrice: "110",
       triggerPrice: "105",
       lastWebhookPayloadJson: JSON.stringify({
-        gridRegimeKey: "GRIDREGIME|v1|NY_BOX_GRID_50_50|BTCUSDT|15MIN|100|110|105|2026-06-15T10:00:00",
+        gridRegimeKey: "GRIDREGIME|v1|NY_BOX_GRID_50_50|BTCUSDT.P|15MIN|100|110|105|2026-06-15T10:00:00",
         triggerProfile: "50_50",
         longTriggerPrice: 105,
         shortTriggerPrice: 105,
@@ -109,7 +109,7 @@ const mockRowsByTable = {
       uid: 156,
       a_name: "Grid 35/65",
       strategySignal: "NY_BOX_GRID_35_65",
-      symbol: "BTCUSDT",
+      symbol: "BTCUSDT.P",
       bunbong: "15MIN",
       enabled: "Y",
       regimeStatus: "ACTIVE",
@@ -117,7 +117,7 @@ const mockRowsByTable = {
       resistancePrice: "110",
       triggerPrice: "105",
       lastWebhookPayloadJson: JSON.stringify({
-        gridRegimeKey: "GRIDREGIME|v1|NY_BOX_GRID_35_65|BTCUSDT|15MIN|100|110|105|2026-06-15T10:00:00",
+        gridRegimeKey: "GRIDREGIME|v1|NY_BOX_GRID_35_65|BTCUSDT.P|15MIN|100|110|105|2026-06-15T10:00:00",
         triggerProfile: "35_65",
         longTriggerPrice: 103.5,
         shortTriggerPrice: 106.5,
@@ -197,7 +197,7 @@ assert.strictEqual(
 );
 
 assert.strictEqual(gridRuntime.normalizeGridRegimeStrategySignal(" Mean   Revert Grid "), "MEAN_REVERT_GRID");
-assert.strictEqual(gridRuntime.normalizeGridSymbol("BINANCE:ADAUSDT.P"), "ADAUSDT");
+assert.strictEqual(gridRuntime.normalizeGridSymbol("BINANCE:ADAUSDT.P"), "ADAUSDT.P");
 assert.strictEqual(gridRuntime.normalizeGridBunbong("10"), "10MIN");
 assert.strictEqual(gridRuntime.normalizeGridRegimePrice("1.198700000000"), "1.1987");
 assert.strictEqual(gridRuntime.normalizeGridRegimeTime("2026-06-05 12:00:00"), "2026-06-05T12:00:00");
