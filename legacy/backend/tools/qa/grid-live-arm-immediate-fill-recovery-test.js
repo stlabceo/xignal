@@ -21,8 +21,17 @@ check("success pair ACK path invokes immediate fill recovery", () => {
 });
 
 check("immediate fill recovery reads exchange order status after ACK", () => {
-  assert(/placement\.exchangeOrder\s*\|\|\s*await findGridEntryOrderForLeg/.test(gridEngineSource));
+  assert(gridEngineSource.includes("getLiveArmEntryFillRecoveryAttempts"));
+  assert(gridEngineSource.includes("GRID_LIVE_ARM_ENTRY_FILL_RECOVERY_WAITING"));
+  assert(/attempt\s*=\s*1;[\s\S]+attempt\s*<=\s*maxAttempts/.test(gridEngineSource));
   assert(gridEngineSource.includes("gridPairAtomicity.isOrderFilledOrPartiallyFilled(exchangeOrder || {})"));
+});
+
+check("QA scoped runtime enables bounded exact-candidate recovery without broad polling", () => {
+  assert(gridEngineSource.includes("isBoundedLiveArmEntryFillRecoveryEnabled"));
+  assert(gridEngineSource.includes("process.env.QA_SCOPED_GRID_RUNTIME"));
+  assert(gridEngineSource.includes("GRID_LIVE_ARM_ENTRY_FILL_BOUNDED_RECOVERY"));
+  assert(gridEngineSource.includes("clientOrderId: placement.clientOrderId"));
 });
 
 check("immediate fill recovery uses canonical exchange fill recovery", () => {

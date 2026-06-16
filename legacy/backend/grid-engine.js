@@ -45,6 +45,29 @@ const recentGridRuntimeEvents = new Map();
 const activeGridRuntimeLocks = new Set();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const isTruthyEnv = (value) =>
+  ["1", "true", "yes", "y", "on"].includes(String(value || "").trim().toLowerCase());
+
+const parsePositiveIntegerEnv = (value, fallback, { min = 1, max = 20 } = {}) => {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed) || parsed < min) {
+    return fallback;
+  }
+  return Math.min(max, parsed);
+};
+
+const isBoundedLiveArmEntryFillRecoveryEnabled = () =>
+  isTruthyEnv(process.env.QA_SCOPED_GRID_RUNTIME) ||
+  isTruthyEnv(process.env.GRID_LIVE_ARM_ENTRY_FILL_BOUNDED_RECOVERY);
+
+const getLiveArmEntryFillRecoveryAttempts = () =>
+  isBoundedLiveArmEntryFillRecoveryEnabled()
+    ? parsePositiveIntegerEnv(process.env.GRID_LIVE_ARM_ENTRY_FILL_RECOVERY_ATTEMPTS, 4, { min: 1, max: 8 })
+    : 1;
+
+const getLiveArmEntryFillRecoveryDelayMs = () =>
+  parsePositiveIntegerEnv(process.env.GRID_LIVE_ARM_ENTRY_FILL_RECOVERY_DELAY_MS, 1500, { min: 250, max: 10000 });
+
 const logGridRuntimeTrace = (stage, payload = {}) => {
   try {
     console.log(`[GRID_RUNTIME][${stage}] ${JSON.stringify(payload)}`);
@@ -3535,16 +3558,36 @@ const recoverImmediateLiveArmFillsAfterPairAck = async (row, placements = {}) =>
 
   const coin = getCoin();
   const results = [];
+  const maxAttempts = getLiveArmEntryFillRecoveryAttempts();
+  const retryDelayMs = getLiveArmEntryFillRecoveryDelayMs();
   for (const leg of GRID_ENTRY_PAIR_LEGS) {
     const placement = placements[leg] || {};
     if (!placement?.ok || !placement?.clientOrderId) {
       continue;
     }
 
-    const exchangeOrder = placement.exchangeOrder || await findGridEntryOrderForLeg(row, leg, {
-      orderId: placement.orderId || null,
-      clientOrderId: placement.clientOrderId,
-    });
+    let exchangeOrder = placement.exchangeOrder || null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (attempt > 1) {
+        await sleep(retryDelayMs);
+      }
+      if (!gridPairAtomicity.isOrderFilledOrPartiallyFilled(exchangeOrder || {})) {
+        exchangeOrder = await findGridEntryOrderForLeg(row, leg, {
+          orderId: placement.orderId || exchangeOrder?.orderId || null,
+          clientOrderId: placement.clientOrderId,
+        });
+      }
+      if (gridPairAtomicity.isOrderFilledOrPartiallyFilled(exchangeOrder || {})) {
+        break;
+      }
+      await appendGridRuntimeLog(
+        row,
+        "gridLiveArm",
+        "GRID_LIVE_ARM_ENTRY_FILL_RECOVERY_WAITING",
+        `leg:${leg}, clientOrderId:${placement.clientOrderId}, orderId:${placement.orderId || exchangeOrder?.orderId || "NONE"}, attempt:${attempt}/${maxAttempts}, status:${exchangeOrder?.status || "NOT_FOUND"}, bounded:${isBoundedLiveArmEntryFillRecoveryEnabled() ? "Y" : "N"}`,
+        leg
+      );
+    }
     if (!gridPairAtomicity.isOrderFilledOrPartiallyFilled(exchangeOrder || {})) {
       results.push({
         leg,
@@ -3552,6 +3595,7 @@ const recoverImmediateLiveArmFillsAfterPairAck = async (row, placements = {}) =>
         recovered: false,
         reason: "ORDER_NOT_FILLED_AFTER_ACK",
         status: exchangeOrder?.status || null,
+        attempts: maxAttempts,
       });
       continue;
     }
