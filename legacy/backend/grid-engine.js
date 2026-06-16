@@ -1629,13 +1629,18 @@ const reconcileLiveGridRuntimeIssue = async ({ row, issue } = {}) => {
       });
       if (recoveredEntry) {
         const refreshed = (await loadGridItem("LIVE", row.id)) || row;
-        const restored = await restoreLiveGridLegAfterRecoveredEntryFill(
+        const convergence = await applyGridEntryFillConvergence(
           refreshed,
           leg,
           recoveredEntry,
-          issue
+          issue,
+          {
+            source: "RUNTIME_ISSUE_REST",
+            eventType: "GRID_EXCHANGE_RECONCILED_ENTRY_FILL",
+            note: "exchange-entry-reconcile",
+          }
         );
-        if (restored) {
+        if (convergence.converged) {
           repaired.push({
             leg,
             action: "RECOVER_ENTRY_FILL",
@@ -1827,15 +1832,20 @@ const truthSyncLiveGridRow = async ({ row, exchangeSnapshotCache = null } = {}) 
         });
         if (recoveredEntry) {
           const latest = (await loadGridItem("LIVE", refreshed.id)) || refreshed;
-          const restored = await restoreLiveGridLegAfterRecoveredEntryFill(
+          const convergence = await applyGridEntryFillConvergence(
             latest,
             leg,
             recoveredEntry,
             {
               issues: ["TRUTH_SYNC_WITH_EXCHANGE_POSITION"],
+            },
+            {
+              source: "TRUTH_SYNC",
+              eventType: "GRID_EXCHANGE_RECONCILED_ENTRY_FILL",
+              note: "exchange-entry-reconcile",
             }
           );
-          if (restored) {
+          if (convergence.converged) {
             repaired.push({
               leg,
               action: "RECOVER_ENTRY_FILL",
@@ -2529,14 +2539,111 @@ const syncGridExitReservationsForLeg = async (row, leg, exits, qty) => {
   });
 };
 
-const restoreLiveGridLegAfterRecoveredEntryFill = async (row, leg, execution, issue = null) => {
+const normalizeGridEntryFillUnits = (execution = {}) => {
+  const fills = Array.isArray(execution.fills) && execution.fills.length > 0
+    ? execution.fills
+    : [execution];
+  return fills
+    .map((fill) => ({
+      clientOrderId: fill.clientOrderId || execution.clientOrderId || null,
+      orderId: fill.orderId || execution.orderId || null,
+      tradeId: fill.tradeId || execution.tradeId || null,
+      qty: toNumber(fill.qty || execution.qty),
+      price: toNumber(fill.price || execution.price),
+      fee: fill.fee ?? execution.fee ?? null,
+      tradeTime: fill.tradeTime || execution.tradeTime || null,
+    }))
+    .filter((fill) => fill.clientOrderId && fill.qty > 0 && fill.price > 0);
+};
+
+const applyGridEntryFillConvergence = async (row, leg, execution, issue = null, options = {}) => {
+  if (!row?.id || !row?.uid || !row?.symbol || !leg || !execution?.clientOrderId) {
+    return { converged: false, reason: "ENTRY_FILL_CONVERGENCE_INVALID_INPUT" };
+  }
+
+  const deps = options.deps || {};
+  const findRecordedFill = deps.findRecordedFill || pidPositionLedger.findRecordedFill;
+  const applyEntryFill = deps.applyEntryFill || pidPositionLedger.applyEntryFill;
+  const syncGridLegSnapshot = deps.syncGridLegSnapshot || pidPositionLedger.syncGridLegSnapshot;
+  const normalizedLeg = String(leg || "").trim().toUpperCase();
+  const eventType = options.eventType || "GRID_EXCHANGE_RECONCILED_ENTRY_FILL";
+  const note = options.note || `grid-entry-convergence:${options.source || "UNKNOWN"}`;
+  const fillUnits = normalizeGridEntryFillUnits(execution);
+  let appliedFillCount = 0;
+  let duplicateFillCount = 0;
+
+  for (const fill of fillUnits) {
+    const existingFill = await findRecordedFill({
+      uid: row.uid,
+      pid: row.id,
+      strategyCategory: "grid",
+      symbol: row.symbol,
+      positionSide: normalizedLeg,
+      sourceClientOrderId: fill.clientOrderId,
+      sourceOrderId: fill.orderId,
+      sourceTradeId: fill.tradeId,
+      fillQty: fill.qty,
+      fillPrice: fill.price,
+      tradeTime: fill.tradeTime,
+    });
+    if (existingFill) {
+      duplicateFillCount += 1;
+      continue;
+    }
+
+    await applyEntryFill({
+      uid: row.uid,
+      pid: row.id,
+      strategyCategory: "grid",
+      symbol: row.symbol,
+      positionSide: normalizedLeg,
+      sourceClientOrderId: fill.clientOrderId,
+      sourceOrderId: fill.orderId,
+      sourceTradeId: fill.tradeId,
+      fillQty: fill.qty,
+      fillPrice: fill.price,
+      fee: fill.fee,
+      tradeTime: fill.tradeTime,
+      eventType,
+      note,
+    });
+    appliedFillCount += 1;
+  }
+
+  await syncGridLegSnapshot(row.id, normalizedLeg);
+  const restored = await restoreLiveGridLegAfterRecoveredEntryFill(row, normalizedLeg, execution, issue, options);
+  return {
+    converged: Boolean(restored),
+    appliedFillCount,
+    duplicateFillCount,
+    fillUnitCount: fillUnits.length,
+    source: options.source || "UNKNOWN",
+  };
+};
+
+const restoreLiveGridLegAfterRecoveredEntryFill = async (row, leg, execution, issue = null, options = {}) => {
   if (!row?.id || !row?.uid || !row?.symbol || !leg || !execution?.clientOrderId) {
     return false;
   }
 
+  const deps = options.deps || {};
+  const syncGridLegSnapshot = deps.syncGridLegSnapshot || pidPositionLedger.syncGridLegSnapshot;
+  const loadSnapshot = deps.loadSnapshot || pidPositionLedger.loadSnapshot;
+  const loadGridItemForRecovery = deps.loadGridItem || loadGridItem;
+  const applyGridPatchForRecovery = deps.applyGridPatch || applyGridPatch;
+  const touchGridLegPositionOwnershipForRecovery =
+    deps.touchGridLegPositionOwnership || touchGridLegPositionOwnership;
+  const appendGridRuntimeLogForRecovery = deps.appendGridRuntimeLog || appendGridRuntimeLog;
+  const cancelAllGridOrdersForRecovery = deps.cancelAllGridOrders || cancelAllGridOrders;
+  const protectGridOpenLegOrCloseForRecovery =
+    deps.protectGridOpenLegOrClose || protectGridOpenLegOrClose;
+  const emergencyCloseLiveGridLegForRecovery =
+    deps.emergencyCloseLiveGridLeg || emergencyCloseLiveGridLeg;
+  const enqueueLiveGridCloseIntentForRecovery =
+    deps.enqueueLiveGridCloseIntent || enqueueLiveGridCloseIntent;
   const prefix = getLegFieldPrefix(leg);
-  await pidPositionLedger.syncGridLegSnapshot(row.id, leg);
-  const snapshot = await pidPositionLedger.loadSnapshot({
+  await syncGridLegSnapshot(row.id, leg);
+  const snapshot = await loadSnapshot({
     uid: row.uid,
     pid: row.id,
     strategyCategory: "grid",
@@ -2549,7 +2656,7 @@ const restoreLiveGridLegAfterRecoveredEntryFill = async (row, leg, execution, is
     return false;
   }
 
-  const current = (await loadGridItem("LIVE", row.id)) || row;
+  const current = (await loadGridItemForRecovery("LIVE", row.id)) || row;
   const currentQty = toNumber(current?.[`${prefix}Qty`]);
   const hasExistingExits = Boolean(current?.[`${prefix}ExitOrderId`] || current?.[`${prefix}StopOrderId`]);
   const canReuseExistingProtection =
@@ -2564,7 +2671,7 @@ const restoreLiveGridLegAfterRecoveredEntryFill = async (row, leg, execution, is
   }
 
   if (canReuseExistingProtection) {
-    await applyGridPatch("live_grid_strategy_list", current.id, {
+    await applyGridPatchForRecovery("live_grid_strategy_list", current.id, {
       ...buildOpenLegPatch({
         leg,
         entryOrderId: execution.clientOrderId,
@@ -2578,13 +2685,13 @@ const restoreLiveGridLegAfterRecoveredEntryFill = async (row, leg, execution, is
         regimeEndReason: null,
       }),
     });
-    await touchGridLegPositionOwnership(current, leg, {
+    await touchGridLegPositionOwnershipForRecovery(current, leg, {
       ownerState: "OPEN",
       sourceClientOrderId: execution.clientOrderId,
       sourceOrderId: execution.orderId || null,
       note: "exchange-entry-reconcile-reuse-protection",
     });
-    await appendGridRuntimeLog(
+    await appendGridRuntimeLogForRecovery(
       current,
       "gridReconcile",
       "ENTRY_FILL_RECOVERED_REUSED_PROTECTION",
@@ -2595,7 +2702,7 @@ const restoreLiveGridLegAfterRecoveredEntryFill = async (row, leg, execution, is
   }
 
   if (current?.regimeStatus === "ENDED") {
-    return await emergencyCloseLiveGridLeg(
+    return await emergencyCloseLiveGridLegForRecovery(
       current,
       leg,
       qty,
@@ -2604,31 +2711,64 @@ const restoreLiveGridLegAfterRecoveredEntryFill = async (row, leg, execution, is
     );
   }
 
+  if (
+    current?.[`${prefix}LegStatus`] === "OPEN"
+    && currentQty > 0
+    && current?.[`${prefix}EntryOrderId`]
+    && current?.[`${prefix}EntryOrderId`] !== execution.clientOrderId
+  ) {
+    const cleanupIntent = await enqueueLiveGridCloseIntentForRecovery(
+      current,
+      leg,
+      qty,
+      "DUPLICATE_ENTRY_CONTROLLED_CLOSE",
+      {
+        routePath: options.routePath || "grid-runtime-entry-fill",
+        sourceOrderId: execution.orderId || null,
+        sourceTradeId: execution.tradeId || null,
+        sourceClientOrderId: execution.clientOrderId,
+        ownedQtyBasis: qty,
+      }
+    );
+    await appendGridRuntimeLogForRecovery(
+      current,
+      "gridLiveOpen",
+      cleanupIntent.pending ? "ENTRY_FILLED_DUPLICATE_CLOSE_QUEUED" : "ENTRY_FILLED_DUPLICATE_CLOSE_FAILED",
+      `leg:${leg}, entryOrderId:${execution.clientOrderId}, existingEntryOrderId:${current?.[`${prefix}EntryOrderId`]}, qty:${qty}, closeIntent:${cleanupIntent.intentSummary?.intent?.intentKey || "NONE"}`,
+      leg
+    );
+    return cleanupIntent.pending;
+  }
+
   if (hasExistingExits) {
-    await cancelAllGridOrders("LIVE", current, {
+    await cancelAllGridOrdersForRecovery("LIVE", current, {
       leg,
       includeEntries: false,
       includeExits: true,
     });
   }
 
-  const protection = await protectGridOpenLegOrClose({
+  const protection = await protectGridOpenLegOrCloseForRecovery({
     row: current,
     leg,
     qty,
     entryPrice,
     entryOrderId: execution.clientOrderId,
-    failureLogCode: "ENTRY_FILL_RECOVERED_PROTECTION_MISSING_CLOSED",
-    failureMessage: `leg:${leg}, clientOrderId:${execution.clientOrderId}, qty:${qty}, entryPrice:${entryPrice}, issues:${[].concat(issue?.issues || []).join(",")}`,
+    routePath: options.routePath || null,
+    sourceOrderId: execution.orderId || null,
+    sourceTradeId: execution.tradeId || null,
+    fillEvidence: options.fillEvidence || null,
+    failureLogCode: options.failureLogCode || "ENTRY_FILL_RECOVERED_PROTECTION_MISSING_CLOSED",
+    failureMessage: options.failureMessage || `leg:${leg}, clientOrderId:${execution.clientOrderId}, qty:${qty}, entryPrice:${entryPrice}, issues:${[].concat(issue?.issues || []).join(",")}`,
   });
   if (protection.pending) {
-    await touchGridLegPositionOwnership(current, leg, {
+    await touchGridLegPositionOwnershipForRecovery(current, leg, {
       ownerState: "PROTECTION_INTENT_PENDING",
       sourceClientOrderId: execution.clientOrderId,
       sourceOrderId: execution.orderId || null,
       note: "exchange-entry-reconcile-protection-intent",
     });
-    await appendGridRuntimeLog(
+    await appendGridRuntimeLogForRecovery(
       current,
       "gridReconcile",
       "ENTRY_FILL_RECOVERED_PROTECTION_INTENT_PENDING",
@@ -2641,13 +2781,13 @@ const restoreLiveGridLegAfterRecoveredEntryFill = async (row, leg, execution, is
     return protection.closed;
   }
 
-  await touchGridLegPositionOwnership(current, leg, {
+  await touchGridLegPositionOwnershipForRecovery(current, leg, {
     ownerState: "OPEN",
     sourceClientOrderId: execution.clientOrderId,
     sourceOrderId: execution.orderId || null,
     note: "exchange-entry-reconcile",
   });
-  await appendGridRuntimeLog(
+  await appendGridRuntimeLogForRecovery(
     current,
     "gridReconcile",
     "ENTRY_FILL_RECOVERED",
@@ -3619,8 +3759,8 @@ const recoverImmediateLiveArmFillsAfterPairAck = async (row, placements = {}) =>
         ],
       },
     });
-    const restored = execution
-      ? await restoreLiveGridLegAfterRecoveredEntryFill(
+    const convergence = execution
+      ? await applyGridEntryFillConvergence(
           rowWithEntry,
           leg,
           execution,
@@ -3629,9 +3769,15 @@ const recoverImmediateLiveArmFillsAfterPairAck = async (row, placements = {}) =>
               "GRID_LIVE_ARM_IMMEDIATE_FILL_RECOVERY",
               `status:${exchangeOrder?.status || "UNKNOWN"}`,
             ],
+          },
+          {
+            source: isBoundedLiveArmEntryFillRecoveryEnabled() ? "BOUNDED_REST" : "IMMEDIATE_REST",
+            eventType: "GRID_EXCHANGE_RECONCILED_ENTRY_FILL",
+            note: "exchange-entry-reconcile",
           }
         )
-      : false;
+      : null;
+    const restored = Boolean(convergence?.converged);
     await appendGridRuntimeLog(
       row,
       "gridLiveArm",
@@ -4484,134 +4630,39 @@ const handleLiveGridEntryFill = async (parsed, reData) => {
       return true;
     }
 
-    const ledgerEntry = await pidPositionLedger.applyEntryFill({
-      uid: row.uid,
-      pid: row.id,
-      strategyCategory: "grid",
-      symbol: row.symbol,
-      positionSide: parsed.leg,
-      sourceClientOrderId: parsed.clientOrderId,
-      sourceOrderId: reData.i || null,
-      sourceTradeId: reData.t || null,
-      fillQty: entryFillQty,
-      fillPrice: entryFillPrice,
-      fee: reData.n,
-      tradeTime: reData.T || null,
-      eventType: "GRID_ENTRY_FILL",
-      note: `grid-entry:${reData.X || "FILLED"}`,
-    });
-    const snapshot =
-      ledgerEntry?.snapshot ||
-      (await pidPositionLedger.loadSnapshot({
-        uid: row.uid,
-        pid: row.id,
-        strategyCategory: "grid",
-        positionSide: parsed.leg,
-      }));
-    const qty = toNumber(snapshot?.openQty);
-    const entryPrice = toNumber(snapshot?.avgEntryPrice);
-    await pidPositionLedger.syncGridLegSnapshot(row.id, parsed.leg);
-
-    if (row?.regimeStatus === "ENDED") {
-      setOutcome("ENTRY_FILLED_AFTER_END");
-      return await emergencyCloseLiveGridLeg(
-        row,
-        parsed.leg,
-        qty,
-        "ENTRY_FILLED_AFTER_END_CLOSED",
-        `leg:${parsed.leg}, entryOrderId:${parsed.clientOrderId}, qty:${qty}, entryPrice:${entryPrice}, reason:regime-ended`
-      );
-    }
-
-    if (row?.[`${prefix}LegStatus`] === "OPEN" && existingLegQty > 0) {
-      const cleanupIntent = await enqueueLiveGridCloseIntent(row, parsed.leg, qty, "DUPLICATE_ENTRY_CONTROLLED_CLOSE", {
-        routePath: "grid-duplicate-entry-cleanup",
-        sourceClientOrderId: parsed.clientOrderId,
-        sourceOrderId: reData.i || null,
-        sourceTradeId: reData.t || null,
-      });
-
-      await appendGridRuntimeLog(
-        row,
-        "gridLiveOpen",
-        cleanupIntent.pending ? "ENTRY_FILLED_DUPLICATE_CLOSE_QUEUED" : "ENTRY_FILLED_DUPLICATE_CLOSE_QUEUE_FAILED",
-        `leg:${parsed.leg}, duplicateEntryOrderId:${parsed.clientOrderId}, qty:${qty}, closeClientOrderId:${cleanupIntent.closeClientOrderId || "NONE"}`,
-        parsed.leg
-      );
-      setOutcome(cleanupIntent.pending ? "ENTRY_DUPLICATE_CLOSE_QUEUED" : "ENTRY_DUPLICATE_CLOSE_QUEUE_FAILED");
-      return cleanupIntent.pending;
-    }
-
-    if (
-      row?.[`${prefix}EntryOrderId`] === parsed.clientOrderId &&
-      hasExistingExits &&
-      reportedQty > existingLegQty
-    ) {
-      await cancelAllGridOrders("LIVE", row, {
-        leg: parsed.leg,
-        includeEntries: false,
-        includeExits: true,
-      });
-    }
-
-    const protection = await protectGridOpenLegOrClose({
+    const convergence = await applyGridEntryFillConvergence(
       row,
-      leg: parsed.leg,
-      qty,
-      entryPrice,
-      entryOrderId: parsed.clientOrderId,
-      sourceOrderId: reData.i || null,
-      sourceTradeId: reData.t || null,
-      fillEvidence: {
-        eventType: reData.x || null,
-        endStatus: reData.X || null,
-        lastFillQty: reData.l || null,
-        cumulativeFillQty: reData.z || null,
+      parsed.leg,
+      {
+        clientOrderId: parsed.clientOrderId,
+        orderId: reData.i || null,
+        tradeId: reData.t || null,
+        qty: entryFillQty,
+        price: entryFillPrice,
+        fee: reData.n,
         tradeTime: reData.T || null,
       },
-      routePath: "grid-runtime-entry-fill",
-      normalRegimeStatus: row.regimeStatus === "ENDED" ? "ENDED" : "ACTIVE",
-      normalRegimeEndReason: row.regimeStatus === "ENDED" ? row.regimeEndReason || "BOX_BREAK" : null,
-      oneLegEmergency: row.regimeStatus === gridPairAtomicity.GRID_PAIR_STATE.ONE_LEG_FILLED,
-      failureLogCode: "ENTRY_PROTECTION_MISSING_CLOSED",
-      failureMessage: `leg:${parsed.leg}, entryOrderId:${parsed.clientOrderId}, qty:${qty}, entryPrice:${entryPrice}`,
-    });
-    if (protection.pending) {
-      await touchGridLegPositionOwnership(row, parsed.leg, {
-        ownerState: "PROTECTION_INTENT_PENDING",
-        sourceClientOrderId: parsed.clientOrderId,
-        sourceOrderId: reData.i || null,
-        note: `entry-protection-intent:${reData.X || "FILLED"}`,
-      });
-      await appendGridRuntimeLog(
-        row,
-        "gridLiveOpen",
-        "ENTRY_PROTECTION_INTENT_PENDING",
-        `leg:${parsed.leg}, entryPrice:${entryPrice}, qty:${qty}, intent:${protection.intentSummary?.intent?.intentKey || "NONE"}`,
-        parsed.leg
-      );
-      setOutcome("ENTRY_PROTECTION_INTENT_PENDING");
-      return true;
-    }
-    if (!protection.protected) {
-      setOutcome(protection.outcome.partial ? "ENTRY_PARTIAL_PROTECTION_CRITICAL" : "ENTRY_UNPROTECTED_CRITICAL");
-      return protection.closed;
-    }
-    await touchGridLegPositionOwnership(row, parsed.leg, {
-      ownerState: "OPEN",
-      sourceClientOrderId: parsed.clientOrderId,
-      sourceOrderId: reData.i || null,
-      note: `entry-filled:${reData.X || "FILLED"}`,
-    });
-    await appendGridRuntimeLog(
-      row,
-      "gridLiveOpen",
-      row.regimeStatus === gridPairAtomicity.GRID_PAIR_STATE.ONE_LEG_FILLED ? "ENTRY_FILLED_ONE_LEG_PROTECTED" : "ENTRY_FILLED",
-      `leg:${parsed.leg}, entryPrice:${entryPrice}, qty:${qty}, tp:${protection.exits.takeProfitOrderId}, stop:${protection.exits.stopOrderId}`,
-      parsed.leg
+      {
+        issues: ["SOCKET_ORDER_TRADE_UPDATE"],
+      },
+      {
+        source: "SOCKET",
+        eventType: "GRID_ENTRY_FILL",
+        note: `grid-entry:${reData.X || "FILLED"}`,
+        routePath: "grid-runtime-entry-fill",
+        fillEvidence: {
+          eventType: reData.x || null,
+          endStatus: reData.X || null,
+          lastFillQty: reData.l || null,
+          cumulativeFillQty: reData.z || null,
+          tradeTime: reData.T || null,
+        },
+        failureLogCode: "ENTRY_PROTECTION_MISSING_CLOSED",
+        failureMessage: `leg:${parsed.leg}, entryOrderId:${parsed.clientOrderId}, qty:${entryFillQty}, entryPrice:${entryFillPrice}`,
+      }
     );
-    setOutcome(row.regimeStatus === gridPairAtomicity.GRID_PAIR_STATE.ONE_LEG_FILLED ? "ENTRY_ONE_LEG_PROTECTED" : "ENTRY_FILLED");
-    return true;
+    setOutcome(convergence.converged ? "ENTRY_FILL_CONVERGED" : "ENTRY_FILL_CONVERGENCE_FAILED");
+    return convergence.converged;
     });
   });
 };
@@ -5030,4 +5081,8 @@ module.exports = {
   handleLiveOrderTradeUpdate,
   suspendGridStrategy,
   deactivateGridStrategy,
+  __qa: {
+    applyGridEntryFillConvergence,
+    restoreLiveGridLegAfterRecoveredEntryFill,
+  },
 };

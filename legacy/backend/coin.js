@@ -5625,63 +5625,10 @@ exports.recoverGridEntryFillFromExchange = async ({
         issues: [].concat(issue?.issues || []),
     });
 
-    let appliedFillCount = 0;
-    let duplicateFillCount = 0;
-    for(const fill of recoveredFills){
-        const existingFill = await pidPositionLedger.findRecordedFill({
-            uid,
-            pid: row.id,
-            strategyCategory: 'grid',
-            symbol: row.symbol,
-            positionSide: normalizedLeg,
-            sourceClientOrderId: fill.clientOrderId,
-            sourceOrderId: fill.orderId,
-            sourceTradeId: fill.tradeId,
-            fillQty: fill.qty,
-            fillPrice: fill.price,
-            tradeTime: fill.tradeTime,
-        });
-        if(existingFill){
-            duplicateFillCount += 1;
-            continue;
-        }
-
-        await pidPositionLedger.applyEntryFill({
-            uid,
-            pid: row.id,
-            strategyCategory: 'grid',
-            symbol: row.symbol,
-            positionSide: normalizedLeg,
-            sourceClientOrderId: fill.clientOrderId,
-            sourceOrderId: fill.orderId,
-            sourceTradeId: fill.tradeId,
-            fillQty: fill.qty,
-            fillPrice: fill.price,
-            fee: fill.fee,
-            tradeTime: fill.tradeTime,
-            eventType: 'GRID_EXCHANGE_RECONCILED_ENTRY_FILL',
-            note: 'exchange-entry-reconcile',
-        });
-        appliedFillCount += 1;
-        logOrderRuntimeTrace('GRID_FILL_UNIT_APPLY', {
-            uid,
-            pid: row.id,
-            symbol: row.symbol,
-            positionSide: normalizedLeg,
-            clientOrderId: fill.clientOrderId,
-            orderId: fill.orderId,
-            tradeId: fill.tradeId || null,
-            qty: Number(fill.qty || 0),
-            price: Number(fill.price || 0),
-            tradeTime: fill.tradeTime,
-        });
-    }
-    await pidPositionLedger.syncGridLegSnapshot(row.id, normalizedLeg);
-
     exports.msgAdd(
         'gridReconcile',
-        'ENTRY_FILL_RECOVERED',
-        `pid:${row.id}, symbol:${row.symbol}, leg:${normalizedLeg}, clientOrderId:${execution.clientOrderId}, orderId:${execution.orderId}, fillCount:${recoveredFills.length}, appliedFillCount:${appliedFillCount}, duplicateFillCount:${duplicateFillCount}, qty:${execution.qty}, price:${execution.price}, issues:${[].concat(issue?.issues || []).join(',')}`,
+        'ENTRY_FILL_RECOVERY_DISCOVERED',
+        `pid:${row.id}, symbol:${row.symbol}, leg:${normalizedLeg}, clientOrderId:${execution.clientOrderId}, orderId:${execution.orderId}, fillCount:${recoveredFills.length}, qty:${execution.qty}, price:${execution.price}, issues:${[].concat(issue?.issues || []).join(',')}`,
         uid,
         row.id,
         execution.orderId,

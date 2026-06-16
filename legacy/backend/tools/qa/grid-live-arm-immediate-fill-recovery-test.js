@@ -48,7 +48,9 @@ check("immediate fill recovery requires exact current clientOrderId", () => {
 });
 
 check("immediate fill recovery restores ledger owner snapshot and protection path", () => {
+  assert(gridEngineSource.includes("applyGridEntryFillConvergence"));
   assert(gridEngineSource.includes("restoreLiveGridLegAfterRecoveredEntryFill"));
+  assert(gridEngineSource.includes("protectGridOpenLegOrClose"));
   assert(gridEngineSource.includes("GRID_LIVE_ARM_IMMEDIATE_FILL_RECOVERED"));
 });
 
