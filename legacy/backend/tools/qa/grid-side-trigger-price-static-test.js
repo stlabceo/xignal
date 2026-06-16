@@ -6,6 +6,7 @@ const path = require("path");
 
 const gridEngine = require("../../grid-engine");
 const gridRuntime = require("../../grid-runtime");
+const orderIntentQueue = require("../../order-intent-queue");
 
 const repoRoot = path.resolve(__dirname, "../../..");
 const gridEngineSource = fs.readFileSync(path.resolve(repoRoot, "backend/grid-engine.js"), "utf8");
@@ -106,6 +107,70 @@ check("live entry and re-entry source both use side trigger helper", () => {
   assert.ok(gridEngineSource.includes("const triggerPrice = getGridLegTriggerPrice(row, leg);"));
   assert.ok(gridEngineSource.includes("const triggerPrice = getGridLegTriggerPrice(current, leg);") || gridEngineSource.includes("getGridLegTriggerPrice(current, leg)"));
   assert.ok(gridEngineSource.includes("const sideTriggerMetadata = getGridSideTriggerMetadata(row);"));
+});
+
+check("GRID_ARM queue payload hash includes side trigger contract", () => {
+  const targetItem = {
+    uid: 156,
+    pid: 204,
+    symbol: "BTCUSDT",
+    bunbong: "15MIN",
+  };
+  const basePayload = {
+    strategySignal: "NY_BOX_GRID_35_65",
+    symbol: "BTCUSDT",
+    bunbong: "15MIN",
+    signalTime: "2026-06-15T10:00:00",
+    supportPrice: 100,
+    resistancePrice: 110,
+    triggerPrice: 105,
+    longTriggerPrice: 103.5,
+    shortTriggerPrice: 106.5,
+    triggerProfile: "35_65",
+  };
+  const originalHash = orderIntentQueue.buildGridArmIntentPayloadHash({ payload: basePayload, targetItem });
+  const changedLongHash = orderIntentQueue.buildGridArmIntentPayloadHash({
+    payload: { ...basePayload, longTriggerPrice: 104 },
+    targetItem,
+  });
+  const changedShortHash = orderIntentQueue.buildGridArmIntentPayloadHash({
+    payload: { ...basePayload, shortTriggerPrice: 107 },
+    targetItem,
+  });
+  assert.notStrictEqual(originalHash, changedLongHash);
+  assert.notStrictEqual(originalHash, changedShortHash);
+});
+
+check("GRID_REENTRY hash uses side-selected triggerPrice", () => {
+  const longHash = orderIntentQueue.buildGridReentryIntentPayloadHash({
+    payload: {
+      uid: 156,
+      pid: 204,
+      symbol: "BTCUSDT",
+      timeframe: "15MIN",
+      positionSide: "LONG",
+      regimeId: 204,
+      triggerPrice: 103.5,
+      reentryQty: 0.1,
+      ownedQtyBasis: 0.1,
+      sourceTakeProfitClientOrderId: "tp-long",
+    },
+  });
+  const shortHash = orderIntentQueue.buildGridReentryIntentPayloadHash({
+    payload: {
+      uid: 156,
+      pid: 204,
+      symbol: "BTCUSDT",
+      timeframe: "15MIN",
+      positionSide: "SHORT",
+      regimeId: 204,
+      triggerPrice: 106.5,
+      reentryQty: 0.1,
+      ownedQtyBasis: 0.1,
+      sourceTakeProfitClientOrderId: "tp-short",
+    },
+  });
+  assert.notStrictEqual(longHash, shortHash);
 });
 
 check("static test performs no DB mutation or Binance write", () => {
