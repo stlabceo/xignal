@@ -221,7 +221,7 @@ const runBootSafetyGate = async (ownerLabel = null) => {
     const uids = await loadBootSafetyGateUids();
     const checks = [];
     for(const uid of uids){
-        const monitor = await adminOrderMonitor.buildAdminOrderMonitor(uid, {});
+        const monitor = await adminOrderMonitor.buildAdminOrderMonitor(uid, { currentOnly: true });
         const sourceFailed = (monitor.sourceStatus || []).some((item) => item && item.ok === false);
         const currentCriticalCount = Number(monitor?.summary?.currentCriticalCount || 0);
         checks.push({

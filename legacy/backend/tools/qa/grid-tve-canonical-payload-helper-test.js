@@ -21,6 +21,19 @@ const baseInput = {
   signalTime: "2026-06-08T10:42:32.123Z",
 };
 
+const nyBoxInput = {
+  strategySignal: "NY_BOX_GRID_35_65",
+  symbol: "AVAXUSDT.P",
+  timeframe: "15MIN",
+  supportPrice: "6.85",
+  resistancePrice: "7.05",
+  triggerPrice: "6.95",
+  longTriggerPrice: "6.92",
+  shortTriggerPrice: "6.98",
+  triggerProfile: "35_65",
+  signalTime: "2026-06-16T12:00:00Z",
+};
+
 check("ARM payload uses backend canonical buildGridRegimeKey output", () => {
   const built = helper.buildGridArmTvePayloadUsingCanonicalKey(baseInput);
   assert.strictEqual(built.ok, true);
@@ -58,10 +71,23 @@ check("key mismatch blocks send before route", () => {
   assert.ok(["grid-arm-grid-regime-key-mismatch", "grid-regime-key-send-gate-mismatch"].includes(gate.reason));
 });
 
-check("PUMPUSDT.P normalizes to PUMPUSDT in canonical key", () => {
+check("PUMPUSDT.P is preserved in webhook/canonical key", () => {
   const built = helper.buildGridArmTvePayloadUsingCanonicalKey(baseInput);
-  assert.ok(built.payload.gridRegimeKey.includes("|PUMPUSDT|"));
-  assert.ok(!built.payload.gridRegimeKey.includes("PUMPUSDT.P"));
+  const parts = built.payload.gridRegimeKey.split("|");
+  assert.strictEqual(parts[3], "PUMPUSDT.P");
+  assert.notStrictEqual(parts[3], "PUMPUSDT");
+});
+
+check("NYBOX ARM helper preserves side trigger fields", () => {
+  const built = helper.buildGridArmTvePayloadUsingCanonicalKey(nyBoxInput);
+  assert.strictEqual(built.ok, true);
+  assert.strictEqual(built.payload.longTriggerPrice, "6.92");
+  assert.strictEqual(built.payload.shortTriggerPrice, "6.98");
+  assert.strictEqual(built.payload.triggerProfile, "35_65");
+  const gate = helper.validateGridArmPayloadBeforeSend(built.payload);
+  assert.strictEqual(gate.ok, true);
+  assert.strictEqual(gate.normalized.longTriggerPrice, 6.92);
+  assert.strictEqual(gate.normalized.shortTriggerPrice, 6.98);
 });
 
 check("30MIN timeframe normalization is canonical", () => {

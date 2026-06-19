@@ -644,26 +644,33 @@ const resolveSymbolsWithBinancePositions = (symbols = [], positionRows = []) =>
       .map((row) => row.symbol),
   ]).map(normalizeSymbol);
 
-const loadBinanceEvidence = async (uid, symbols) => {
+const loadBinanceEvidence = async (uid, symbols, options = {}) => {
+  const currentOnly = options.currentOnly === true;
   const [positionRiskResult, openOrdersResult, openAlgoOrdersResult] = await Promise.all([
     safeBinanceCall("positionRisk", () => qaBinance.getPositionRisk(uid), []),
     safeBinanceCall("openOrders", () => qaBinance.getOpenOrders(uid), []),
     safeBinanceCall("openAlgoOrders", () => qaBinance.getOpenAlgoOrders(uid), []),
   ]);
 
-  const perSymbolResults = await Promise.all(
-    symbols.map(async (symbol) => {
-      const [allOrdersResult, userTradesResult] = await Promise.all([
-        safeBinanceCall(`allOrders:${symbol}`, () => qaBinance.getAllOrders(uid, symbol, 100), []),
-        safeBinanceCall(`userTrades:${symbol}`, () => qaBinance.getUserTrades(uid, symbol, 100), []),
-      ]);
-      return {
+  const perSymbolResults = currentOnly
+    ? symbols.map((symbol) => ({
         symbol,
-        allOrders: allOrdersResult,
-        userTrades: userTradesResult,
-      };
-    })
-  );
+        allOrders: buildSkippedBinanceResult(`allOrders:${symbol}`, "CURRENT_ONLY_BOOT_SAFETY"),
+        userTrades: buildSkippedBinanceResult(`userTrades:${symbol}`, "CURRENT_ONLY_BOOT_SAFETY"),
+      }))
+    : await Promise.all(
+        symbols.map(async (symbol) => {
+          const [allOrdersResult, userTradesResult] = await Promise.all([
+            safeBinanceCall(`allOrders:${symbol}`, () => qaBinance.getAllOrders(uid, symbol, 100), []),
+            safeBinanceCall(`userTrades:${symbol}`, () => qaBinance.getUserTrades(uid, symbol, 100), []),
+          ]);
+          return {
+            symbol,
+            allOrders: allOrdersResult,
+            userTrades: userTradesResult,
+          };
+        })
+      );
 
   return {
     positionRisk: positionRiskResult,
@@ -1144,14 +1151,15 @@ const buildAdminOrderMonitor = async (uid, options = {}) => {
         .filter(Boolean);
   const symbols = resolveSymbols(localRows, requestedSymbols);
   const localOnly = options.localOnly === true || String(options.localOnly || "").trim().toUpperCase() === "Y";
+  const currentOnly = options.currentOnly === true || String(options.currentOnly || "").trim().toUpperCase() === "Y";
   let binanceEvidence = localOnly
     ? buildLocalOnlyBinanceEvidence(symbols)
-    : await loadBinanceEvidence(targetUid, symbols);
+    : await loadBinanceEvidence(targetUid, symbols, { currentOnly });
   const expandedSymbols = localOnly
     ? symbols
     : resolveSymbolsWithBinancePositions(symbols, binanceEvidence.positionRisk.data || []);
   if (!localOnly && expandedSymbols.length !== symbols.length) {
-    binanceEvidence = await loadBinanceEvidence(targetUid, expandedSymbols);
+    binanceEvidence = await loadBinanceEvidence(targetUid, expandedSymbols, { currentOnly });
   }
   const rawBinanceOrders = buildRawRows({ localRows, binanceEvidence });
   const currentRiskBoard = localOnly

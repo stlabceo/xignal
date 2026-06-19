@@ -88,7 +88,15 @@ const buildGridProtectionDispatchPlan = ({
     };
   }
   if (!(takeProfitPrice > 0) || !(stopPrice > 0)) {
-    return { allowed: false, reason: "GRID_PROTECTION_INVALID_TP_SL_PAYLOAD", positionSide, protectionQty };
+    const contextReason = String(payload.contextMissingReason || "").trim();
+    return {
+      allowed: false,
+      reason: contextReason.startsWith("GRID_PROTECTION_")
+        ? contextReason
+        : "GRID_PROTECTION_INVALID_TP_SL_PAYLOAD",
+      positionSide,
+      protectionQty,
+    };
   }
 
   return {
@@ -215,13 +223,14 @@ const buildGridCancelScopeDiagnostic = ({
     includeExits ? null : "PROTECTION_EXIT_STOP",
   ].filter(Boolean);
 
+  const verifiedGone = verification?.ok && verification?.terminal;
   let noopReason = null;
   if (canceledCount > 0) {
     noopReason = "GRID_CANCEL_SUBMITTED";
+  } else if (verifiedGone) {
+    noopReason = "GRID_CANCEL_VERIFIED_GONE_NOOP";
   } else if (refs.length === 0 && expectedScopes.length > 0) {
     noopReason = "GRID_CANCEL_NO_LOCAL_ORDER_REFS";
-  } else if (verification?.ok && verification?.terminal) {
-    noopReason = "GRID_CANCEL_VERIFIED_GONE_NOOP";
   } else if (refs.length > 0) {
     noopReason = "GRID_CANCEL_REFS_PRESENT_ZERO_CANCELED";
   } else {
@@ -242,7 +251,7 @@ const buildGridCancelScopeDiagnostic = ({
     }, {}),
     canceledCount,
     noopReason,
-    coverageIssue: refs.length === 0 && canceledCount === 0 ? "NO_LOCAL_ORDER_REFS_TO_CANCEL" : null,
+    coverageIssue: refs.length === 0 && canceledCount === 0 && !verifiedGone ? "NO_LOCAL_ORDER_REFS_TO_CANCEL" : null,
   };
 };
 

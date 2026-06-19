@@ -4621,9 +4621,9 @@ const buildGridProtectionIntentPayloadHash = ({ payload = {} } = {}) => {
 
 const buildGridProtectionIntentKey = ({ payload = {} } = {}) => {
   const normalized = normalizeProtectionIntentPayload(payload);
-  const tradeIdentity = normalized.sourceTradeId
+  const protectionUnitIdentity = normalized.entryOrderId
     || normalized.sourceOrderId
-    || normalized.entryOrderId
+    || normalized.sourceTradeId
     || buildGridProtectionIntentPayloadHash({ payload: normalized });
   return [
     INTENT_TYPE.GRID_PROTECTION_CREATE,
@@ -4631,7 +4631,7 @@ const buildGridProtectionIntentKey = ({ payload = {} } = {}) => {
     normalized.pid,
     normalized.symbol,
     normalized.positionSide,
-    tradeIdentity,
+    protectionUnitIdentity,
   ].join(":");
 };
 

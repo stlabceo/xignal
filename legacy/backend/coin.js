@@ -19,6 +19,7 @@ const credentialSecrets = require("./credential-secrets");
 const binanceWriteTimeSync = require("./binance-write-time-sync");
 const gridPriceSource = require("./grid-price-source");
 const orderIntentQueue = require("./order-intent-queue");
+const gridBinanceStatusClassifier = require("./grid-binance-status-classifier");
 let gridEngine = null;
 let policyEngine = null;
 const Binance = require('node-binance-api');
@@ -39,6 +40,7 @@ const TEST_MODE = false;
 
 let ACCESS_TOKEN = '';
 let binance = {};
+const QA_REPLAY_MOCK_BINANCE_CLIENT_TOKEN = Symbol('qaReplayMockBinanceClient');
 const initializingBinanceClients = new Set();
 const binanceInitRetryAt = {};
 const binanceClientRuntime = {};
@@ -128,7 +130,30 @@ const createBinanceApiClient = (appKey, appSecret) => new Binance().options({
 });
 
 const isQaTempMarker = (value) => String(value || '').trim().toUpperCase().startsWith('QA_');
-const isQaReplayMockBinanceClient = (uid) => Boolean(binance?.[uid]?.__qaMockBinanceClient);
+const markQaReplayMockBinanceClient = (client) => {
+    if(!client || typeof client !== 'object'){
+        return client;
+    }
+    Object.defineProperty(client, '__qaMockBinanceClient', {
+        value: true,
+        enumerable: false,
+        configurable: true,
+    });
+    Object.defineProperty(client, '__qaMockBinanceClientToken', {
+        value: QA_REPLAY_MOCK_BINANCE_CLIENT_TOKEN,
+        enumerable: false,
+        configurable: true,
+    });
+    return client;
+};
+const isQaReplayMockBinanceClient = (uid) => {
+    const client = binance?.[uid];
+    return Boolean(
+        client
+        && client.__qaMockBinanceClient === true
+        && client.__qaMockBinanceClientToken === QA_REPLAY_MOCK_BINANCE_CLIENT_TOKEN
+    );
+};
 const normalizeQaScopedGridSymbol = (value = '') => String(value || '')
     .trim()
     .toUpperCase()
@@ -517,6 +542,31 @@ const ensurePriceSlot = (symbol) => {
     return dt.price[symbol];
 }
 
+const getMergedGridPriceSlot = (symbol) => {
+    const rawSymbol = String(symbol || '').trim().toUpperCase();
+    const exchangeSymbol = normalizeBinanceFuturesSymbol(rawSymbol);
+    const rawSlot = dt.getPrice(rawSymbol) || {};
+    const exchangeSlot = exchangeSymbol && exchangeSymbol !== rawSymbol
+        ? dt.getPrice(exchangeSymbol) || {}
+        : {};
+    return {
+        ...exchangeSlot,
+        ...rawSlot,
+        symbol: rawSymbol,
+        bestBid: toAuditNumber(rawSlot.bestBid, 0) || toAuditNumber(exchangeSlot.bestBid, 0),
+        bestBidQty: rawSlot.bestBidQty || exchangeSlot.bestBidQty || 0,
+        bestAsk: toAuditNumber(rawSlot.bestAsk, 0) || toAuditNumber(exchangeSlot.bestAsk, 0),
+        bestAskQty: rawSlot.bestAskQty || exchangeSlot.bestAskQty || 0,
+        lastPrice: toAuditNumber(rawSlot.lastPrice, 0) || toAuditNumber(exchangeSlot.lastPrice, 0),
+        lastQty: toAuditNumber(rawSlot.lastQty, 0) || toAuditNumber(exchangeSlot.lastQty, 0),
+        lastTradeTime: rawSlot.lastTradeTime || exchangeSlot.lastTradeTime || 0,
+        quoteTime: rawSlot.quoteTime || exchangeSlot.quoteTime || 0,
+        markPrice: toAuditNumber(rawSlot.markPrice, 0) || toAuditNumber(exchangeSlot.markPrice, 0),
+        markTime: rawSlot.markTime || exchangeSlot.markTime || 0,
+        st: Boolean(rawSlot.st || exchangeSlot.st),
+    };
+}
+
 const hydratePriceSlotFromBookTicker = async (symbol) => {
     const normalizedSymbol = String(symbol || '').trim().toUpperCase();
     const exchangeSymbol = normalizeBinanceFuturesSymbol(normalizedSymbol);
@@ -549,7 +599,7 @@ const hydratePriceSlotFromBookTicker = async (symbol) => {
         lastTradeTime: slot.lastTradeTime || 0,
     };
 
-    return dt.getPrice(normalizedSymbol);
+    return getMergedGridPriceSlot(normalizedSymbol);
 }
 
 const hydratePriceSlotFromMarkPrice = async (symbol) => {
@@ -572,7 +622,51 @@ const hydratePriceSlotFromMarkPrice = async (symbol) => {
         markTime: data.time || Date.now(),
     };
 
-    return dt.getPrice(normalizedSymbol);
+    return getMergedGridPriceSlot(normalizedSymbol);
+}
+
+const hydrateGridPublicHintMarkPrice = async (symbol) => {
+    const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+    const exchangeSymbol = normalizeBinanceFuturesSymbol(normalizedSymbol);
+    if(!normalizedSymbol || !exchangeSymbol){
+        return getMergedGridPriceSlot(normalizedSymbol);
+    }
+
+    try{
+        const response = await axios.get(`${FUTURES_BASE_URL}/fapi/v1/premiumIndex`, {
+            params: { symbol: exchangeSymbol },
+            timeout: 5000,
+        });
+        const data = response?.data || {};
+        const markPrice = toAuditNumber(data.markPrice, 0);
+        const markTime = toAuditTimestamp(data.time) || Date.now();
+        if(!(markPrice > 0)){
+            return getMergedGridPriceSlot(normalizedSymbol);
+        }
+        for(const slotSymbol of Array.from(new Set([normalizedSymbol, exchangeSymbol].filter(Boolean)))){
+            const slot = ensurePriceSlot(slotSymbol);
+            dt.price[slotSymbol] = {
+                ...slot,
+                symbol: slotSymbol,
+                markPrice,
+                markTime,
+            };
+        }
+        return getMergedGridPriceSlot(normalizedSymbol);
+    }catch(error){
+        logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_PRICE_CROSS_HINT_SKIP', {
+            symbol: normalizedSymbol,
+            normalizedSymbol: exchangeSymbol,
+            skipReason: 'MARK_PRICE_HYDRATION_FAILED',
+            message: error?.message || String(error),
+            code: error?.code || null,
+            httpStatus: error?.response?.status || null,
+        }, {
+            throttleKey: `GRID_PUBLIC_PRICE_HINT_MARK_PRICE_HYDRATION_FAILED:${exchangeSymbol}`,
+            throttleMs: GRID_PUBLIC_PRICE_HINT_AUDIT_THROTTLE_MS,
+        });
+        return getMergedGridPriceSlot(normalizedSymbol);
+    }
 }
 
 // const ckCode = (code_) => {
@@ -779,6 +873,2279 @@ const logOrderRuntimeTrace = (stage, payload = {}) => {
     }catch(error){
         console.log(`[BINANCE_RUNTIME][${stage}]`);
     }
+}
+
+const gridSeparatedAuditThrottleAt = new Map();
+const toAuditNumber = (value, fallback = null) => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : fallback;
+}
+const toAuditTimestamp = (value) => {
+    if(value === null || value === undefined || value === ''){
+        return null;
+    }
+
+    const numeric = Number(value);
+    if(Number.isFinite(numeric) && numeric > 0){
+        return numeric;
+    }
+
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+const buildAuditLatencyMs = (from, to = Date.now()) => {
+    const fromMs = toAuditTimestamp(from);
+    const toMs = toAuditTimestamp(to);
+    if(!(fromMs > 0) || !(toMs > 0)){
+        return null;
+    }
+    return Math.max(0, toMs - fromMs);
+}
+const logSeparatedGridAuditTrace = (stage, payload = {}, options = {}) => {
+    const throttleMs = Number(options.throttleMs || 0);
+    const throttleKey = options.throttleKey || null;
+    if(throttleMs > 0 && throttleKey){
+        const now = Date.now();
+        const lastAt = Number(gridSeparatedAuditThrottleAt.get(throttleKey) || 0);
+        if(lastAt > 0 && (now - lastAt) < throttleMs){
+            return false;
+        }
+        gridSeparatedAuditThrottleAt.set(throttleKey, now);
+    }
+
+    logOrderRuntimeTrace(stage, {
+        ...payload,
+        auditNamespace: stage.split('_').slice(0, 3).join('_'),
+        loggedAt: new Date().toISOString(),
+    });
+    return true;
+}
+
+const GRID_PUBLIC_PRICE_HINT_AUDIT_THROTTLE_MS = 60000;
+const GRID_PUBLIC_PRICE_HINT_INGRESS_THROTTLE_MS = 60000;
+const GRID_PUBLIC_PRICE_HINT_CANDIDATE_CACHE_MS = 1000;
+const getGridTargetedTruthSyncEnvNumber = (name, fallback, minValue = 0) => {
+    const raw = process.env[name];
+    const parsed = raw === undefined || raw === null || raw === '' ? fallback : Number(raw);
+    if(!Number.isFinite(parsed)){
+        return fallback;
+    }
+    return Math.max(minValue, parsed);
+}
+const GRID_TARGETED_TRUTH_SYNC_FIRST_VERIFY_GRACE_MS = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_FIRST_VERIFY_GRACE_MS', 2500, 1);
+const GRID_TARGETED_TRUTH_SYNC_REPEAT_COOLDOWN_MS = 60000;
+const GRID_TARGETED_TRUTH_SYNC_PROTECTION_REPEAT_COOLDOWN_MS = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_PROTECTION_REPEAT_COOLDOWN_MS', 12000, 1000);
+const GRID_TARGETED_TRUTH_SYNC_ENTRY_REPEAT_COOLDOWN_MS = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_ENTRY_REPEAT_COOLDOWN_MS', GRID_TARGETED_TRUTH_SYNC_REPEAT_COOLDOWN_MS, 1000);
+const GRID_TARGETED_TRUTH_SYNC_ENTRY_NEW_FOLLOWUP_MS = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_ENTRY_NEW_FOLLOWUP_MS', 12000, 1000);
+const GRID_TARGETED_TRUTH_SYNC_ENTRY_NEW_FOLLOWUP_MAX = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_ENTRY_NEW_FOLLOWUP_MAX', 1, 0);
+const GRID_TARGETED_TRUTH_SYNC_AMBIGUOUS_REPEAT_COOLDOWN_MS = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_AMBIGUOUS_REPEAT_COOLDOWN_MS', GRID_TARGETED_TRUTH_SYNC_REPEAT_COOLDOWN_MS, 1000);
+const GRID_TARGETED_TRUTH_SYNC_TERMINAL_SUPPRESSION_MS = 300000;
+const GRID_TARGETED_TRUTH_SYNC_IN_FLIGHT_LOCK_TTL_MS = 30000;
+const GRID_TARGETED_TRUTH_SYNC_GLOBAL_CONCURRENCY = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_GLOBAL_CONCURRENCY', 6, 1);
+const GRID_TARGETED_TRUTH_SYNC_PER_UID_CONCURRENCY = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_PER_UID_CONCURRENCY', 2, 1);
+const GRID_TARGETED_TRUTH_SYNC_PER_SYMBOL_CONCURRENCY = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_PER_SYMBOL_CONCURRENCY', 2, 1);
+const GRID_TARGETED_TRUTH_SYNC_GLOBAL_STARTS_PER_SECOND = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_GLOBAL_STARTS_PER_SECOND', 6, 1);
+const GRID_TARGETED_TRUTH_SYNC_STALE_QUEUE_MS = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_STALE_QUEUE_MS', 30000, 1000);
+const GRID_TARGETED_TRUTH_SYNC_SAFETY_NET_MAX_SIZE = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_SAFETY_NET_MAX_SIZE', 1000, 100);
+const GRID_TARGETED_TRUTH_SYNC_DENSE_CRITICAL_THRESHOLD = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_DENSE_CRITICAL_THRESHOLD', 12, 2);
+const GRID_TARGETED_TRUTH_SYNC_DENSE_CRITICAL_WINDOW_MS = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_DENSE_CRITICAL_WINDOW_MS', 250, 1);
+const GRID_TARGETED_TRUTH_SYNC_DENSE_CRITICAL_MAX_BATCH = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_DENSE_CRITICAL_MAX_BATCH', 1000, 2);
+const GRID_TARGETED_TRUTH_SYNC_DENSE_EXACT_FALLBACK_MAX = getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_DENSE_EXACT_FALLBACK_MAX', 100, 0);
+const gridPublicHintRowsCache = new Map();
+const gridTargetedTruthSyncVerifyLastAt = new Map();
+const gridTargetedTruthSyncTerminalAt = new Map();
+const gridTargetedTruthSyncVerifyRunning = new Map();
+const gridTargetedTruthSyncVerifyTimers = new Map();
+const gridTargetedTruthSyncSafetyNet = new Map();
+const gridTargetedTruthSyncQueue = [];
+const gridTargetedTruthSyncRunningByUid = new Map();
+const gridTargetedTruthSyncRunningBySymbol = new Map();
+const gridTargetedTruthSyncMetrics = {
+    started: 0,
+    completed: 0,
+    suppressed: 0,
+    deferred: 0,
+    droppedStale: 0,
+    maxQueueLength: 0,
+    waitSamplesMs: [],
+    exactQueries: 0,
+    rowWideFallbacks: 0,
+    denseCriticalBatches: 0,
+    denseCriticalCandidates: 0,
+    denseCriticalDispatched: 0,
+    denseCriticalDeferred: 0,
+    denseCriticalExactFallbacks: 0,
+    denseCriticalTradeFallbacks: 0,
+    openAlgoOrdersCalls: 0,
+    allAlgoOrdersCalls: 0,
+    allOrdersCalls: 0,
+    userTradesCalls: 0,
+    positionRiskCalls: 0,
+    safetyNetRegistered: 0,
+    safetyNetScanCandidates: 0,
+    entryNewFollowupScheduled: 0,
+};
+let gridTargetedTruthSyncGlobalRunning = 0;
+let gridTargetedTruthSyncBudgetWindowStartedAt = 0;
+let gridTargetedTruthSyncBudgetWindowStarts = 0;
+let gridTargetedTruthSyncDrainTimer = null;
+const getGridPublicHintSymbols = (symbol) => {
+    const normalized = String(symbol || '').trim().toUpperCase();
+    const exchangeSymbol = normalizeBinanceFuturesSymbol(normalized);
+    return Array.from(new Set([normalized, exchangeSymbol, exchangeSymbol ? `${exchangeSymbol}.P` : ''].filter(Boolean)));
+}
+const getGridPublicHintCacheKey = (symbols = []) =>
+    symbols.map((symbol) => String(symbol || '').trim().toUpperCase()).filter(Boolean).sort().join('|');
+const normalizeGridPublicPriceContext = ({
+    symbol,
+    source,
+    price,
+    bestBid,
+    bestAsk,
+    lastPrice,
+    markPrice,
+    quoteTime,
+    markTime,
+    eventTime,
+} = {}) => {
+    const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+    const slot = getMergedGridPriceSlot(normalizedSymbol) || {};
+    return {
+        symbol: normalizedSymbol,
+        normalizedSymbol: normalizeBinanceFuturesSymbol(normalizedSymbol),
+        source: source || null,
+        bestBid: toAuditNumber(bestBid ?? slot.bestBid, 0),
+        bestAsk: toAuditNumber(bestAsk ?? slot.bestAsk, 0),
+        lastPrice: toAuditNumber(lastPrice ?? price ?? slot.lastPrice, 0),
+        markPrice: toAuditNumber(markPrice ?? slot.markPrice, 0),
+        quoteTime: toAuditTimestamp(quoteTime ?? slot.quoteTime ?? eventTime),
+        markTime: toAuditTimestamp(markTime ?? slot.markTime),
+        eventTime: toAuditTimestamp(eventTime),
+    };
+}
+
+const isFreshGridPublicTimestamp = (timestamp, maxAgeMs = 5000) => {
+    const normalized = toAuditTimestamp(timestamp);
+    if(!(normalized > 0)){
+        return false;
+    }
+    return Date.now() - normalized <= maxAgeMs;
+}
+
+const getGridPublicHintComparablePrice = ({ side, kind, target = {}, priceContext = {} } = {}) => {
+    const normalizedSide = String(side || '').trim().toUpperCase();
+    const normalizedKind = String(kind || '').trim().toUpperCase();
+    const workingType = String(target.workingType || '').trim().toUpperCase() || 'CONTRACT_PRICE';
+    if(normalizedKind === 'ENTRY'){
+        const comparablePrice = normalizedSide === 'LONG'
+            ? toAuditNumber(priceContext.bestAsk, 0)
+            : normalizedSide === 'SHORT'
+                ? toAuditNumber(priceContext.bestBid, 0)
+                : 0;
+        return {
+            comparablePrice,
+            priceSource: normalizedSide === 'LONG' ? 'BOOK_TICKER_BEST_ASK' : 'BOOK_TICKER_BEST_BID',
+            usable: comparablePrice > 0 && isFreshGridPublicTimestamp(priceContext.quoteTime),
+            reason: comparablePrice > 0 ? null : 'ENTRY_BOOK_TICKER_PRICE_MISSING',
+            workingType: 'CONTRACT_PRICE',
+        };
+    }
+
+    if(normalizedKind === 'TP' || normalizedKind === 'STOP'){
+        if(workingType === 'MARK_PRICE'){
+            const comparablePrice = toAuditNumber(priceContext.markPrice, 0);
+            return {
+                comparablePrice,
+                priceSource: 'MARK_PRICE',
+                usable: comparablePrice > 0 && isFreshGridPublicTimestamp(priceContext.markTime),
+                reason: comparablePrice > 0 ? null : 'MARK_PRICE_MISSING',
+                workingType,
+            };
+        }
+        const comparablePrice = toAuditNumber(priceContext.lastPrice, 0);
+        return {
+            comparablePrice,
+            priceSource: 'CONTRACT_PRICE_LAST_TRADE',
+            usable: comparablePrice > 0 && isFreshGridPublicTimestamp(priceContext.eventTime || priceContext.quoteTime),
+            reason: comparablePrice > 0 ? null : 'CONTRACT_PRICE_MISSING',
+            workingType,
+        };
+    }
+    return {
+        comparablePrice: 0,
+        priceSource: null,
+        usable: false,
+        reason: 'UNKNOWN_TARGET_KIND',
+        workingType,
+    };
+}
+
+const getGridPublicHintConditionMet = ({ side, kind, comparablePrice, targetPrice }) => {
+    const normalizedSide = String(side || '').trim().toUpperCase();
+    const normalizedKind = String(kind || '').trim().toUpperCase();
+    const currentPrice = toAuditNumber(comparablePrice, 0);
+    const target = toAuditNumber(targetPrice, 0);
+    if(!(currentPrice > 0) || !(target > 0)){
+        return false;
+    }
+
+    if(normalizedKind === 'ENTRY'){
+        return normalizedSide === 'LONG'
+            ? currentPrice <= target
+            : currentPrice >= target;
+    }
+    if(normalizedKind === 'TP'){
+        return normalizedSide === 'LONG'
+            ? currentPrice >= target
+            : currentPrice <= target;
+    }
+    if(normalizedKind === 'STOP'){
+        return normalizedSide === 'LONG'
+            ? currentPrice <= target
+            : currentPrice >= target;
+    }
+    return false;
+}
+const hasGridPublicHintOrderReference = (target = {}) => Boolean(
+    target.clientOrderId
+    || target.clientAlgoId
+    || target.orderId
+    || target.algoId
+);
+const getGridPublicHintOrderReference = (target = {}) =>
+    target.clientOrderId
+    || target.clientAlgoId
+    || target.orderId
+    || target.algoId
+    || null;
+const getGridPublicHintTargetScope = (target = {}) =>
+    hasGridPublicHintOrderReference(target)
+        ? 'EXACT_ORDER_TARGETED'
+        : 'PID_SIDE_TARGETED_BUT_ORDER_AMBIGUOUS';
+const buildGridPublicHintTargets = (row, side) => {
+    const normalizedSide = String(side || '').trim().toUpperCase();
+    const prefix = normalizedSide === 'LONG'
+        ? 'long'
+        : normalizedSide === 'SHORT'
+            ? 'short'
+            : null;
+    if(!prefix){
+        return [];
+    }
+
+    const legStatus = String(row?.[`${prefix}LegStatus`] || '').trim().toUpperCase();
+    const targets = [];
+    const entryPrice = toAuditNumber(
+        row?.[`${prefix}EntryPrice`] || row?.[`${prefix}TriggerPrice`] || row?.triggerPrice,
+        0
+    );
+    const tpPrice = toAuditNumber(row?.[`${prefix}TakeProfitPrice`], 0);
+    const stopPrice = toAuditNumber(row?.[`${prefix}StopPrice`], 0);
+    const entryClientOrderId = row?.[`${prefix}EntryOrderId`] || null;
+    const tpClientAlgoId = row?.[`${prefix}ExitOrderId`] || null;
+    const stopClientAlgoId = row?.[`${prefix}StopOrderId`] || null;
+
+    if(legStatus === 'ENTRY_ARMED' && entryPrice > 0){
+        targets.push({
+            kind: 'ENTRY',
+            orderKind: 'ENTRY',
+            targetPrice: entryPrice,
+            clientOrderId: entryClientOrderId,
+            workingType: 'CONTRACT_PRICE',
+            targetScope: entryClientOrderId ? 'EXACT_ORDER_TARGETED' : 'PID_SIDE_TARGETED_BUT_ORDER_AMBIGUOUS',
+        });
+    }
+    if(legStatus === 'OPEN'){
+        if(tpPrice > 0){
+            targets.push({
+                kind: 'TP',
+                orderKind: 'TP',
+                targetPrice: tpPrice,
+                clientAlgoId: tpClientAlgoId,
+                workingType: 'MARK_PRICE',
+                targetScope: tpClientAlgoId ? 'EXACT_ORDER_TARGETED' : 'PID_SIDE_TARGETED_BUT_ORDER_AMBIGUOUS',
+            });
+        }
+        if(stopPrice > 0){
+            targets.push({
+                kind: 'STOP',
+                orderKind: 'STOP',
+                targetPrice: stopPrice,
+                clientAlgoId: stopClientAlgoId,
+                workingType: 'MARK_PRICE',
+                targetScope: stopClientAlgoId ? 'EXACT_ORDER_TARGETED' : 'PID_SIDE_TARGETED_BUT_ORDER_AMBIGUOUS',
+            });
+        }
+    }
+
+    return targets;
+}
+const buildGridTargetedTruthSyncVerifyKey = ({
+    uid,
+    pid,
+    symbol,
+    side,
+    kind,
+    clientOrderId = null,
+    clientAlgoId = null,
+    orderId = null,
+    algoId = null,
+} = {}) =>
+    [
+        Number(uid || 0),
+        Number(pid || 0),
+        normalizeBinanceFuturesSymbol(symbol),
+        String(side || '').trim().toUpperCase(),
+        String(kind || '').trim().toUpperCase(),
+        clientOrderId || clientAlgoId || orderId || algoId || 'NO_ORDER_REF',
+    ].join(':');
+
+const findExchangeAlgoOrder = async (uid, symbol, { algoId = null, clientAlgoId = null } = {}) => {
+    if(!(await ensureBinanceApiClient(uid))){
+        return null;
+    }
+
+    const params = {
+        symbol: normalizeBinanceFuturesSymbol(symbol),
+    };
+
+    if(algoId){
+        params.algoId = algoId;
+    }else if(clientAlgoId){
+        params.clientAlgoId = clientAlgoId;
+    }
+
+    if(!params.algoId && !params.clientAlgoId){
+        return null;
+    }
+
+    try{
+        return await privateFuturesAlgoRequest(uid, '/fapi/v1/algoOrder', params, 'GET');
+    }catch(error){
+        const info = extractBinanceError(error);
+        if(info.code === -2013 || info.code === -2011){
+            return null;
+        }
+        throw error;
+    }
+}
+
+const readExactGridTargetOrderStatus = async ({
+    uid,
+    symbol,
+    kind,
+    clientOrderId = null,
+    clientAlgoId = null,
+    orderId = null,
+    algoId = null,
+} = {}) => {
+    const normalizedKind = String(kind || '').trim().toUpperCase();
+    if(normalizedKind === 'ENTRY'){
+        if(!clientOrderId && !orderId){
+            return null;
+        }
+        return await findExchangeOrder(uid, symbol, {
+            orderId,
+            clientOrderId,
+        });
+    }
+    if(normalizedKind === 'TP' || normalizedKind === 'STOP'){
+        if(!clientAlgoId && !algoId){
+            return null;
+        }
+        return await findExchangeAlgoOrder(uid, symbol, {
+            algoId,
+            clientAlgoId,
+        });
+    }
+    return null;
+}
+
+const getExactGridTargetStatus = (order = {}, kind = null) => {
+    const normalizedKind = String(kind || '').trim().toUpperCase();
+    const status = String(
+        order?.status
+        || order?.orderStatus
+        || order?.algoStatus
+        || order?.state
+        || ''
+    ).trim().toUpperCase();
+    const executedQty = toAuditNumber(
+        order?.executedQty
+        ?? order?.cumQty
+        ?? order?.cumBase
+        ?? order?.aq
+        ?? order?.actualQty
+        ?? order?.filledQty,
+        0
+    );
+    const originalQty = toAuditNumber(order?.origQty ?? order?.quantity ?? order?.q, 0);
+    const isAlgo = normalizedKind === 'TP' || normalizedKind === 'STOP';
+    const noOpStatus = isAlgo
+        ? ['NEW', 'TRIGGERING'].includes(status)
+        : status === 'NEW';
+    const verifyStatus = isAlgo
+        ? ['TRIGGERED', 'FINISHED'].includes(status)
+        : (status === 'PARTIALLY_FILLED' || status === 'FILLED');
+    const terminalNoFill = ['CANCELED', 'REJECTED', 'EXPIRED', 'EXPIRED_IN_MATCH'].includes(status)
+        && !(executedQty > 0);
+    const terminalWithFill = ['CANCELED', 'REJECTED', 'EXPIRED', 'EXPIRED_IN_MATCH'].includes(status)
+        && executedQty > 0;
+    return {
+        status,
+        executedQty,
+        originalQty,
+        noOpStatus,
+        verifyStatus,
+        terminalNoFill,
+        terminalWithFill,
+    };
+}
+
+const getGridTargetedTruthSyncPriority = ({ kind, targetScope } = {}) => {
+    const normalizedScope = String(targetScope || '').trim().toUpperCase();
+    const normalizedKind = String(kind || '').trim().toUpperCase();
+    if(normalizedScope === 'PID_SIDE_TARGETED_BUT_ORDER_AMBIGUOUS'){
+        return 30;
+    }
+    if(normalizedKind === 'STOP' || normalizedKind === 'TP'){
+        return 10;
+    }
+    if(normalizedKind === 'ENTRY'){
+        return 20;
+    }
+    return 40;
+}
+
+const isGridTargetedTruthSyncCriticalProtection = (task = {}) => {
+    const kind = String(task.normalizedKind || task.kind || '').trim().toUpperCase();
+    const scope = String(task.targetScope || '').trim().toUpperCase();
+    return (kind === 'TP' || kind === 'STOP') && scope === 'EXACT_ORDER_TARGETED';
+}
+
+const getGridTargetedTruthSyncRepeatCooldownMs = ({ kind, targetScope } = {}) => {
+    const normalizedKind = String(kind || '').trim().toUpperCase();
+    const normalizedScope = String(targetScope || '').trim().toUpperCase();
+    if(normalizedScope === 'PID_SIDE_TARGETED_BUT_ORDER_AMBIGUOUS'){
+        return GRID_TARGETED_TRUTH_SYNC_AMBIGUOUS_REPEAT_COOLDOWN_MS;
+    }
+    if(normalizedKind === 'TP' || normalizedKind === 'STOP'){
+        return GRID_TARGETED_TRUTH_SYNC_PROTECTION_REPEAT_COOLDOWN_MS;
+    }
+    if(normalizedKind === 'ENTRY'){
+        return GRID_TARGETED_TRUTH_SYNC_ENTRY_REPEAT_COOLDOWN_MS;
+    }
+    return GRID_TARGETED_TRUTH_SYNC_REPEAT_COOLDOWN_MS;
+}
+
+const registerGridTargetedTruthSyncSafetyNet = (task, reason) => {
+    const safetyKey = task?.verifyKey || [
+        task?.numericUid,
+        task?.numericPid,
+        task?.symbolKey,
+        task?.normalizedSide,
+        task?.normalizedKind,
+        Date.now(),
+    ].join(':');
+    gridTargetedTruthSyncSafetyNet.set(safetyKey, {
+        registeredAt: Date.now(),
+        uid: task?.numericUid || null,
+        pid: task?.numericPid || null,
+        symbol: task?.symbol || null,
+        normalizedSymbol: task?.symbolKey || null,
+        side: task?.normalizedSide || null,
+        kind: task?.normalizedKind || null,
+        targetScope: task?.targetScope || null,
+        reason,
+    });
+    while(gridTargetedTruthSyncSafetyNet.size > GRID_TARGETED_TRUTH_SYNC_SAFETY_NET_MAX_SIZE){
+        const oldestKey = gridTargetedTruthSyncSafetyNet.keys().next().value;
+        if(!oldestKey){
+            break;
+        }
+        gridTargetedTruthSyncSafetyNet.delete(oldestKey);
+    }
+    gridTargetedTruthSyncMetrics.safetyNetRegistered += 1;
+}
+
+const getGridTargetedTruthSyncSafetyNetPids = (uid, limit = 12) => {
+    const numericUid = Number(uid || 0);
+    if(!(numericUid > 0)){
+        return [];
+    }
+    const seen = new Set();
+    return Array.from(gridTargetedTruthSyncSafetyNet.values())
+        .filter((item) => Number(item?.uid || 0) === numericUid && Number(item?.pid || 0) > 0)
+        .sort((a, b) => Number(b?.registeredAt || 0) - Number(a?.registeredAt || 0))
+        .map((item) => Number(item.pid || 0))
+        .filter((pid) => {
+            if(!(pid > 0) || seen.has(pid)){
+                return false;
+            }
+            seen.add(pid);
+            return true;
+        })
+        .slice(0, Math.max(0, Number(limit || 0)));
+}
+
+const incrementGridTargetedTruthSyncCounter = (map, key) => {
+    const normalizedKey = key || 'UNKNOWN';
+    map.set(normalizedKey, Number(map.get(normalizedKey) || 0) + 1);
+}
+
+const decrementGridTargetedTruthSyncCounter = (map, key) => {
+    const normalizedKey = key || 'UNKNOWN';
+    const next = Math.max(0, Number(map.get(normalizedKey) || 0) - 1);
+    if(next > 0){
+        map.set(normalizedKey, next);
+    }else{
+        map.delete(normalizedKey);
+    }
+}
+
+const canStartGridTargetedTruthSyncTask = (task, now = Date.now()) => {
+    if(gridTargetedTruthSyncGlobalRunning >= GRID_TARGETED_TRUTH_SYNC_GLOBAL_CONCURRENCY){
+        return { ok: false, reason: 'GLOBAL_CONCURRENCY_LIMIT' };
+    }
+    if(Number(gridTargetedTruthSyncRunningByUid.get(task.uidKey) || 0) >= GRID_TARGETED_TRUTH_SYNC_PER_UID_CONCURRENCY){
+        return { ok: false, reason: 'UID_CONCURRENCY_LIMIT' };
+    }
+    if(Number(gridTargetedTruthSyncRunningBySymbol.get(task.symbolKey) || 0) >= GRID_TARGETED_TRUTH_SYNC_PER_SYMBOL_CONCURRENCY){
+        return { ok: false, reason: 'SYMBOL_CONCURRENCY_LIMIT' };
+    }
+    if(!(gridTargetedTruthSyncBudgetWindowStartedAt > 0) || now - gridTargetedTruthSyncBudgetWindowStartedAt >= 1000){
+        gridTargetedTruthSyncBudgetWindowStartedAt = now;
+        gridTargetedTruthSyncBudgetWindowStarts = 0;
+    }
+    if(gridTargetedTruthSyncBudgetWindowStarts >= GRID_TARGETED_TRUTH_SYNC_GLOBAL_STARTS_PER_SECOND){
+        return {
+            ok: false,
+            reason: 'GLOBAL_START_BUDGET_LIMIT',
+            waitMs: Math.max(1, 1000 - (now - gridTargetedTruthSyncBudgetWindowStartedAt)),
+        };
+    }
+    return { ok: true };
+}
+
+const scheduleGridTargetedTruthSyncDrain = (delayMs = 0) => {
+    if(gridTargetedTruthSyncDrainTimer){
+        return;
+    }
+    gridTargetedTruthSyncDrainTimer = setTimeout(() => {
+        gridTargetedTruthSyncDrainTimer = null;
+        drainGridTargetedTruthSyncQueue();
+    }, Math.max(0, delayMs));
+}
+
+const finalizeGridTargetedTruthSyncTask = (task) => {
+    gridTargetedTruthSyncGlobalRunning = Math.max(0, gridTargetedTruthSyncGlobalRunning - 1);
+    decrementGridTargetedTruthSyncCounter(gridTargetedTruthSyncRunningByUid, task.uidKey);
+    decrementGridTargetedTruthSyncCounter(gridTargetedTruthSyncRunningBySymbol, task.symbolKey);
+    gridTargetedTruthSyncVerifyRunning.delete(task.verifyKey);
+    gridTargetedTruthSyncMetrics.completed += 1;
+    scheduleGridTargetedTruthSyncDrain(0);
+}
+
+const tryStartGridTargetedTruthSyncDenseCriticalBatch = (now = Date.now()) => {
+    const groups = new Map();
+    for(const task of gridTargetedTruthSyncQueue){
+        if(!isGridTargetedTruthSyncCriticalProtection(task)){
+            continue;
+        }
+        const denseKey = getGridTargetedTruthSyncDenseBatchKey(task);
+        if(!groups.has(denseKey)){
+            groups.set(denseKey, []);
+        }
+        groups.get(denseKey).push(task);
+    }
+
+    const eligible = Array.from(groups.values())
+        .filter((tasks) => tasks.length >= GRID_TARGETED_TRUTH_SYNC_DENSE_CRITICAL_THRESHOLD)
+        .sort((left, right) => Number(left[0]?.queuedAt || 0) - Number(right[0]?.queuedAt || 0))[0];
+    if(!eligible){
+        return { started: false };
+    }
+
+    const oldestQueuedAt = Math.min(...eligible.map((task) => Number(task.queuedAt || now)));
+    const oldestAgeMs = now - oldestQueuedAt;
+    if(oldestAgeMs < GRID_TARGETED_TRUTH_SYNC_DENSE_CRITICAL_WINDOW_MS){
+        return {
+            started: false,
+            waitMs: Math.max(1, GRID_TARGETED_TRUTH_SYNC_DENSE_CRITICAL_WINDOW_MS - oldestAgeMs),
+            holdDenseKey: getGridTargetedTruthSyncDenseBatchKey(eligible[0]),
+        };
+    }
+
+    const representative = eligible[0];
+    const gate = canStartGridTargetedTruthSyncTask(representative, now);
+    if(!gate.ok){
+        return {
+            started: false,
+            waitMs: gate.waitMs || 50,
+        };
+    }
+
+    const selected = eligible
+        .sort((left, right) => Number(left.queuedAt || 0) - Number(right.queuedAt || 0))
+        .slice(0, GRID_TARGETED_TRUTH_SYNC_DENSE_CRITICAL_MAX_BATCH);
+    const selectedKeys = new Set(selected.map((task) => task.verifyKey));
+    for(let index = gridTargetedTruthSyncQueue.length - 1; index >= 0; index -= 1){
+        if(selectedKeys.has(gridTargetedTruthSyncQueue[index].verifyKey)){
+            gridTargetedTruthSyncQueue.splice(index, 1);
+        }
+    }
+
+    for(const task of selected){
+        const waitMs = now - Number(task.queuedAt || now);
+        gridTargetedTruthSyncMetrics.waitSamplesMs.push(waitMs);
+    }
+    while(gridTargetedTruthSyncMetrics.waitSamplesMs.length > 1000){
+        gridTargetedTruthSyncMetrics.waitSamplesMs.shift();
+    }
+    gridTargetedTruthSyncMetrics.started += selected.length;
+    gridTargetedTruthSyncMetrics.denseCriticalBatches += 1;
+    gridTargetedTruthSyncGlobalRunning += 1;
+    gridTargetedTruthSyncBudgetWindowStarts += 1;
+    incrementGridTargetedTruthSyncCounter(gridTargetedTruthSyncRunningByUid, representative.uidKey);
+    incrementGridTargetedTruthSyncCounter(gridTargetedTruthSyncRunningBySymbol, representative.symbolKey);
+
+    const batchTask = {
+        uidKey: representative.uidKey,
+        symbolKey: representative.symbolKey,
+        tasks: selected,
+    };
+    Promise.resolve()
+        .then(() => executeGridTargetedTruthSyncDenseCriticalBatch(selected, { waitStartedAt: now }))
+        .catch((error) => {
+            logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DENSE_BATCH_ERROR', {
+                uid: representative.numericUid,
+                symbol: representative.symbol || null,
+                normalizedSymbol: representative.symbolKey,
+                candidateCount: selected.length,
+                message: error?.message || String(error),
+                code: error?.code || null,
+                httpStatus: error?.response?.status || error?.httpStatus || null,
+            });
+        })
+        .finally(() => finalizeGridTargetedTruthSyncDenseBatch(batchTask));
+
+    return { started: true };
+}
+
+function drainGridTargetedTruthSyncQueue(){
+    if(gridTargetedTruthSyncQueue.length === 0){
+        return;
+    }
+
+    gridTargetedTruthSyncQueue.sort((a, b) => {
+        if(a.priority !== b.priority){
+            return a.priority - b.priority;
+        }
+        return a.queuedAt - b.queuedAt;
+    });
+
+    let startedAny = false;
+    let budgetWaitMs = 0;
+    const now = Date.now();
+    const denseStart = tryStartGridTargetedTruthSyncDenseCriticalBatch(now);
+    if(denseStart.started){
+        startedAny = true;
+    }else if(denseStart.waitMs > 0){
+        budgetWaitMs = Math.max(budgetWaitMs, denseStart.waitMs);
+    }
+    for(let index = 0; index < gridTargetedTruthSyncQueue.length; index += 1){
+        const task = gridTargetedTruthSyncQueue[index];
+        if(denseStart.holdDenseKey && getGridTargetedTruthSyncDenseBatchKey(task) === denseStart.holdDenseKey){
+            continue;
+        }
+        if(now - task.queuedAt > GRID_TARGETED_TRUTH_SYNC_STALE_QUEUE_MS){
+            if(isGridTargetedTruthSyncCriticalProtection(task)){
+                logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_QUEUE_RETAINED', {
+                    uid: task.numericUid,
+                    pid: task.numericPid,
+                    symbol: task.symbol || null,
+                    normalizedSymbol: task.symbolKey,
+                    side: task.normalizedSide,
+                    kind: task.normalizedKind,
+                    verifyKey: task.verifyKey,
+                    retainReason: 'CRITICAL_PROTECTION_VERIFY_NON_DROP',
+                    staleQueueMs: GRID_TARGETED_TRUTH_SYNC_STALE_QUEUE_MS,
+                    queuedAgeMs: now - task.queuedAt,
+                }, {
+                    throttleKey: `GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_RETAINED:${task.verifyKey}`,
+                    throttleMs: 10000,
+                });
+                continue;
+            }
+            gridTargetedTruthSyncQueue.splice(index, 1);
+            index -= 1;
+            gridTargetedTruthSyncVerifyRunning.delete(task.verifyKey);
+            gridTargetedTruthSyncVerifyLastAt.delete(task.verifyKey);
+            registerGridTargetedTruthSyncSafetyNet(task, 'TARGETED_VERIFY_QUEUE_STALE_DROPPED');
+            gridTargetedTruthSyncMetrics.droppedStale += 1;
+            logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_SKIP', {
+                uid: task.numericUid,
+                pid: task.numericPid,
+                symbol: task.symbol || null,
+                normalizedSymbol: task.symbolKey,
+                side: task.normalizedSide,
+                kind: task.normalizedKind,
+                verifyKey: task.verifyKey,
+                skipReason: 'TARGETED_VERIFY_QUEUE_STALE_DROPPED',
+                reenqueueEligible: true,
+                safetyNetRegistered: true,
+                staleQueueMs: GRID_TARGETED_TRUTH_SYNC_STALE_QUEUE_MS,
+                queuedAgeMs: now - task.queuedAt,
+            }, {
+                throttleKey: `GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_STALE:${task.verifyKey}`,
+                throttleMs: 5000,
+            });
+            continue;
+        }
+
+        const gate = canStartGridTargetedTruthSyncTask(task, Date.now());
+        if(!gate.ok){
+            if(gate.waitMs > 0){
+                budgetWaitMs = Math.max(budgetWaitMs, gate.waitMs);
+            }
+            continue;
+        }
+
+        gridTargetedTruthSyncQueue.splice(index, 1);
+        index -= 1;
+        const waitMs = Date.now() - task.queuedAt;
+        gridTargetedTruthSyncMetrics.waitSamplesMs.push(waitMs);
+        if(gridTargetedTruthSyncMetrics.waitSamplesMs.length > 1000){
+            gridTargetedTruthSyncMetrics.waitSamplesMs.shift();
+        }
+        gridTargetedTruthSyncMetrics.started += 1;
+        gridTargetedTruthSyncGlobalRunning += 1;
+        gridTargetedTruthSyncBudgetWindowStarts += 1;
+        incrementGridTargetedTruthSyncCounter(gridTargetedTruthSyncRunningByUid, task.uidKey);
+        incrementGridTargetedTruthSyncCounter(gridTargetedTruthSyncRunningBySymbol, task.symbolKey);
+        startedAny = true;
+        Promise.resolve()
+            .then(() => task.execute({ waitMs }))
+            .catch((error) => {
+                logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_ERROR', {
+                    uid: task.numericUid,
+                    pid: task.numericPid,
+                    symbol: task.symbol || null,
+                    normalizedSymbol: task.symbolKey,
+                    side: task.normalizedSide,
+                    kind: task.normalizedKind,
+                    verifyKey: task.verifyKey,
+                    message: error?.message || String(error),
+                    code: error?.code || null,
+                    httpStatus: error?.response?.status || error?.httpStatus || null,
+                });
+            })
+            .finally(() => finalizeGridTargetedTruthSyncTask(task));
+    }
+
+    if(gridTargetedTruthSyncQueue.length > 0){
+        scheduleGridTargetedTruthSyncDrain(budgetWaitMs || (startedAny ? 0 : 50));
+    }
+}
+
+const enqueueGridTargetedTruthSyncTask = (task) => {
+    gridTargetedTruthSyncQueue.push(task);
+    gridTargetedTruthSyncMetrics.maxQueueLength = Math.max(
+        gridTargetedTruthSyncMetrics.maxQueueLength,
+        gridTargetedTruthSyncQueue.length
+    );
+    logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_QUEUE_ENQUEUED', {
+        uid: task.numericUid,
+        pid: task.numericPid,
+        symbol: task.symbol || null,
+        normalizedSymbol: task.symbolKey,
+        side: task.normalizedSide,
+        kind: task.normalizedKind,
+        verifyKey: task.verifyKey,
+        priority: task.priority,
+        queueLength: gridTargetedTruthSyncQueue.length,
+        globalConcurrency: GRID_TARGETED_TRUTH_SYNC_GLOBAL_CONCURRENCY,
+        perUidConcurrency: GRID_TARGETED_TRUTH_SYNC_PER_UID_CONCURRENCY,
+        perSymbolConcurrency: GRID_TARGETED_TRUTH_SYNC_PER_SYMBOL_CONCURRENCY,
+        globalStartsPerSecond: GRID_TARGETED_TRUTH_SYNC_GLOBAL_STARTS_PER_SECOND,
+        staleQueueMs: GRID_TARGETED_TRUTH_SYNC_STALE_QUEUE_MS,
+    }, {
+        throttleKey: `GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_QUEUE:${task.symbolKey}`,
+        throttleMs: 5000,
+    });
+    scheduleGridTargetedTruthSyncDrain(0);
+}
+
+const getGridTargetLocalConvergenceState = async ({
+    row,
+    side,
+    kind,
+    clientOrderId = null,
+    clientAlgoId = null,
+} = {}) => {
+    const normalizedSide = String(side || '').trim().toUpperCase();
+    const normalizedKind = String(kind || '').trim().toUpperCase();
+    const prefix = normalizedSide === 'LONG' ? 'long' : normalizedSide === 'SHORT' ? 'short' : null;
+    if(!row || !prefix){
+        return { active: false, reason: 'TARGET_ROW_OR_SIDE_INVALID' };
+    }
+
+    const legStatus = String(row?.[`${prefix}LegStatus`] || '').trim().toUpperCase();
+    if(normalizedKind === 'ENTRY'){
+        if(clientOrderId && row?.[`${prefix}EntryOrderId`] !== clientOrderId){
+            return { active: false, reason: 'ENTRY_ORDER_REFERENCE_CHANGED' };
+        }
+        if(legStatus !== 'ENTRY_ARMED'){
+            return { active: false, reason: 'ENTRY_LEG_ALREADY_CONVERGED' };
+        }
+        return { active: true, reason: 'ENTRY_STILL_ARMED' };
+    }
+
+    if(normalizedKind === 'TP' || normalizedKind === 'STOP'){
+        const fieldName = normalizedKind === 'TP' ? `${prefix}ExitOrderId` : `${prefix}StopOrderId`;
+        const expectedClientOrderId = clientAlgoId;
+        if(expectedClientOrderId && row?.[fieldName] !== expectedClientOrderId){
+            return { active: false, reason: `${normalizedKind}_ORDER_REFERENCE_CHANGED` };
+        }
+        if(legStatus !== 'OPEN'){
+            return { active: false, reason: `${normalizedKind}_LEG_NOT_OPEN` };
+        }
+        if(expectedClientOrderId){
+            const [reservationRows] = await db.query(
+                `SELECT status
+                   FROM live_pid_exit_reservation
+                  WHERE uid = ?
+                    AND pid = ?
+                    AND strategyCategory = 'grid'
+                    AND positionSide = ?
+                    AND clientOrderId = ?
+                  ORDER BY id DESC
+                  LIMIT 1`,
+                [Number(row.uid || 0), Number(row.id || 0), normalizedSide, expectedClientOrderId]
+            );
+            const reservationStatus = String(reservationRows?.[0]?.status || '').trim().toUpperCase();
+            if(reservationStatus && reservationStatus !== 'ACTIVE'){
+                return { active: false, reason: `${normalizedKind}_RESERVATION_ALREADY_${reservationStatus}` };
+            }
+        }
+        return { active: true, reason: `${normalizedKind}_STILL_ACTIVE` };
+    }
+
+    return { active: false, reason: 'UNKNOWN_TARGET_KIND' };
+}
+
+const getExactGridTradeOrderId = (order = {}) =>
+    order?.orderId
+    || order?.executedOrderId
+    || order?.triggeredOrderId
+    || order?.triggerOrderId
+    || order?.sourceOrderId
+    || order?.actualOrderId
+    || order?.order?.orderId
+    || null;
+
+const buildGridSyntheticOrderTradeUpdateFromTrade = ({
+    row,
+    side,
+    kind,
+    clientOrderId,
+    orderId,
+    trade,
+    cumulativeQty,
+    status,
+} = {}) => {
+    const normalizedKind = String(kind || '').trim().toUpperCase();
+    const tradeQty = toAuditNumber(trade?.qty ?? trade?.quantity ?? trade?.q, 0);
+    const tradePrice = toAuditNumber(trade?.price ?? trade?.p, 0);
+    const commission = toAuditNumber(trade?.commission ?? trade?.n, 0);
+    return {
+        e: 'ORDER_TRADE_UPDATE',
+        E: trade?.time || Date.now(),
+        o: {
+            s: normalizeBinanceFuturesSymbol(row?.symbol),
+            c: clientOrderId,
+            i: orderId,
+            t: trade?.id ?? trade?.tradeId ?? null,
+            x: 'TRADE',
+            X: status,
+            l: String(tradeQty),
+            z: String(cumulativeQty),
+            L: String(tradePrice),
+            ap: String(tradePrice),
+            p: String(tradePrice),
+            n: String(commission),
+            rp: trade?.realizedPnl ?? trade?.rp ?? null,
+            T: trade?.time || Date.now(),
+            ps: side,
+            ot: normalizedKind,
+        },
+    };
+}
+
+const dispatchExactGridEvidenceToExistingHandler = async ({
+    uid,
+    row,
+    side,
+    kind,
+    exactOrder,
+    exactStatus,
+    clientOrderId = null,
+    clientAlgoId = null,
+    preloadedTrades = null,
+} = {}) => {
+    const normalizedKind = String(kind || '').trim().toUpperCase();
+    const handlerClientOrderId = normalizedKind === 'ENTRY'
+        ? (clientOrderId || exactOrder?.clientOrderId || exactOrder?.origClientOrderId || null)
+        : (clientAlgoId || exactOrder?.clientAlgoId || exactOrder?.clientOrderId || null);
+    const tradeOrderId = getExactGridTradeOrderId(exactOrder);
+    if(!handlerClientOrderId || !tradeOrderId){
+        return {
+            dispatched: false,
+            reason: !handlerClientOrderId ? 'EXACT_HANDLER_CLIENT_ORDER_ID_MISSING' : 'EXACT_TRADE_ORDER_ID_MISSING',
+            classification: 'EXACT_STATUS_ROW_RECOVERY_REQUIRED',
+            userTradesCount: 0,
+        };
+    }
+
+    let trades = [];
+    if(Array.isArray(preloadedTrades)){
+        trades = preloadedTrades;
+    }else{
+        try{
+            gridTargetedTruthSyncMetrics.userTradesCalls += 1;
+            trades = await readFuturesUserTrades(uid, row.symbol, {
+                orderId: tradeOrderId,
+                limit: 100,
+            });
+        }catch(error){
+            return {
+                dispatched: false,
+                reason: 'EXACT_USER_TRADES_READ_FAILED',
+                classification: 'EXACT_STATUS_ROW_RECOVERY_REQUIRED',
+                errorCode: error?.code || null,
+                userTradesCount: 0,
+            };
+        }
+    }
+
+    const matchingTrades = (Array.isArray(trades) ? trades : [])
+        .filter((trade) => String(trade?.orderId || '') === String(tradeOrderId || ''))
+        .sort((a, b) => Number(a.time || 0) - Number(b.time || 0) || Number(a.id || 0) - Number(b.id || 0));
+    if(matchingTrades.length === 0){
+        return {
+            dispatched: false,
+            reason: 'EXACT_USER_TRADES_EMPTY',
+            classification: 'EXACT_STATUS_ROW_RECOVERY_REQUIRED',
+            userTradesCount: Array.isArray(trades) ? trades.length : 0,
+        };
+    }
+
+    let cumulativeQty = 0;
+    let dispatchedCount = 0;
+    for(let index = 0; index < matchingTrades.length; index += 1){
+        const trade = matchingTrades[index];
+        const tradeQty = toAuditNumber(trade?.qty ?? trade?.quantity ?? trade?.q, 0);
+        if(!(tradeQty > 0)){
+            continue;
+        }
+        cumulativeQty += tradeQty;
+        const isLast = index === matchingTrades.length - 1;
+        const finalStatus = String(exactStatus?.status || '').trim().toUpperCase();
+        const status = isLast && (finalStatus === 'FILLED' || finalStatus === 'FINISHED')
+            ? 'FILLED'
+            : 'PARTIALLY_FILLED';
+        await getGridEngine().handleLiveOrderTradeUpdate(uid, buildGridSyntheticOrderTradeUpdateFromTrade({
+            row,
+            side,
+            kind: normalizedKind,
+            clientOrderId: handlerClientOrderId,
+            orderId: tradeOrderId,
+            trade,
+            cumulativeQty,
+            status,
+        }));
+        dispatchedCount += 1;
+    }
+
+    return {
+        dispatched: dispatchedCount > 0,
+        reason: dispatchedCount > 0 ? 'EXACT_EVIDENCE_DIRECT_HANDLER' : 'EXACT_USER_TRADES_NO_POSITIVE_QTY',
+        classification: dispatchedCount > 0 ? 'EXACT_EVIDENCE_DIRECT_HANDLER' : 'EXACT_STATUS_ROW_RECOVERY_REQUIRED',
+        userTradesCount: Array.isArray(trades) ? trades.length : 0,
+        matchedTradeCount: matchingTrades.length,
+        dispatchedCount,
+    };
+}
+
+const getGridTargetedTruthSyncDenseBatchKey = (task = {}) =>
+    [
+        task.uidKey || String(task.numericUid || ''),
+        task.symbolKey || normalizeBinanceFuturesSymbol(task.symbol || ''),
+    ].join(':');
+
+const getGridDenseAlgoOrderReferenceKeys = (order = {}) => [
+    order?.clientAlgoId,
+    order?.clientOrderId,
+    order?.newClientStrategyId,
+    order?.algoId,
+    order?.strategyId,
+].map((value) => String(value || '').trim()).filter(Boolean);
+
+const indexGridDenseAlgoOrdersByReference = (orders = []) => {
+    const index = new Map();
+    for(const order of (Array.isArray(orders) ? orders : [])){
+        for(const key of getGridDenseAlgoOrderReferenceKeys(order)){
+            if(!index.has(key)){
+                index.set(key, order);
+            }
+        }
+    }
+    return index;
+}
+
+const findGridDenseAlgoOrderForTask = (task = {}, indexedOrders = new Map()) => {
+    const refs = [
+        task.clientAlgoId,
+        task.algoId,
+    ].map((value) => String(value || '').trim()).filter(Boolean);
+    for(const ref of refs){
+        if(indexedOrders.has(ref)){
+            return indexedOrders.get(ref);
+        }
+    }
+    return null;
+}
+
+const readGridDenseExactOrderFallback = async ({ task = {}, row = null, batchStartedAt = Date.now() } = {}) => {
+    gridTargetedTruthSyncMetrics.denseCriticalExactFallbacks += 1;
+    gridTargetedTruthSyncMetrics.exactQueries += 1;
+    try{
+        return await readExactGridTargetOrderStatus({
+            uid: task.numericUid,
+            symbol: row?.symbol || task.symbol,
+            kind: task.normalizedKind,
+            clientOrderId: task.clientOrderId,
+            clientAlgoId: task.clientAlgoId,
+            orderId: task.orderId,
+            algoId: task.algoId,
+        });
+    }catch(error){
+        logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DENSE_EXACT_FALLBACK_ERROR', {
+            uid: task.numericUid,
+            pid: task.numericPid,
+            symbol: row?.symbol || task.symbol || null,
+            normalizedSymbol: task.symbolKey,
+            side: task.normalizedSide,
+            kind: task.normalizedKind,
+            verifyKey: task.verifyKey,
+            message: error?.message || String(error),
+            code: error?.code || null,
+            httpStatus: error?.response?.status || error?.httpStatus || null,
+            elapsedMs: Date.now() - batchStartedAt,
+        });
+        return null;
+    }
+}
+
+const finalizeGridTargetedTruthSyncDenseBatch = (batchTask) => {
+    gridTargetedTruthSyncGlobalRunning = Math.max(0, gridTargetedTruthSyncGlobalRunning - 1);
+    decrementGridTargetedTruthSyncCounter(gridTargetedTruthSyncRunningByUid, batchTask.uidKey);
+    decrementGridTargetedTruthSyncCounter(gridTargetedTruthSyncRunningBySymbol, batchTask.symbolKey);
+    for(const task of batchTask.tasks || []){
+        gridTargetedTruthSyncVerifyRunning.delete(task.verifyKey);
+    }
+    gridTargetedTruthSyncMetrics.completed += (batchTask.tasks || []).length;
+    scheduleGridTargetedTruthSyncDrain(0);
+}
+
+const executeGridTargetedTruthSyncDenseCriticalBatch = async (tasks = [], { waitStartedAt = Date.now() } = {}) => {
+    const batchStartedAt = Date.now();
+    const representative = tasks[0] || {};
+    const numericUid = Number(representative.numericUid || 0);
+    const symbol = representative.symbol || representative.symbolKey || null;
+    const normalizedSymbol = normalizeBinanceFuturesSymbol(symbol);
+    const activeCandidates = [];
+
+    logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DENSE_BATCH_START', {
+        uid: numericUid,
+        symbol,
+        normalizedSymbol,
+        candidateCount: tasks.length,
+        denseThreshold: GRID_TARGETED_TRUTH_SYNC_DENSE_CRITICAL_THRESHOLD,
+        denseWindowMs: GRID_TARGETED_TRUTH_SYNC_DENSE_CRITICAL_WINDOW_MS,
+        denseMaxBatch: GRID_TARGETED_TRUTH_SYNC_DENSE_CRITICAL_MAX_BATCH,
+        canonicalEvidenceRequired: ['candidateScopedOpenAlgoOrders', 'candidateScopedAllAlgoOrders', 'symbolUserTradesIfFillEvidence'],
+    });
+
+    for(const task of tasks){
+        const row = await loadLiveGridRuntimeSnapshot(task.numericPid);
+        if(!row || Number(row.uid || 0) !== Number(task.numericUid || 0)){
+            gridTargetedTruthSyncMetrics.deferred += 1;
+            logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_SKIP', {
+                uid: task.numericUid,
+                pid: task.numericPid,
+                symbol: task.symbol || null,
+                normalizedSymbol: task.symbolKey,
+                side: task.normalizedSide,
+                kind: task.normalizedKind,
+                verifyKey: task.verifyKey,
+                skipReason: 'TARGET_ROW_NOT_FOUND',
+                denseBatch: true,
+            });
+            continue;
+        }
+        if(normalizeBinanceFuturesSymbol(row.symbol) !== task.symbolKey){
+            gridTargetedTruthSyncMetrics.deferred += 1;
+            logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_SKIP', {
+                uid: task.numericUid,
+                pid: task.numericPid,
+                rowSymbol: row.symbol || null,
+                symbol: task.symbol || null,
+                normalizedSymbol: task.symbolKey,
+                side: task.normalizedSide,
+                kind: task.normalizedKind,
+                verifyKey: task.verifyKey,
+                skipReason: 'TARGET_SYMBOL_MISMATCH',
+                denseBatch: true,
+            });
+            continue;
+        }
+        const localState = await getGridTargetLocalConvergenceState({
+            row,
+            side: task.normalizedSide,
+            kind: task.normalizedKind,
+            clientOrderId: task.clientOrderId,
+            clientAlgoId: task.clientAlgoId,
+        });
+        if(!localState.active){
+            gridTargetedTruthSyncMetrics.suppressed += 1;
+            logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_SKIP', {
+                uid: task.numericUid,
+                pid: task.numericPid,
+                symbol: row.symbol || task.symbol || null,
+                normalizedSymbol: task.symbolKey,
+                side: task.normalizedSide,
+                kind: task.normalizedKind,
+                verifyKey: task.verifyKey,
+                skipReason: 'TARGET_ALREADY_CONVERGED_BEFORE_VERIFY',
+                localStateReason: localState.reason,
+                denseBatch: true,
+            });
+            continue;
+        }
+        activeCandidates.push({ task, row });
+    }
+
+    if(activeCandidates.length === 0){
+        return {
+            dispatched: 0,
+            deferred: 0,
+            activeCandidates: 0,
+            elapsedMs: Date.now() - batchStartedAt,
+        };
+    }
+
+    let openAlgoOrders = [];
+    let allAlgoOrders = [];
+    try{
+        openAlgoOrders = await readFuturesOpenAlgoOrders(numericUid, normalizedSymbol);
+    }catch(error){
+        logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DENSE_BATCH_READ_SKIP', {
+            uid: numericUid,
+            symbol,
+            normalizedSymbol,
+            endpoint: '/fapi/v1/openAlgoOrders',
+            message: error?.message || String(error),
+            code: error?.code || null,
+            httpStatus: error?.response?.status || error?.httpStatus || null,
+        });
+        openAlgoOrders = [];
+    }
+    try{
+        allAlgoOrders = await readFuturesAllAlgoOrders(numericUid, normalizedSymbol, { limit: 1000 });
+    }catch(error){
+        logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DENSE_BATCH_READ_SKIP', {
+            uid: numericUid,
+            symbol,
+            normalizedSymbol,
+            endpoint: '/fapi/v1/allAlgoOrders',
+            message: error?.message || String(error),
+            code: error?.code || null,
+            httpStatus: error?.response?.status || error?.httpStatus || null,
+        });
+        allAlgoOrders = [];
+    }
+
+    const indexedOrders = indexGridDenseAlgoOrdersByReference([
+        ...(Array.isArray(openAlgoOrders) ? openAlgoOrders : []),
+        ...(Array.isArray(allAlgoOrders) ? allAlgoOrders : []),
+    ]);
+    const fillCandidates = [];
+    const exactByVerifyKey = new Map();
+    let denseExactFallbackCount = 0;
+    for(const candidate of activeCandidates){
+        let exactOrder = findGridDenseAlgoOrderForTask(candidate.task, indexedOrders);
+        let attemptedDenseExactFallback = false;
+        if(!exactOrder && denseExactFallbackCount < GRID_TARGETED_TRUTH_SYNC_DENSE_EXACT_FALLBACK_MAX){
+            denseExactFallbackCount += 1;
+            attemptedDenseExactFallback = true;
+            exactOrder = await readGridDenseExactOrderFallback({
+                task: candidate.task,
+                row: candidate.row,
+                batchStartedAt,
+            });
+        }
+        if(!exactOrder){
+            registerGridTargetedTruthSyncSafetyNet(
+                candidate.task,
+                attemptedDenseExactFallback
+                    ? 'DENSE_EXACT_ORDER_NOT_FOUND_AFTER_FALLBACK'
+                    : 'DENSE_EXACT_FALLBACK_BUDGET_EXHAUSTED'
+            );
+        }
+        exactByVerifyKey.set(candidate.task.verifyKey, exactOrder || null);
+        const exactStatus = exactOrder ? getExactGridTargetStatus(exactOrder, candidate.task.normalizedKind) : null;
+        if(exactOrder && (exactStatus?.verifyStatus || exactStatus?.terminalWithFill)){
+            fillCandidates.push(candidate);
+        }
+    }
+
+    let symbolTrades = [];
+    if(fillCandidates.length > 0){
+        try{
+            gridTargetedTruthSyncMetrics.userTradesCalls += 1;
+            symbolTrades = await readFuturesUserTrades(numericUid, normalizedSymbol, { limit: 1000 });
+        }catch(error){
+            logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DENSE_BATCH_READ_SKIP', {
+                uid: numericUid,
+                symbol,
+                normalizedSymbol,
+                endpoint: '/fapi/v1/userTrades',
+                message: error?.message || String(error),
+                code: error?.code || null,
+                httpStatus: error?.response?.status || error?.httpStatus || null,
+            });
+            symbolTrades = [];
+        }
+    }
+
+    let dispatched = 0;
+    let deferred = 0;
+    for(const { task, row } of activeCandidates){
+        const exactOrder = exactByVerifyKey.get(task.verifyKey);
+        const exactStatus = exactOrder ? getExactGridTargetStatus(exactOrder, task.normalizedKind) : null;
+        logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_EXACT_STATUS', {
+            uid: task.numericUid,
+            pid: task.numericPid,
+            symbol: row.symbol || task.symbol || null,
+            normalizedSymbol: task.symbolKey,
+            side: task.normalizedSide,
+            kind: task.normalizedKind,
+            targetScope: exactOrder ? 'EXACT_ORDER_TARGETED' : task.targetScope,
+            clientAlgoId: task.clientAlgoId,
+            algoId: task.algoId,
+            status: exactStatus?.status || null,
+            executedQty: exactStatus?.executedQty ?? null,
+            originalQty: exactStatus?.originalQty ?? null,
+            exactOrderFound: Boolean(exactOrder),
+            createsOrderOrLedger: false,
+            denseBatch: true,
+            elapsedMs: Date.now() - batchStartedAt,
+        });
+
+        if(!exactOrder){
+            deferred += 1;
+            gridTargetedTruthSyncMetrics.deferred += 1;
+            gridTargetedTruthSyncVerifyLastAt.set(task.verifyKey, Date.now());
+            logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DONE', {
+                uid: task.numericUid,
+                pid: task.numericPid,
+                symbol: row.symbol || task.symbol || null,
+                normalizedSymbol: task.symbolKey,
+                side: task.normalizedSide,
+                kind: task.normalizedKind,
+                repaired: false,
+                targetScope: task.targetScope,
+                recoveryScope: 'NO_EVIDENCE_NO_MUTATION',
+                status: null,
+                reason: 'DENSE_EXACT_ORDER_NOT_FOUND',
+                denseBatch: true,
+                elapsedMs: Date.now() - batchStartedAt,
+            });
+            continue;
+        }
+
+        if(exactStatus?.noOpStatus || exactStatus?.terminalNoFill){
+            if(exactStatus.noOpStatus){
+                gridTargetedTruthSyncVerifyLastAt.set(task.verifyKey, Date.now());
+            }
+            if(exactStatus.terminalNoFill && task.clientAlgoId){
+                await handleAlgoReservationRuntimeUpdate(task.numericUid, {
+                    e: 'ALGO_UPDATE',
+                    E: Date.now(),
+                    ao: {
+                        symbol: task.symbolKey,
+                        clientAlgoId: task.clientAlgoId,
+                        algoId: exactOrder?.algoId || exactOrder?.strategyId || task.algoId || null,
+                        algoStatus: exactStatus.status,
+                        executedQty: exactStatus.executedQty,
+                        positionSide: task.normalizedSide,
+                    },
+                }).catch(() => {});
+                gridTargetedTruthSyncTerminalAt.set(task.verifyKey, Date.now());
+            }
+            logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DONE', {
+                uid: task.numericUid,
+                pid: task.numericPid,
+                symbol: row.symbol || task.symbol || null,
+                normalizedSymbol: task.symbolKey,
+                side: task.normalizedSide,
+                kind: task.normalizedKind,
+                repaired: false,
+                targetScope: 'EXACT_ORDER_TARGETED',
+                recoveryScope: 'EXACT_STATUS_NOOP',
+                status: exactStatus.status,
+                denseBatch: true,
+                elapsedMs: Date.now() - batchStartedAt,
+            });
+            continue;
+        }
+
+        if(exactStatus?.verifyStatus || exactStatus?.terminalWithFill){
+            let directDispatch = await dispatchExactGridEvidenceToExistingHandler({
+                uid: task.numericUid,
+                row,
+                side: task.normalizedSide,
+                kind: task.normalizedKind,
+                exactOrder,
+                exactStatus,
+                clientOrderId: task.clientOrderId,
+                clientAlgoId: task.clientAlgoId,
+                preloadedTrades: symbolTrades,
+            });
+            if(!directDispatch.dispatched && directDispatch.reason === 'EXACT_USER_TRADES_EMPTY' && Array.isArray(symbolTrades)){
+                gridTargetedTruthSyncMetrics.denseCriticalTradeFallbacks += 1;
+                const orderScopedDispatch = await dispatchExactGridEvidenceToExistingHandler({
+                    uid: task.numericUid,
+                    row,
+                    side: task.normalizedSide,
+                    kind: task.normalizedKind,
+                    exactOrder,
+                    exactStatus,
+                    clientOrderId: task.clientOrderId,
+                    clientAlgoId: task.clientAlgoId,
+                });
+                if(orderScopedDispatch.dispatched || orderScopedDispatch.reason !== 'EXACT_USER_TRADES_EMPTY'){
+                    directDispatch = orderScopedDispatch;
+                }
+            }
+            if(directDispatch.dispatched){
+                dispatched += 1;
+                gridTargetedTruthSyncMetrics.denseCriticalDispatched += 1;
+                logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DONE', {
+                    uid: task.numericUid,
+                    pid: task.numericPid,
+                    symbol: row.symbol || task.symbol || null,
+                    normalizedSymbol: task.symbolKey,
+                    side: task.normalizedSide,
+                    kind: task.normalizedKind,
+                    repaired: true,
+                    targetScope: 'EXACT_ORDER_TARGETED',
+                    recoveryScope: directDispatch.classification,
+                    status: exactStatus?.status || null,
+                    userTradesCount: directDispatch.userTradesCount || 0,
+                    matchedTradeCount: directDispatch.matchedTradeCount || 0,
+                    dispatchedCount: directDispatch.dispatchedCount || 0,
+                    denseBatch: true,
+                    elapsedMs: Date.now() - batchStartedAt,
+                });
+                continue;
+            }
+            deferred += 1;
+            gridTargetedTruthSyncMetrics.deferred += 1;
+            gridTargetedTruthSyncVerifyLastAt.set(task.verifyKey, Date.now());
+            logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DONE', {
+                uid: task.numericUid,
+                pid: task.numericPid,
+                symbol: row.symbol || task.symbol || null,
+                normalizedSymbol: task.symbolKey,
+                side: task.normalizedSide,
+                kind: task.normalizedKind,
+                repaired: false,
+                targetScope: 'EXACT_ORDER_TARGETED',
+                recoveryScope: directDispatch.classification || 'EXACT_STATUS_ROW_RECOVERY_REQUIRED',
+                status: exactStatus?.status || null,
+                reason: directDispatch.reason || 'DENSE_DIRECT_HANDLER_EVIDENCE_MISSING',
+                userTradesCount: directDispatch.userTradesCount || 0,
+                matchedTradeCount: directDispatch.matchedTradeCount || 0,
+                denseBatch: true,
+                elapsedMs: Date.now() - batchStartedAt,
+            });
+            continue;
+        }
+
+        deferred += 1;
+        gridTargetedTruthSyncMetrics.deferred += 1;
+        gridTargetedTruthSyncVerifyLastAt.set(task.verifyKey, Date.now());
+    }
+
+    gridTargetedTruthSyncMetrics.denseCriticalCandidates += tasks.length;
+    gridTargetedTruthSyncMetrics.denseCriticalDeferred += deferred;
+    logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DENSE_BATCH_DONE', {
+        uid: numericUid,
+        symbol,
+        normalizedSymbol,
+        candidateCount: tasks.length,
+        activeCandidateCount: activeCandidates.length,
+        openAlgoOrdersCount: Array.isArray(openAlgoOrders) ? openAlgoOrders.length : 0,
+        allAlgoOrdersCount: Array.isArray(allAlgoOrders) ? allAlgoOrders.length : 0,
+        userTradesCount: Array.isArray(symbolTrades) ? symbolTrades.length : 0,
+        denseExactFallbackCount,
+        dispatched,
+        deferred,
+        elapsedMs: Date.now() - batchStartedAt,
+        maxQueueWaitMs: tasks.length ? Math.max(...tasks.map((task) => batchStartedAt - Number(task.queuedAt || waitStartedAt))) : 0,
+    });
+    return {
+        dispatched,
+        deferred,
+        activeCandidates: activeCandidates.length,
+        elapsedMs: Date.now() - batchStartedAt,
+    };
+}
+
+const loadGridPublicHintRows = async (symbols = []) => {
+    const cacheKey = getGridPublicHintCacheKey(symbols);
+    const now = Date.now();
+    const cached = gridPublicHintRowsCache.get(cacheKey);
+    if(cached && (now - Number(cached.loadedAt || 0)) < GRID_PUBLIC_PRICE_HINT_CANDIDATE_CACHE_MS){
+        return cached.rows || [];
+    }
+    const [resultRows] = await db.query(
+        `SELECT id, uid, symbol, enabled, regimeStatus,
+                longLegStatus, shortLegStatus,
+                longEntryPrice, shortEntryPrice,
+                triggerPrice,
+                longTakeProfitPrice, shortTakeProfitPrice,
+                longStopPrice, shortStopPrice,
+                longEntryOrderId, shortEntryOrderId,
+                longExitOrderId, shortExitOrderId,
+                longStopOrderId, shortStopOrderId
+           FROM live_grid_strategy_list
+          WHERE symbol IN (${symbols.map(() => '?').join(',')})
+            AND (
+                enabled = 'Y'
+                OR regimeStatus IN ('ACTIVE', 'PROTECTION_INTENT_PENDING', 'REENTRY_INTENT_PENDING')
+                OR longLegStatus IN ('ENTRY_ARMED', 'OPEN')
+                OR shortLegStatus IN ('ENTRY_ARMED', 'OPEN')
+            )
+          ORDER BY updatedAt DESC, id ASC
+          LIMIT 24`,
+        symbols
+    );
+    const rows = resultRows || [];
+    gridPublicHintRowsCache.set(cacheKey, {
+        loadedAt: now,
+        rows,
+    });
+    return rows;
+}
+
+const scheduleGridTargetedTruthSyncVerify = ({
+    uid,
+    pid,
+    symbol,
+    side,
+    kind,
+    price,
+    targetPrice,
+    priceSource = null,
+    workingType = null,
+    targetScope = null,
+    clientOrderId = null,
+    clientAlgoId = null,
+    orderId = null,
+    algoId = null,
+    eventTime = null,
+    source = null,
+    bypassRepeatCooldown = false,
+    firstVerifyGraceMsOverride = null,
+    followUpDepth = 0,
+} = {}) => {
+    const numericUid = Number(uid || 0);
+    const numericPid = Number(pid || 0);
+    const normalizedSide = String(side || '').trim().toUpperCase();
+    const normalizedKind = String(kind || '').trim().toUpperCase();
+    if(!(numericUid > 0) || !(numericPid > 0) || !normalizedSide || !normalizedKind){
+        return false;
+    }
+
+    const verifyKey = buildGridTargetedTruthSyncVerifyKey({
+        uid: numericUid,
+        pid: numericPid,
+        symbol,
+        side: normalizedSide,
+        kind: normalizedKind,
+        clientOrderId,
+        clientAlgoId,
+        orderId,
+        algoId,
+    });
+    const resolvedTargetScope = targetScope || (
+        clientOrderId || clientAlgoId || orderId || algoId
+            ? 'EXACT_ORDER_TARGETED'
+            : 'PID_SIDE_TARGETED_BUT_ORDER_AMBIGUOUS'
+    );
+    const repeatCooldownMs = getGridTargetedTruthSyncRepeatCooldownMs({
+        kind: normalizedKind,
+        targetScope: resolvedTargetScope,
+    });
+    const now = Date.now();
+    const terminalAt = Number(gridTargetedTruthSyncTerminalAt.get(verifyKey) || 0);
+    if(terminalAt > 0 && (now - terminalAt) < GRID_TARGETED_TRUTH_SYNC_TERMINAL_SUPPRESSION_MS){
+        logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_SKIP', {
+            uid: numericUid,
+            pid: numericPid,
+            symbol: symbol || null,
+            normalizedSymbol: normalizeBinanceFuturesSymbol(symbol),
+            side: normalizedSide,
+            kind: normalizedKind,
+            price: toAuditNumber(price, null),
+            targetPrice: toAuditNumber(targetPrice, null),
+            skipReason: 'TARGETED_VERIFY_TERMINAL_SUPPRESSED',
+            terminalStatusSuppressionMs: GRID_TARGETED_TRUTH_SYNC_TERMINAL_SUPPRESSION_MS,
+            waitMsRemaining: Math.max(0, GRID_TARGETED_TRUTH_SYNC_TERMINAL_SUPPRESSION_MS - (now - terminalAt)),
+            source,
+            eventTime,
+        }, {
+            throttleKey: `GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_TERMINAL_SUPPRESSED:${verifyKey}`,
+            throttleMs: GRID_TARGETED_TRUTH_SYNC_REPEAT_COOLDOWN_MS,
+        });
+        return false;
+    }
+    const lastAt = Number(gridTargetedTruthSyncVerifyLastAt.get(verifyKey) || 0);
+    if(!bypassRepeatCooldown && lastAt > 0 && (now - lastAt) < repeatCooldownMs){
+        logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_SKIP', {
+            uid: numericUid,
+            pid: numericPid,
+            symbol: symbol || null,
+            normalizedSymbol: normalizeBinanceFuturesSymbol(symbol),
+            side: normalizedSide,
+            kind: normalizedKind,
+            price: toAuditNumber(price, null),
+            targetPrice: toAuditNumber(targetPrice, null),
+            skipReason: 'TARGETED_VERIFY_COOLDOWN',
+            targetScope: resolvedTargetScope,
+            orderReference: clientOrderId || clientAlgoId || orderId || algoId || null,
+            cooldownMs: repeatCooldownMs,
+            waitMsRemaining: Math.max(0, repeatCooldownMs - (now - lastAt)),
+            source,
+            eventTime,
+        }, {
+            throttleKey: `GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_COOLDOWN:${verifyKey}`,
+            throttleMs: repeatCooldownMs,
+        });
+        return false;
+    }
+    const runningAt = Number(gridTargetedTruthSyncVerifyRunning.get(verifyKey) || 0);
+    if(runningAt > 0 && (now - runningAt) < GRID_TARGETED_TRUTH_SYNC_IN_FLIGHT_LOCK_TTL_MS){
+        logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_SKIP', {
+            uid: numericUid,
+            pid: numericPid,
+            symbol: symbol || null,
+            normalizedSymbol: normalizeBinanceFuturesSymbol(symbol),
+            side: normalizedSide,
+            kind: normalizedKind,
+            price: toAuditNumber(price, null),
+            targetPrice: toAuditNumber(targetPrice, null),
+            skipReason: 'TARGETED_VERIFY_ALREADY_RUNNING',
+            inFlightLockTtlMs: GRID_TARGETED_TRUTH_SYNC_IN_FLIGHT_LOCK_TTL_MS,
+            source,
+            eventTime,
+        }, {
+            throttleKey: `GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_RUNNING:${verifyKey}`,
+            throttleMs: 5000,
+        });
+        return false;
+    }
+    if(runningAt > 0){
+        gridTargetedTruthSyncVerifyRunning.delete(verifyKey);
+    }
+
+    gridTargetedTruthSyncVerifyRunning.set(verifyKey, now);
+    const priority = getGridTargetedTruthSyncPriority({
+        kind: normalizedKind,
+        targetScope: resolvedTargetScope,
+    });
+    const firstVerifyGraceMs = Math.max(
+        1,
+        Number.isFinite(Number(firstVerifyGraceMsOverride))
+            ? Number(firstVerifyGraceMsOverride)
+            : GRID_TARGETED_TRUTH_SYNC_FIRST_VERIFY_GRACE_MS
+    );
+    const scheduleEntryNewFollowUp = ({ rowSymbol = null, status = null } = {}) => {
+        if(normalizedKind !== 'ENTRY' || resolvedTargetScope !== 'EXACT_ORDER_TARGETED'){
+            return false;
+        }
+        const normalizedFollowUpDepth = Math.max(0, Number(followUpDepth || 0));
+        if(normalizedFollowUpDepth >= GRID_TARGETED_TRUTH_SYNC_ENTRY_NEW_FOLLOWUP_MAX){
+            return false;
+        }
+        const nextDepth = normalizedFollowUpDepth + 1;
+        const followUpKey = `${verifyKey}:ENTRY_NEW_FOLLOWUP:${nextDepth}`;
+        if(gridTargetedTruthSyncVerifyTimers.has(followUpKey)){
+            return false;
+        }
+        const followUpTimer = setTimeout(() => {
+            gridTargetedTruthSyncVerifyTimers.delete(followUpKey);
+            gridTargetedTruthSyncVerifyLastAt.delete(verifyKey);
+            scheduleGridTargetedTruthSyncVerify({
+                uid: numericUid,
+                pid: numericPid,
+                symbol: rowSymbol || symbol,
+                side: normalizedSide,
+                kind: normalizedKind,
+                price,
+                targetPrice,
+                priceSource,
+                workingType,
+                targetScope: resolvedTargetScope,
+                clientOrderId,
+                clientAlgoId,
+                orderId,
+                algoId,
+                eventTime,
+                source: 'TARGETED_TRUTH_SYNC_ENTRY_NEW_FOLLOWUP',
+                bypassRepeatCooldown: true,
+                firstVerifyGraceMsOverride: 1,
+                followUpDepth: nextDepth,
+            });
+        }, Math.max(1, GRID_TARGETED_TRUTH_SYNC_ENTRY_NEW_FOLLOWUP_MS));
+        gridTargetedTruthSyncVerifyTimers.set(followUpKey, followUpTimer);
+        gridTargetedTruthSyncMetrics.entryNewFollowupScheduled += 1;
+        logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_ENTRY_NEW_FOLLOWUP_SCHEDULED', {
+            uid: numericUid,
+            pid: numericPid,
+            symbol: rowSymbol || symbol || null,
+            normalizedSymbol: normalizeBinanceFuturesSymbol(rowSymbol || symbol),
+            side: normalizedSide,
+            kind: normalizedKind,
+            verifyKey,
+            clientOrderId,
+            orderId,
+            status,
+            followUpDepth: nextDepth,
+            followUpDelayMs: GRID_TARGETED_TRUTH_SYNC_ENTRY_NEW_FOLLOWUP_MS,
+            firstVerifyGraceMsOverride: 1,
+            bypassRepeatCooldown: true,
+        }, {
+            throttleKey: `GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_ENTRY_NEW_FOLLOWUP:${verifyKey}:${nextDepth}`,
+            throttleMs: GRID_TARGETED_TRUTH_SYNC_ENTRY_NEW_FOLLOWUP_MS,
+        });
+        return true;
+    };
+    logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_QUEUED', {
+        uid: numericUid,
+        pid: numericPid,
+        symbol: symbol || null,
+        normalizedSymbol: normalizeBinanceFuturesSymbol(symbol),
+        side: normalizedSide,
+        kind: normalizedKind,
+        price: toAuditNumber(price, null),
+        targetPrice: toAuditNumber(targetPrice, null),
+        priceSource,
+        workingType,
+        targetScope: resolvedTargetScope,
+        verifyKey,
+        clientOrderId,
+        clientAlgoId,
+        orderId,
+        algoId,
+        priority,
+        firstVerifyGraceMs,
+        repeatCooldownMs,
+        protectionRepeatCooldownMs: GRID_TARGETED_TRUTH_SYNC_PROTECTION_REPEAT_COOLDOWN_MS,
+        entryRepeatCooldownMs: GRID_TARGETED_TRUTH_SYNC_ENTRY_REPEAT_COOLDOWN_MS,
+        entryNewFollowupMs: GRID_TARGETED_TRUTH_SYNC_ENTRY_NEW_FOLLOWUP_MS,
+        entryNewFollowupMax: GRID_TARGETED_TRUTH_SYNC_ENTRY_NEW_FOLLOWUP_MAX,
+        followUpDepth,
+        bypassRepeatCooldown,
+        ambiguousRepeatCooldownMs: GRID_TARGETED_TRUTH_SYNC_AMBIGUOUS_REPEAT_COOLDOWN_MS,
+        inFlightLockTtlMs: GRID_TARGETED_TRUTH_SYNC_IN_FLIGHT_LOCK_TTL_MS,
+        terminalSuppressionMs: GRID_TARGETED_TRUTH_SYNC_TERMINAL_SUPPRESSION_MS,
+        globalConcurrency: GRID_TARGETED_TRUTH_SYNC_GLOBAL_CONCURRENCY,
+        perUidConcurrency: GRID_TARGETED_TRUTH_SYNC_PER_UID_CONCURRENCY,
+        perSymbolConcurrency: GRID_TARGETED_TRUTH_SYNC_PER_SYMBOL_CONCURRENCY,
+        globalStartsPerSecond: GRID_TARGETED_TRUTH_SYNC_GLOBAL_STARTS_PER_SECOND,
+        source,
+        eventTime,
+        directFillConfirmation: false,
+        createsOrderOrLedger: false,
+        canonicalEvidenceRequired: ['exactOrderOrAlgoOrder', 'userTradesIfFillEvidence', 'positionRiskSupportOnly'],
+    });
+
+    const timer = setTimeout(() => {
+        gridTargetedTruthSyncVerifyTimers.delete(verifyKey);
+        enqueueGridTargetedTruthSyncTask({
+            numericUid,
+            numericPid,
+            uidKey: String(numericUid),
+            symbol,
+            symbolKey: normalizeBinanceFuturesSymbol(symbol),
+            normalizedSide,
+            normalizedKind,
+            targetScope: resolvedTargetScope,
+            verifyKey,
+            priority,
+            clientOrderId,
+            clientAlgoId,
+            orderId,
+            algoId,
+            price,
+            targetPrice,
+            priceSource,
+            workingType,
+            source,
+            eventTime,
+            queuedAt: Date.now(),
+            execute: async ({ waitMs = 0 } = {}) => {
+            const startedAt = Date.now();
+            const row = await loadLiveGridRuntimeSnapshot(numericPid);
+            if(!row || Number(row.uid || 0) !== numericUid){
+                logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_SKIP', {
+                    uid: numericUid,
+                    pid: numericPid,
+                    symbol: symbol || null,
+                    normalizedSymbol: normalizeBinanceFuturesSymbol(symbol),
+                    side: normalizedSide,
+                    kind: normalizedKind,
+                    skipReason: 'TARGET_ROW_NOT_FOUND',
+                    elapsedMs: Date.now() - startedAt,
+                });
+                return;
+            }
+            if(symbol && normalizeBinanceFuturesSymbol(row.symbol) !== normalizeBinanceFuturesSymbol(symbol)){
+                logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_SKIP', {
+                    uid: numericUid,
+                    pid: numericPid,
+                    rowSymbol: row.symbol || null,
+                    symbol: symbol || null,
+                    normalizedSymbol: normalizeBinanceFuturesSymbol(symbol),
+                    side: normalizedSide,
+                    kind: normalizedKind,
+                    skipReason: 'TARGET_SYMBOL_MISMATCH',
+                    elapsedMs: Date.now() - startedAt,
+                });
+                return;
+            }
+
+            const localState = await getGridTargetLocalConvergenceState({
+                row,
+                side: normalizedSide,
+                kind: normalizedKind,
+                clientOrderId,
+                clientAlgoId,
+            });
+            if(!localState.active){
+                gridTargetedTruthSyncMetrics.suppressed += 1;
+                logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_SKIP', {
+                    uid: numericUid,
+                    pid: numericPid,
+                    symbol: row.symbol || symbol || null,
+                    normalizedSymbol: normalizeBinanceFuturesSymbol(row.symbol || symbol),
+                    side: normalizedSide,
+                    kind: normalizedKind,
+                    skipReason: 'TARGET_ALREADY_CONVERGED_BEFORE_VERIFY',
+                    localStateReason: localState.reason,
+                    verifyKey,
+                    firstVerifyGraceMs: GRID_TARGETED_TRUTH_SYNC_FIRST_VERIFY_GRACE_MS,
+                    queueWaitMs: waitMs,
+                    elapsedMs: Date.now() - startedAt,
+                });
+                return;
+            }
+
+            logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_START', {
+                uid: numericUid,
+                pid: numericPid,
+                symbol: row.symbol || symbol || null,
+                normalizedSymbol: normalizeBinanceFuturesSymbol(row.symbol || symbol),
+                side: normalizedSide,
+                kind: normalizedKind,
+                price: toAuditNumber(price, null),
+                targetPrice: toAuditNumber(targetPrice, null),
+                priceSource,
+                workingType,
+                targetScope: resolvedTargetScope,
+                verifyKey,
+                clientOrderId,
+                clientAlgoId,
+                orderId,
+                algoId,
+                source,
+                eventTime,
+                queueWaitMs: waitMs,
+                globalRunning: gridTargetedTruthSyncGlobalRunning,
+                uidRunning: Number(gridTargetedTruthSyncRunningByUid.get(String(numericUid)) || 0),
+                symbolRunning: Number(gridTargetedTruthSyncRunningBySymbol.get(normalizeBinanceFuturesSymbol(row.symbol || symbol)) || 0),
+                canonicalEvidenceRequired: ['exactOrderOrAlgoOrder', 'userTradesIfFillEvidence', 'positionRiskSupportOnly'],
+            });
+            gridTargetedTruthSyncMetrics.exactQueries += 1;
+            const exactOrder = await readExactGridTargetOrderStatus({
+                uid: numericUid,
+                symbol: row.symbol || symbol,
+                kind: normalizedKind,
+                clientOrderId,
+                clientAlgoId,
+                orderId,
+                algoId,
+            });
+            const exactStatus = exactOrder ? getExactGridTargetStatus(exactOrder, normalizedKind) : null;
+            logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_EXACT_STATUS', {
+                uid: numericUid,
+                pid: numericPid,
+                symbol: row.symbol || symbol || null,
+                normalizedSymbol: normalizeBinanceFuturesSymbol(row.symbol || symbol),
+                side: normalizedSide,
+                kind: normalizedKind,
+                targetScope: exactOrder ? 'EXACT_ORDER_TARGETED' : resolvedTargetScope,
+                clientOrderId,
+                clientAlgoId,
+                orderId,
+                algoId,
+                status: exactStatus?.status || null,
+                executedQty: exactStatus?.executedQty ?? null,
+                originalQty: exactStatus?.originalQty ?? null,
+                exactOrderFound: Boolean(exactOrder),
+                createsOrderOrLedger: false,
+                elapsedMs: Date.now() - startedAt,
+            });
+
+            if(!exactOrder && resolvedTargetScope === 'EXACT_ORDER_TARGETED'){
+                gridTargetedTruthSyncMetrics.deferred += 1;
+                gridTargetedTruthSyncVerifyLastAt.set(verifyKey, Date.now());
+                logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DONE', {
+                    uid: numericUid,
+                    pid: numericPid,
+                    symbol: row.symbol || symbol || null,
+                    normalizedSymbol: normalizeBinanceFuturesSymbol(row.symbol || symbol),
+                    side: normalizedSide,
+                    kind: normalizedKind,
+                    repaired: false,
+                    targetScope: resolvedTargetScope,
+                    recoveryScope: 'NO_EVIDENCE_NO_MUTATION',
+                    status: null,
+                    reason: 'EXACT_ORDER_NOT_FOUND',
+                    elapsedMs: Date.now() - startedAt,
+                });
+                return;
+            }
+
+            if(exactStatus?.noOpStatus || exactStatus?.terminalNoFill){
+                let entryNewFollowUpScheduled = false;
+                if(exactStatus.noOpStatus){
+                    gridTargetedTruthSyncVerifyLastAt.set(verifyKey, Date.now());
+                    entryNewFollowUpScheduled = scheduleEntryNewFollowUp({
+                        rowSymbol: row.symbol || symbol,
+                        status: exactStatus.status,
+                    });
+                }
+                if(exactStatus.terminalNoFill && normalizedKind === 'ENTRY' && clientOrderId){
+                    await getGridEngine().handleLiveOrderTradeUpdate(numericUid, {
+                        e: 'ORDER_TRADE_UPDATE',
+                        E: Date.now(),
+                        o: {
+                            s: normalizeBinanceFuturesSymbol(row.symbol || symbol),
+                            c: clientOrderId,
+                            i: exactOrder?.orderId || orderId || null,
+                            x: exactStatus.status,
+                            X: exactStatus.status,
+                            z: '0',
+                            l: '0',
+                            ap: exactOrder?.avgPrice || exactOrder?.price || null,
+                            L: exactOrder?.price || null,
+                            ps: normalizedSide,
+                        },
+                    }).catch(() => {});
+                }
+                if(exactStatus.terminalNoFill && normalizedKind === 'TP' && clientAlgoId){
+                    await handleAlgoReservationRuntimeUpdate(numericUid, {
+                        e: 'ALGO_UPDATE',
+                        E: Date.now(),
+                        ao: {
+                            symbol: normalizeBinanceFuturesSymbol(row.symbol || symbol),
+                            clientAlgoId,
+                            algoId: exactOrder?.algoId || exactOrder?.strategyId || algoId || null,
+                            algoStatus: exactStatus.status,
+                            executedQty: exactStatus.executedQty,
+                            positionSide: normalizedSide,
+                        },
+                    }).catch(() => {});
+                }
+                if(exactStatus.terminalNoFill && normalizedKind === 'STOP' && clientAlgoId){
+                    await handleAlgoReservationRuntimeUpdate(numericUid, {
+                        e: 'ALGO_UPDATE',
+                        E: Date.now(),
+                        ao: {
+                            symbol: normalizeBinanceFuturesSymbol(row.symbol || symbol),
+                            clientAlgoId,
+                            algoId: exactOrder?.algoId || exactOrder?.strategyId || algoId || null,
+                            algoStatus: exactStatus.status,
+                            executedQty: exactStatus.executedQty,
+                            positionSide: normalizedSide,
+                        },
+                    }).catch(() => {});
+                }
+                if(exactStatus.terminalNoFill){
+                    gridTargetedTruthSyncTerminalAt.set(verifyKey, Date.now());
+                }
+                logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DONE', {
+                    uid: numericUid,
+                    pid: numericPid,
+                    symbol: row.symbol || symbol || null,
+                    normalizedSymbol: normalizeBinanceFuturesSymbol(row.symbol || symbol),
+                    side: normalizedSide,
+                    kind: normalizedKind,
+                    repaired: false,
+                    targetScope: exactOrder ? 'EXACT_ORDER_TARGETED' : resolvedTargetScope,
+                    recoveryScope: 'EXACT_STATUS_NOOP',
+                    status: exactStatus.status,
+                    entryNewFollowUpScheduled,
+                    elapsedMs: Date.now() - startedAt,
+                });
+                return;
+            }
+
+            if(exactOrder && (exactStatus?.verifyStatus || exactStatus?.terminalWithFill)){
+                const directDispatch = await dispatchExactGridEvidenceToExistingHandler({
+                    uid: numericUid,
+                    row,
+                    side: normalizedSide,
+                    kind: normalizedKind,
+                    exactOrder,
+                    exactStatus,
+                    clientOrderId,
+                    clientAlgoId,
+                });
+                if(directDispatch.dispatched){
+                    logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DONE', {
+                        uid: numericUid,
+                        pid: numericPid,
+                        symbol: row.symbol || symbol || null,
+                        normalizedSymbol: normalizeBinanceFuturesSymbol(row.symbol || symbol),
+                        side: normalizedSide,
+                        kind: normalizedKind,
+                        repaired: true,
+                        targetScope: 'EXACT_ORDER_TARGETED',
+                        recoveryScope: directDispatch.classification,
+                        status: exactStatus?.status || null,
+                        userTradesCount: directDispatch.userTradesCount || 0,
+                        matchedTradeCount: directDispatch.matchedTradeCount || 0,
+                        dispatchedCount: directDispatch.dispatchedCount || 0,
+                        elapsedMs: Date.now() - startedAt,
+                    });
+                    return;
+                }
+                if(resolvedTargetScope === 'EXACT_ORDER_TARGETED'){
+                    gridTargetedTruthSyncMetrics.deferred += 1;
+                    gridTargetedTruthSyncVerifyLastAt.set(verifyKey, Date.now());
+                    logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DONE', {
+                        uid: numericUid,
+                        pid: numericPid,
+                        symbol: row.symbol || symbol || null,
+                        normalizedSymbol: normalizeBinanceFuturesSymbol(row.symbol || symbol),
+                        side: normalizedSide,
+                        kind: normalizedKind,
+                        repaired: false,
+                        targetScope: 'EXACT_ORDER_TARGETED',
+                        recoveryScope: directDispatch.classification || 'EXACT_STATUS_ROW_RECOVERY_REQUIRED',
+                        status: exactStatus?.status || null,
+                        reason: directDispatch.reason || 'DIRECT_HANDLER_EVIDENCE_MISSING',
+                        userTradesCount: directDispatch.userTradesCount || 0,
+                        matchedTradeCount: directDispatch.matchedTradeCount || 0,
+                        elapsedMs: Date.now() - startedAt,
+                    });
+                    return;
+                }
+            }
+
+            if(resolvedTargetScope !== 'PID_SIDE_TARGETED_BUT_ORDER_AMBIGUOUS'){
+                gridTargetedTruthSyncMetrics.deferred += 1;
+                gridTargetedTruthSyncVerifyLastAt.set(verifyKey, Date.now());
+                logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DONE', {
+                    uid: numericUid,
+                    pid: numericPid,
+                    symbol: row.symbol || symbol || null,
+                    normalizedSymbol: normalizeBinanceFuturesSymbol(row.symbol || symbol),
+                    side: normalizedSide,
+                    kind: normalizedKind,
+                    repaired: false,
+                    targetScope: resolvedTargetScope,
+                    recoveryScope: 'NO_EVIDENCE_NO_MUTATION',
+                    status: exactStatus?.status || null,
+                    elapsedMs: Date.now() - startedAt,
+                });
+                return;
+            }
+
+            gridTargetedTruthSyncMetrics.rowWideFallbacks += 1;
+            gridTargetedTruthSyncVerifyLastAt.set(verifyKey, Date.now());
+            const repairedRow = await getGridEngine().truthSyncLiveGridRow({
+                row,
+                exchangeSnapshotCache: new Map(),
+            });
+            logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_TARGETED_VERIFY_DONE', {
+                uid: numericUid,
+                pid: numericPid,
+                symbol: row.symbol || symbol || null,
+                normalizedSymbol: normalizeBinanceFuturesSymbol(row.symbol || symbol),
+                side: normalizedSide,
+                kind: normalizedKind,
+                repaired: Boolean(repairedRow),
+                repairedCount: Array.isArray(repairedRow?.repairs) ? repairedRow.repairs.length : 0,
+                repairs: Array.isArray(repairedRow?.repairs) ? repairedRow.repairs : [],
+                targetScope: resolvedTargetScope,
+                recoveryScope: 'AMBIGUOUS_ROW_FALLBACK',
+                status: exactStatus?.status || null,
+                elapsedMs: Date.now() - startedAt,
+            });
+            },
+        });
+    }, firstVerifyGraceMs);
+    gridTargetedTruthSyncVerifyTimers.set(verifyKey, timer);
+    return true;
+}
+const auditGridPublicPriceCrossingHints = async ({
+    symbol,
+    price,
+    bestBid = null,
+    bestAsk = null,
+    lastPrice = null,
+    markPrice = null,
+    quoteTime = null,
+    markTime = null,
+    eventTime = null,
+    source = null,
+} = {}) => {
+    const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+    let priceContext = normalizeGridPublicPriceContext({
+        symbol: normalizedSymbol,
+        source,
+        price,
+        bestBid,
+        bestAsk,
+        lastPrice,
+        markPrice,
+        quoteTime,
+        markTime,
+        eventTime,
+    });
+    const normalizedPrice = toAuditNumber(priceContext.lastPrice || priceContext.bestAsk || priceContext.bestBid || price, 0);
+    if(!normalizedSymbol || !(normalizedPrice > 0)){
+        return false;
+    }
+
+    const now = Date.now();
+
+    const symbols = getGridPublicHintSymbols(normalizedSymbol);
+    let rows = [];
+    try{
+        rows = await loadGridPublicHintRows(symbols);
+    }catch(error){
+        logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_PRICE_CROSS_HINT_SKIP', {
+            symbol: normalizedSymbol,
+            normalizedSymbol: normalizeBinanceFuturesSymbol(normalizedSymbol),
+            price: normalizedPrice,
+            source,
+            eventTime,
+            skipReason: 'DB_READ_FAILED',
+            message: error?.message || String(error),
+        }, {
+            throttleKey: `GRID_PUBLIC_PRICE_HINT_DB_READ_FAILED:${normalizeBinanceFuturesSymbol(normalizedSymbol)}`,
+            throttleMs: 60000,
+        });
+        return false;
+    }
+
+    logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_PRICE_CROSS_HINT_CHECK', {
+        symbol: normalizedSymbol,
+        normalizedSymbol: normalizeBinanceFuturesSymbol(normalizedSymbol),
+        price: normalizedPrice,
+        source,
+        eventTime,
+        receiveTimeKst: new Date(now).toISOString(),
+        publicPriceCrossHintLatencyMs: buildAuditLatencyMs(eventTime, now),
+        candidateRowCount: rows.length,
+        bestBid: priceContext.bestBid || null,
+        bestAsk: priceContext.bestAsk || null,
+        lastPrice: priceContext.lastPrice || null,
+        markPrice: priceContext.markPrice || null,
+    });
+
+    if(rows.length === 0){
+        logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_PRICE_CROSS_HINT_SKIP', {
+            symbol: normalizedSymbol,
+            normalizedSymbol: normalizeBinanceFuturesSymbol(normalizedSymbol),
+            price: normalizedPrice,
+            source,
+            eventTime,
+            skipReason: 'NO_ACTIVE_GRID_ROWS',
+        }, {
+            throttleKey: `GRID_PUBLIC_PRICE_HINT_NO_ACTIVE_GRID_ROWS:${normalizeBinanceFuturesSymbol(normalizedSymbol)}`,
+            throttleMs: 60000,
+        });
+        return false;
+    }
+
+    let emitted = false;
+    for(const row of rows){
+        for(const side of ['LONG', 'SHORT']){
+            const prefix = side === 'LONG' ? 'long' : 'short';
+            const targets = buildGridPublicHintTargets(row, side);
+            for(const target of targets){
+                if((target.kind === 'TP' || target.kind === 'STOP') && target.workingType === 'MARK_PRICE'){
+                    const comparableBeforeHydrate = getGridPublicHintComparablePrice({ side, kind: target.kind, target, priceContext });
+                    if(!comparableBeforeHydrate.usable){
+                        const hydrated = await hydrateGridPublicHintMarkPrice(row.symbol || normalizedSymbol);
+                        priceContext = normalizeGridPublicPriceContext({
+                            symbol: row.symbol || normalizedSymbol,
+                            source,
+                            price,
+                            bestBid: priceContext.bestBid,
+                            bestAsk: priceContext.bestAsk,
+                            lastPrice: priceContext.lastPrice,
+                            markPrice: hydrated?.markPrice,
+                            quoteTime: priceContext.quoteTime,
+                            markTime: hydrated?.markTime,
+                            eventTime,
+                        });
+                    }
+                }
+                const comparable = getGridPublicHintComparablePrice({
+                    side,
+                    kind: target.kind,
+                    target,
+                    priceContext,
+                });
+                if(!comparable.usable){
+                    logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_PRICE_CROSS_HINT_SKIP', {
+                        uid: row.uid || null,
+                        pid: row.id || null,
+                        symbol: row.symbol || normalizedSymbol,
+                        normalizedSymbol: normalizeBinanceFuturesSymbol(row.symbol || normalizedSymbol),
+                        side,
+                        kind: target.kind,
+                        targetPrice: target.targetPrice,
+                        priceSource: comparable.priceSource,
+                        workingType: comparable.workingType,
+                        skipReason: comparable.reason || 'PRICE_SOURCE_UNUSABLE',
+                        source,
+                        eventTime,
+                    }, {
+                        throttleKey: `GRID_PUBLIC_PRICE_HINT_PRICE_SOURCE_UNUSABLE:${row.id}:${side}:${target.kind}:${comparable.priceSource || 'UNKNOWN'}`,
+                        throttleMs: GRID_PUBLIC_PRICE_HINT_AUDIT_THROTTLE_MS,
+                    });
+                    continue;
+                }
+                const conditionMet = getGridPublicHintConditionMet({
+                    side,
+                    kind: target.kind,
+                    comparablePrice: comparable.comparablePrice,
+                    targetPrice: target.targetPrice,
+                });
+                if(!conditionMet){
+                    continue;
+                }
+
+                emitted = true;
+                const stage = target.kind === 'ENTRY'
+                    ? 'GRID_PUBLIC_PRICE_HINT_ENTRY_PRICE_CROSS_HINT'
+                    : target.kind === 'TP'
+                        ? 'GRID_PUBLIC_PRICE_HINT_TP_PRICE_CROSS_HINT'
+                        : 'GRID_PUBLIC_PRICE_HINT_STOP_PRICE_CROSS_HINT';
+                logSeparatedGridAuditTrace(stage, {
+                    uid: row.uid || null,
+                    pid: row.id || null,
+                    symbol: row.symbol || normalizedSymbol,
+                    normalizedSymbol: normalizeBinanceFuturesSymbol(row.symbol || normalizedSymbol),
+                    side,
+                    price: comparable.comparablePrice,
+                    rawEventPrice: normalizedPrice,
+                    priceSource: comparable.priceSource,
+                    workingType: comparable.workingType,
+                    entryPrice: target.kind === 'ENTRY' ? target.targetPrice : null,
+                    tpPrice: target.kind === 'TP' ? target.targetPrice : null,
+                    stopPrice: target.kind === 'STOP' ? target.targetPrice : null,
+                    targetPrice: target.targetPrice,
+                    targetScope: target.targetScope || getGridPublicHintTargetScope(target),
+                    clientOrderId: target.clientOrderId || null,
+                    clientAlgoId: target.clientAlgoId || null,
+                    orderReference: getGridPublicHintOrderReference(target),
+                    conditionMet,
+                    rowStatus: row.regimeStatus || null,
+                    legStatus: row?.[`${prefix}LegStatus`] || null,
+                    source,
+                    eventTime,
+                    receiveTimeKst: new Date(now).toISOString(),
+                    publicPriceCrossHintLatencyMs: buildAuditLatencyMs(eventTime, now),
+                    directFillConfirmation: false,
+                    createsOrderOrLedger: false,
+                });
+                scheduleGridTargetedTruthSyncVerify({
+                    uid: row.uid || null,
+                    pid: row.id || null,
+                    symbol: row.symbol || normalizedSymbol,
+                    side,
+                    kind: target.kind,
+                    price: comparable.comparablePrice,
+                    targetPrice: target.targetPrice,
+                    priceSource: comparable.priceSource,
+                    workingType: comparable.workingType,
+                    targetScope: target.targetScope || getGridPublicHintTargetScope(target),
+                    clientOrderId: target.clientOrderId || null,
+                    clientAlgoId: target.clientAlgoId || null,
+                    orderId: target.orderId || null,
+                    algoId: target.algoId || null,
+                    eventTime,
+                    source,
+                });
+            }
+        }
+    }
+
+    if(!emitted){
+        logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_PRICE_CROSS_HINT_SKIP', {
+            symbol: normalizedSymbol,
+            normalizedSymbol: normalizeBinanceFuturesSymbol(normalizedSymbol),
+            price: normalizedPrice,
+            source,
+            eventTime,
+            candidateRowCount: rows.length,
+            skipReason: 'NO_TARGET_CROSSED',
+        });
+    }
+    return emitted;
+}
+const logGridPublicPriceIngress = (payload = {}) => {
+    const normalizedSymbol = normalizeBinanceFuturesSymbol(payload.symbol);
+    logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_PUBLIC_PRICE_INGRESS', {
+        symbol: payload.symbol || null,
+        normalizedSymbol,
+        price: toAuditNumber(payload.price, null),
+        bestBid: toAuditNumber(payload.bestBid, null),
+        bestAsk: toAuditNumber(payload.bestAsk, null),
+        lastPrice: toAuditNumber(payload.lastPrice, null),
+        markPrice: toAuditNumber(payload.markPrice, null),
+        quoteTime: payload.quoteTime || null,
+        markTime: payload.markTime || null,
+        eventTime: payload.eventTime || null,
+        receiveTimeKst: new Date().toISOString(),
+        source: payload.source || null,
+        publicPriceCrossHintLatencyMs: buildAuditLatencyMs(payload.eventTime),
+    }, {
+        throttleKey: `GRID_PUBLIC_PRICE_HINT_PUBLIC_PRICE_INGRESS:${payload.source || 'UNKNOWN'}:${normalizedSymbol}`,
+        throttleMs: GRID_PUBLIC_PRICE_HINT_INGRESS_THROTTLE_MS,
+    });
 }
 
 const shouldSkipDuplicateOrderRuntimeEvent = (uid, payload) => {
@@ -1448,8 +3815,11 @@ const logClosePartialFill = (closeType, ownerUserId, pid, oid, symbol, side, qty
     exports.msgAdd('closePartialFill', endStatus, runtimeMessage, ownerUserId, pid, oid, symbol, side);
 }
 
-const TERMINAL_ORDER_STATUSES = new Set(['CANCELED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'REJECTED']);
-const RECOVERABLE_FILL_ORDER_STATUSES = new Set(['FILLED', 'PARTIALLY_FILLED', 'CANCELED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'REJECTED']);
+const TERMINAL_ORDER_STATUSES = new Set(gridBinanceStatusClassifier.TERMINAL_ORDER_STATUSES);
+const RECOVERABLE_FILL_ORDER_STATUSES = new Set([
+    ...gridBinanceStatusClassifier.FILL_ORDER_STATUSES,
+    ...gridBinanceStatusClassifier.TERMINAL_ORDER_STATUSES,
+]);
 const isTerminalOrderStatus = (status) => TERMINAL_ORDER_STATUSES.has(String(status || '').trim().toUpperCase());
 const isRecoverableFillOrderStatus = (status) => RECOVERABLE_FILL_ORDER_STATUSES.has(String(status || '').trim().toUpperCase());
 const getOrderExecutedQty = (order = {}) => {
@@ -2111,6 +4481,9 @@ const handleAlgoReservationRuntimeUpdate = async (uid, data) => {
         const algoStatus = String(
             getFirstDefinedValue(detail.algoStatus, detail.st, detail.X, detail.x, detail.status) || ''
         ).trim().toUpperCase();
+        const algoClassification = gridBinanceStatusClassifier.classifyAlgoUpdate({
+            o: { X: algoStatus, aq: getFirstDefinedValue(detail.executedQty, detail.aq, detail.z) },
+        });
 
         if(context.actualOrderId){
             await pidPositionLedger.bindReservationActualOrderId(clientAlgoId, context.actualOrderId);
@@ -2120,6 +4493,16 @@ const handleAlgoReservationRuntimeUpdate = async (uid, data) => {
             await pidPositionLedger.markReservationsCanceled([clientAlgoId]);
             outcome = `RESERVATION_${algoStatus}`;
             return true;
+        }
+
+        if(algoClassification.canonicalAction === 'VERIFY_MATCHING_ENGINE_RESULT'){
+            outcome = 'FINISHED_VERIFY_REQUIRED';
+            return false;
+        }
+
+        if(algoClassification.canonicalAction === 'OBSERVE_TRIGGER_PROGRESS'){
+            outcome = `ALGO_${algoStatus}_OBSERVED`;
+            return false;
         }
 
         outcome = 'NO_STATE_CHANGE';
@@ -2171,8 +4554,9 @@ const handleConditionalTriggerRejectReservationUpdate = async (uid, data) => {
             return false;
         }
 
+        const rejectClassification = gridBinanceStatusClassifier.classifyConditionalOrderTriggerReject(data);
         await pidPositionLedger.markReservationsCanceled([clientAlgoId]);
-        outcome = 'RESERVATION_CANCELED';
+        outcome = rejectClassification.canonicalAction;
         return true;
     }catch(error){
         outcome = 'ERROR';
@@ -2604,6 +4988,47 @@ const privateFuturesAlgoRequest = async (uid, path, params = {}, method = 'GET')
     return privateFuturesSignedRequest(uid, path, params, method);
 }
 
+const readFuturesOpenAlgoOrders = async (uid, symbol, options = {}) => {
+    const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
+    const mockRead = await callQaReplayMockFuturesRead(uid, 'futuresOpenAlgoOrders', [exchangeSymbol, options]);
+    if(mockRead.handled){
+        return mockRead.data;
+    }
+    gridTargetedTruthSyncMetrics.openAlgoOrdersCalls += 1;
+    return await privateFuturesAlgoRequest(uid, '/fapi/v1/openAlgoOrders', {
+        symbol: exchangeSymbol,
+        ...options,
+    }, 'GET');
+}
+
+const readFuturesAllAlgoOrders = async (uid, symbol, options = {}) => {
+    const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
+    const mockRead = await callQaReplayMockFuturesRead(uid, 'futuresAllAlgoOrders', [exchangeSymbol, options]);
+    if(mockRead.handled){
+        return mockRead.data;
+    }
+    gridTargetedTruthSyncMetrics.allAlgoOrdersCalls += 1;
+    return await privateFuturesAlgoRequest(uid, '/fapi/v1/allAlgoOrders', {
+        symbol: exchangeSymbol,
+        limit: 1000,
+        ...options,
+    }, 'GET');
+}
+
+const callQaReplayMockFuturesRead = async (uid, methodName, args = []) => {
+    if(!isQaReplayMockBinanceClient(uid)){
+        return { handled: false };
+    }
+    const client = binance?.[uid];
+    if(!client || typeof client[methodName] !== 'function'){
+        return { handled: false };
+    }
+    return {
+        handled: true,
+        data: await client[methodName](...args),
+    };
+}
+
 const toAccountRiskNumber = (value) => {
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : 0;
@@ -2764,6 +5189,97 @@ const persistAccountRiskSnapshot = async (snapshot) => {
             JSON.stringify(snapshot.payloadJson || {}),
         ]
     );
+
+    return snapshot;
+}
+
+const mapAccountRiskSnapshotRow = (row = {}) => {
+    if(!row){
+        return null;
+    }
+
+    const capturedAt = row.createdAt || row.created_at || row.capturedAt || null;
+    return {
+        uid: row.uid,
+        accountMode: row.accountMode || row.account_mode || null,
+        hedgeMode: typeof row.hedgeMode === 'boolean' ? row.hedgeMode : null,
+        positionMode: row.positionMode || row.position_mode || null,
+        riskLevel: row.riskLevel || row.risk_level || 'UNKNOWN',
+        positionCount: toAccountRiskNumber(row.positionCount ?? row.position_count),
+        totalWalletBalance: toAccountRiskNumber(row.totalWalletBalance ?? row.total_wallet_balance),
+        totalUnrealizedProfit: toAccountRiskNumber(row.totalUnrealizedProfit ?? row.total_unrealized_profit),
+        totalMarginBalance: toAccountRiskNumber(row.totalMarginBalance ?? row.total_margin_balance),
+        totalMaintMargin: toAccountRiskNumber(row.totalMaintMargin ?? row.total_maint_margin),
+        totalInitialMargin: toAccountRiskNumber(row.totalInitialMargin ?? row.total_initial_margin),
+        totalPositionInitialMargin: toAccountRiskNumber(row.totalPositionInitialMargin ?? row.total_position_initial_margin),
+        totalOpenOrderInitialMargin: toAccountRiskNumber(row.totalOpenOrderInitialMargin ?? row.total_open_order_initial_margin),
+        totalCrossWalletBalance: toAccountRiskNumber(row.totalCrossWalletBalance ?? row.total_cross_wallet_balance),
+        totalCrossUnPnl: toAccountRiskNumber(row.totalCrossUnPnl ?? row.total_cross_un_pnl),
+        availableBalance: toAccountRiskNumber(row.availableBalance ?? row.available_balance),
+        maxWithdrawAmount: toAccountRiskNumber(row.maxWithdrawAmount ?? row.max_withdraw_amount),
+        accountEquity: toAccountRiskNumber(row.accountEquity ?? row.account_equity),
+        accountMaintMargin: toAccountRiskNumber(row.accountMaintMargin ?? row.account_maint_margin),
+        accountMarginRatio: toAccountRiskNumber(row.accountMarginRatio ?? row.account_margin_ratio),
+        accountInitialMarginRatio: toAccountRiskNumber(row.accountInitialMarginRatio ?? row.account_initial_margin_ratio),
+        accountOpenOrderMarginRatio: toAccountRiskNumber(row.accountOpenOrderMarginRatio ?? row.account_open_order_margin_ratio),
+        accountMarginBuffer: toAccountRiskNumber(row.accountMarginBuffer ?? row.account_margin_buffer),
+        payloadJson: row.payloadJson || row.payload_json || null,
+        capturedAt,
+        createdAt: capturedAt,
+    };
+}
+
+const loadLatestPersistedAccountRiskSnapshot = async (uid) => {
+    if(!uid){
+        return null;
+    }
+
+    const [rows] = await db.query(
+        `SELECT
+            uid,
+            account_mode AS accountMode,
+            risk_level AS riskLevel,
+            position_count AS positionCount,
+            total_wallet_balance AS totalWalletBalance,
+            total_unrealized_profit AS totalUnrealizedProfit,
+            total_margin_balance AS totalMarginBalance,
+            total_maint_margin AS totalMaintMargin,
+            total_initial_margin AS totalInitialMargin,
+            total_position_initial_margin AS totalPositionInitialMargin,
+            total_open_order_initial_margin AS totalOpenOrderInitialMargin,
+            total_cross_wallet_balance AS totalCrossWalletBalance,
+            total_cross_un_pnl AS totalCrossUnPnl,
+            available_balance AS availableBalance,
+            max_withdraw_amount AS maxWithdrawAmount,
+            account_equity AS accountEquity,
+            account_maint_margin AS accountMaintMargin,
+            account_margin_ratio AS accountMarginRatio,
+            account_initial_margin_ratio AS accountInitialMarginRatio,
+            account_open_order_margin_ratio AS accountOpenOrderMarginRatio,
+            account_margin_buffer AS accountMarginBuffer,
+            payload_json AS payloadJson,
+            created_at AS createdAt
+        FROM account_risk_snapshot
+        WHERE uid = ?
+        ORDER BY id DESC
+        LIMIT 1`,
+        [uid]
+    );
+
+    return mapAccountRiskSnapshotRow(rows?.[0] || null);
+}
+
+const rememberAccountRiskSnapshot = (uid, snapshot, { persisted = false } = {}) => {
+    const cache = ensureAccountRiskSnapshotCache(uid);
+    if(!cache || !snapshot){
+        return snapshot || null;
+    }
+
+    cache.latest = snapshot;
+    cache.lastFetchedAt = snapshot.capturedAt || snapshot.createdAt || new Date().toISOString();
+    if(persisted){
+        cache.lastPersistedAt = snapshot.capturedAt || snapshot.createdAt || new Date().toISOString();
+    }
 
     return snapshot;
 }
@@ -3089,7 +5605,7 @@ const listOpenBoundExitOrders = async (uid, symbol, pid) => {
 
     try{
         const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
-        const openOrders = await binance[uid].futuresOpenOrders(exchangeSymbol);
+        const openOrders = await readFuturesOpenOrders(uid, exchangeSymbol);
         const futuresOrders = (openOrders || [])
             .filter((order) => {
                 const clientOrderId = String(order.clientOrderId || order.origClientOrderId || '');
@@ -3268,7 +5784,7 @@ const loadRecentSignalCloseExecutionFromExchange = async ({
 
     let exchangeOrders = [];
     try{
-        exchangeOrders = await binance[uid].futuresAllOrders(normalizeBinanceFuturesSymbol(symbol), { limit: 100 });
+        exchangeOrders = await readFuturesAllOrders(uid, symbol, { limit: 100 });
     }catch(error){
         return null;
     }
@@ -3321,7 +5837,7 @@ const loadRecentSignalCloseExecutionFromExchange = async ({
 
     let relatedTrades = [];
     try{
-        relatedTrades = await binance[uid].futuresUserTrades(normalizeBinanceFuturesSymbol(symbol), { limit: 100 });
+        relatedTrades = await readFuturesUserTrades(uid, symbol, { limit: 100 });
     }catch(error){
         relatedTrades = [];
     }
@@ -3567,7 +6083,7 @@ const loadRecentSignalEntryExecutionFromExchange = async ({
 
     let exchangeOrders = [];
     try{
-        exchangeOrders = await binance[uid].futuresAllOrders(normalizeBinanceFuturesSymbol(symbol), { limit: 50 });
+        exchangeOrders = await readFuturesAllOrders(uid, symbol, { limit: 50 });
     }catch(error){
         return null;
     }
@@ -3611,7 +6127,7 @@ const loadRecentSignalEntryExecutionFromExchange = async ({
 
     let relatedTrades = [];
     try{
-        relatedTrades = await binance[uid].futuresUserTrades(normalizeBinanceFuturesSymbol(symbol), { limit: 100 });
+        relatedTrades = await readFuturesUserTrades(uid, symbol, { limit: 100 });
     }catch(error){
         relatedTrades = [];
     }
@@ -3745,7 +6261,7 @@ const loadRecentGridCloseExecutionFromExchange = async ({
 
     let exchangeOrders = [];
     try{
-        exchangeOrders = await binance[uid].futuresAllOrders(normalizeBinanceFuturesSymbol(symbol), { limit: 100 });
+        exchangeOrders = await readFuturesAllOrders(uid, symbol, { limit: 100 });
     }catch(error){
         return null;
     }
@@ -3789,7 +6305,7 @@ const loadRecentGridCloseExecutionFromExchange = async ({
 
     let relatedTrades = [];
     try{
-        relatedTrades = await binance[uid].futuresUserTrades(normalizeBinanceFuturesSymbol(symbol), { limit: 100 });
+        relatedTrades = await readFuturesUserTrades(uid, symbol, { limit: 100 });
     }catch(error){
         relatedTrades = [];
     }
@@ -3987,22 +6503,82 @@ const loadGridReservationOwnedExitExecutionsFromExchange = async ({
         return [];
     }
 
+    let openAlgoOrders = [];
+    try{
+        openAlgoOrders = await privateFuturesAlgoRequest(
+            uid,
+            '/fapi/v1/openAlgoOrders',
+            { symbol },
+            'GET'
+        );
+    }catch(error){
+        openAlgoOrders = [];
+    }
+
+    const isReservationOpenAlgoActive = (reservation) => (openAlgoOrders || []).some((order) => {
+        const clientAlgoId = String(
+            order?.clientAlgoId
+            || order?.clientOrderId
+            || order?.newClientStrategyId
+            || ''
+        ).trim();
+        const algoId = String(order?.algoId || order?.orderId || '').trim();
+        const orderSide = String(order?.side || '').trim().toUpperCase();
+        const orderPositionSide = String(order?.positionSide || '').trim().toUpperCase();
+        const matchesReservation =
+            (reservation.clientOrderId && clientAlgoId === reservation.clientOrderId)
+            || (reservation.actualOrderId && algoId === reservation.actualOrderId)
+            || (reservation.sourceOrderId && algoId === reservation.sourceOrderId);
+        if(!matchesReservation){
+            return false;
+        }
+        if(orderSide && orderSide !== closeSide){
+            return false;
+        }
+        if(orderPositionSide && orderPositionSide !== normalizedLeg){
+            return false;
+        }
+        return true;
+    });
+
+    const recoveryReservations = normalizedReservations.filter((reservation) => {
+        if(!isReservationOpenAlgoActive(reservation)){
+            return true;
+        }
+        logOrderRuntimeTrace('GRID_RESERVATION_EXIT_RECOVERY_SKIPPED_OPEN_ALGO_ACTIVE', {
+            uid,
+            pid,
+            symbol,
+            positionSide: normalizedLeg,
+            reservationId: Number(reservation?.id || 0) || null,
+            clientOrderId: reservation.clientOrderId || null,
+            actualOrderId: reservation.actualOrderId || null,
+            sourceOrderId: reservation.sourceOrderId || null,
+            reason: 'active-open-algo-protection-not-exit-fill',
+        });
+        return false;
+    });
+
+    if(recoveryReservations.length === 0){
+        return [];
+    }
+
     let exchangeOrders = [];
     try{
-        exchangeOrders = await binance[uid].futuresAllOrders(normalizeBinanceFuturesSymbol(symbol), { limit: 200 });
+        exchangeOrders = await readFuturesAllOrders(uid, symbol, { limit: 200 });
     }catch(error){
         return [];
     }
 
     let relatedTrades = [];
     try{
-        relatedTrades = await binance[uid].futuresUserTrades(normalizeBinanceFuturesSymbol(symbol), { limit: 200 });
+        relatedTrades = await readFuturesUserTrades(uid, symbol, { limit: 200 });
     }catch(error){
         relatedTrades = [];
     }
 
     const recoveries = [];
-    for(const reservation of normalizedReservations){
+    for(const reservation of recoveryReservations){
         let candidates = (exchangeOrders || [])
             .filter((order) => {
                 const clientOrderId = String(order?.clientOrderId || '').trim();
@@ -4236,14 +6812,14 @@ const recoverGridExternalManualCloseFromExchange = async ({
 
     let exchangeOrders = [];
     try{
-        exchangeOrders = await binance[uid].futuresAllOrders(normalizeBinanceFuturesSymbol(row.symbol), { limit: 200 });
+        exchangeOrders = await readFuturesAllOrders(uid, row.symbol, { limit: 200 });
     }catch(error){
         return null;
     }
 
     let relatedTrades = [];
     try{
-        relatedTrades = await binance[uid].futuresUserTrades(normalizeBinanceFuturesSymbol(row.symbol), { limit: 200 });
+        relatedTrades = await readFuturesUserTrades(uid, row.symbol, { limit: 200 });
     }catch(error){
         relatedTrades = [];
     }
@@ -4464,11 +7040,33 @@ const loadRecentGridEntryExecutionFromExchange = async ({
     );
     const requireExactCandidate = requireCandidateClientOrderId === true && clientOrderIdSet.size > 0;
     const pidNeedle = `_${uid}_${pid}_`;
+    const scanStartedAt = Date.now();
+
+    logSeparatedGridAuditTrace('GRID_REST_TRUTH_SYNC_RECOVERY_SCAN_START', {
+        uid,
+        pid,
+        symbol,
+        normalizedSymbol: normalizeBinanceFuturesSymbol(symbol),
+        positionSide: normalizedLeg,
+        candidateClientOrderIds: Array.from(clientOrderIdSet),
+        requireExactCandidate,
+        canonicalEvidence: ['futuresAllOrders', 'futuresUserTrades'],
+    });
 
     let exchangeOrders = [];
     try{
-        exchangeOrders = await binance[uid].futuresAllOrders(normalizeBinanceFuturesSymbol(symbol), { limit: 100 });
+        exchangeOrders = await readFuturesAllOrders(uid, symbol, { limit: 100 });
     }catch(error){
+        logSeparatedGridAuditTrace('GRID_REST_TRUTH_SYNC_RECOVERY_NO_MATCH', {
+            uid,
+            pid,
+            symbol,
+            normalizedSymbol: normalizeBinanceFuturesSymbol(symbol),
+            positionSide: normalizedLeg,
+            reason: 'FUTURES_ALL_ORDERS_READ_FAILED',
+            message: error?.message || String(error),
+            elapsedMs: Date.now() - scanStartedAt,
+        });
         return null;
     }
 
@@ -4508,6 +7106,17 @@ const loadRecentGridEntryExecutionFromExchange = async ({
         );
 
     if(candidates.length === 0){
+        logSeparatedGridAuditTrace('GRID_REST_TRUTH_SYNC_RECOVERY_NO_MATCH', {
+            uid,
+            pid,
+            symbol,
+            normalizedSymbol: normalizeBinanceFuturesSymbol(symbol),
+            positionSide: normalizedLeg,
+            reason: 'NO_FILLED_GENTRY_ORDER',
+            allOrdersCandidateCount: Array.isArray(exchangeOrders) ? exchangeOrders.length : 0,
+            filteredCandidateCount: 0,
+            elapsedMs: Date.now() - scanStartedAt,
+        });
         return null;
     }
 
@@ -4515,8 +7124,19 @@ const loadRecentGridEntryExecutionFromExchange = async ({
 
     let relatedTrades = [];
     try{
-        relatedTrades = await binance[uid].futuresUserTrades(normalizeBinanceFuturesSymbol(symbol), { limit: 100 });
+        relatedTrades = await readFuturesUserTrades(uid, symbol, { limit: 100 });
     }catch(error){
+        logSeparatedGridAuditTrace('GRID_REST_TRUTH_SYNC_RECOVERY_NO_MATCH', {
+            uid,
+            pid,
+            symbol,
+            normalizedSymbol: normalizeBinanceFuturesSymbol(symbol),
+            positionSide: normalizedLeg,
+            reason: 'FUTURES_USER_TRADES_READ_FAILED',
+            matchedOrderId: targetOrder?.orderId || null,
+            message: error?.message || String(error),
+            elapsedMs: Date.now() - scanStartedAt,
+        });
         relatedTrades = [];
     }
 
@@ -4534,6 +7154,19 @@ const loadRecentGridEntryExecutionFromExchange = async ({
 
     const qty = fillUnits.reduce((sum, item) => sum + Number(item?.qty || 0), 0);
     if(!(qty > 0)){
+        logSeparatedGridAuditTrace('GRID_REST_TRUTH_SYNC_RECOVERY_NO_MATCH', {
+            uid,
+            pid,
+            symbol,
+            normalizedSymbol: normalizeBinanceFuturesSymbol(symbol),
+            positionSide: normalizedLeg,
+            reason: 'MATCHED_ORDER_WITHOUT_RECOVERABLE_QTY',
+            matchedOrderId: targetOrder?.orderId || null,
+            matchedClientOrderId: targetOrder?.clientOrderId || null,
+            userTradesCandidateCount: Array.isArray(relatedTrades) ? relatedTrades.length : 0,
+            matchedTradeCount: matchedTrades.length,
+            elapsedMs: Date.now() - scanStartedAt,
+        });
         return null;
     }
 
@@ -4554,6 +7187,23 @@ const loadRecentGridEntryExecutionFromExchange = async ({
             .filter((value) => value != null && value !== '')
             .map((value) => String(value))
     ));
+    logSeparatedGridAuditTrace('GRID_REST_TRUTH_SYNC_RECOVERY_MATCHED', {
+        uid,
+        pid,
+        symbol,
+        normalizedSymbol: normalizeBinanceFuturesSymbol(symbol),
+        positionSide: normalizedLeg,
+        matchedOrderId: targetOrder?.orderId || null,
+        matchedClientOrderId: targetOrder?.clientOrderId || null,
+        allOrdersCandidateCount: Array.isArray(exchangeOrders) ? exchangeOrders.length : 0,
+        filteredCandidateCount: candidates.length,
+        userTradesCandidateCount: Array.isArray(relatedTrades) ? relatedTrades.length : 0,
+        matchedTradeCount: matchedTrades.length,
+        matchedTradeIds: tradeIds,
+        totalQty: qty,
+        elapsedMs: Date.now() - scanStartedAt,
+        canonicalEvidence: ['futuresAllOrders', 'futuresUserTrades'],
+    });
 
     return {
         clientOrderId: String(targetOrder?.clientOrderId || '').trim(),
@@ -5869,8 +8519,9 @@ const hasExchangeOpenPosition = async (uid, symbol, signalSide) => {
     }
 
     try{
-        const positions = await binance[uid].futuresPositionRisk();
-        const matched = (positions || []).filter((item) => item.symbol === symbol);
+        const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
+        const positions = await readFuturesPositionRisk(uid, symbol);
+        const matched = (positions || []).filter((item) => item.symbol === exchangeSymbol);
         if(matched.length === 0){
             return false;
         }
@@ -5974,7 +8625,7 @@ const getGridExchangePosition = async (uid, symbol, leg, options = {}) => {
 
     try{
         const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
-        const positions = await binance[uid].futuresPositionRisk();
+        const positions = await readFuturesPositionRisk(uid, symbol);
         const matched = (positions || []).find((item) => item.symbol === exchangeSymbol && item.positionSide === leg);
         if(!matched){
             return null;
@@ -6577,7 +9228,7 @@ const listOpenGridOrders = async (uid, symbol, pid, leg = null) => {
     };
 
     const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
-    const regularOrders = await binance[uid].futuresOpenOrders(exchangeSymbol).catch(() => []);
+    const regularOrders = await readFuturesOpenOrders(uid, exchangeSymbol).catch(() => []);
     const openOrders = (regularOrders || [])
         .filter((order) => matchesGridOrder(order.clientOrderId))
         .map((order) => ({
@@ -6587,7 +9238,7 @@ const listOpenGridOrders = async (uid, symbol, pid, leg = null) => {
             raw: order,
         }));
 
-    const algoOrders = await privateFuturesAlgoRequest(uid, '/fapi/v1/openAlgoOrders', { symbol }, 'GET').catch(() => []);
+    const algoOrders = await privateFuturesAlgoRequest(uid, '/fapi/v1/openAlgoOrders', { symbol: exchangeSymbol }, 'GET').catch(() => []);
     const openAlgoOrders = (Array.isArray(algoOrders) ? algoOrders : [])
         .filter((order) => matchesGridOrder(order.clientAlgoId || order.clientOrderId))
         .map((order) => ({
@@ -6623,7 +9274,7 @@ const getExchangePositionSnapshot = async (uid, symbol) => {
 
     try{
         const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
-        const positions = await binance[uid].futuresPositionRisk();
+        const positions = await readFuturesPositionRisk(uid, symbol);
         for(const item of (positions || [])){
             if(item.symbol !== exchangeSymbol){
                 continue;
@@ -6760,12 +9411,18 @@ const loadLiveGridTruthSyncRows = async (uid, options = {}) => {
     }
 
     const pidSet = new Set();
+    const safetyNetPids = getGridTargetedTruthSyncSafetyNetPids(uid, limit);
+    const runtimePids = [];
+    const snapshotPids = [];
+    const reservationPids = [];
     const pushPid = (value) => {
         const pid = Number(value || 0);
         if(pid > 0){
             pidSet.add(pid);
         }
     };
+    safetyNetPids.forEach(pushPid);
+    gridTargetedTruthSyncMetrics.safetyNetScanCandidates += safetyNetPids.length;
 
     const [runtimeRows] = await db.query(
         `SELECT id
@@ -6773,7 +9430,6 @@ const loadLiveGridTruthSyncRows = async (uid, options = {}) => {
           WHERE uid = ?
             AND (
                 enabled = 'Y'
-                OR regimeStatus <> 'WAITING_WEBHOOK'
                 OR COALESCE(longQty, 0) > 0
                 OR COALESCE(shortQty, 0) > 0
                 OR longLegStatus IN ('ENTRY_ARMED', 'OPEN')
@@ -6783,7 +9439,13 @@ const loadLiveGridTruthSyncRows = async (uid, options = {}) => {
           LIMIT ?`,
         [uid, limit]
     );
-    (runtimeRows || []).forEach((row) => pushPid(row?.id));
+    (runtimeRows || []).forEach((row) => {
+        const pid = Number(row?.id || 0);
+        if(pid > 0){
+            runtimePids.push(pid);
+        }
+        pushPid(pid);
+    });
 
     const [snapshotRows] = await db.query(
         `SELECT DISTINCT pid
@@ -6795,7 +9457,13 @@ const loadLiveGridTruthSyncRows = async (uid, options = {}) => {
           LIMIT ?`,
         [uid, limit]
     );
-    (snapshotRows || []).forEach((row) => pushPid(row?.pid));
+    (snapshotRows || []).forEach((row) => {
+        const pid = Number(row?.pid || 0);
+        if(pid > 0){
+            snapshotPids.push(pid);
+        }
+        pushPid(pid);
+    });
 
     const [reservationRows] = await db.query(
         `SELECT DISTINCT pid
@@ -6807,9 +9475,31 @@ const loadLiveGridTruthSyncRows = async (uid, options = {}) => {
           LIMIT ?`,
         [uid, limit]
     );
-    (reservationRows || []).forEach((row) => pushPid(row?.pid));
+    (reservationRows || []).forEach((row) => {
+        const pid = Number(row?.pid || 0);
+        if(pid > 0){
+            reservationPids.push(pid);
+        }
+        pushPid(pid);
+    });
 
-    const pids = Array.from(pidSet).slice(0, limit);
+    const allCandidatePids = Array.from(pidSet);
+    const pids = allCandidatePids.slice(0, limit);
+    logSeparatedGridAuditTrace('GRID_REST_TRUTH_SYNC_SCAN_SET', {
+        uid,
+        limit,
+        safetyNetPids,
+        runtimePids,
+        snapshotPids,
+        reservationPids,
+        scanSetFinalPids: pids,
+        droppedPids: allCandidatePids.slice(limit),
+        safetyNetCandidateCount: safetyNetPids.length,
+        runtimeCandidateCount: runtimePids.length,
+        snapshotCandidateCount: snapshotPids.length,
+        reservationCandidateCount: reservationPids.length,
+        finalCandidateCount: pids.length,
+    });
     if(pids.length === 0){
         return [];
     }
@@ -7327,7 +10017,13 @@ const buildGridRuntimeIssues = async (uid) => {
     const [rows] = await db.query(
         `SELECT * FROM live_grid_strategy_list
           WHERE uid = ?
-            AND (enabled = 'Y' OR regimeStatus <> 'WAITING_WEBHOOK')
+            AND (
+                enabled = 'Y'
+                OR COALESCE(longQty, 0) > 0
+                OR COALESCE(shortQty, 0) > 0
+                OR longLegStatus IN ('ENTRY_ARMED', 'OPEN')
+                OR shortLegStatus IN ('ENTRY_ARMED', 'OPEN')
+            )
           ORDER BY id ASC`,
         [uid]
     );
@@ -7475,6 +10171,7 @@ exports.getBinanceAccountRiskCurrent = async (uid, options = {}) => {
         persist = true,
         maxAgeMs = 0,
         force = false,
+        cacheOnly = false,
     } = options;
 
     const cache = ensureAccountRiskSnapshotCache(uid);
@@ -7489,6 +10186,68 @@ exports.getBinanceAccountRiskCurrent = async (uid, options = {}) => {
 
     const member = await dbcon.DBOneCall(`CALL SP_A_MEMBER_GET(?)`, [uid]);
     const hasCredentials = Boolean(member?.appKey && member?.appSecret);
+    const persistedSnapshot = await loadLatestPersistedAccountRiskSnapshot(uid).catch(() => null);
+    if(persistedSnapshot){
+        rememberAccountRiskSnapshot(uid, {
+            ...persistedSnapshot,
+            hasCredentials,
+            connected: Boolean(meta?.connected),
+            runtimeStatus: meta?.status || 'DISCONNECTED',
+        });
+    }
+    if(cacheOnly){
+        if(persistedSnapshot){
+            return {
+                ...persistedSnapshot,
+                hasCredentials,
+                connected: Boolean(meta?.connected),
+                runtimeStatus: meta?.status || 'DISCONNECTED',
+                cacheOnly: true,
+            };
+        }
+
+        return {
+            uid,
+            hasCredentials,
+            connected: Boolean(meta?.connected),
+            runtimeStatus: meta?.status || 'DISCONNECTED',
+            accountMode: null,
+            hedgeMode: false,
+            positionMode: 'UNKNOWN',
+            riskLevel: 'UNKNOWN',
+            positionCount: 0,
+            totalWalletBalance: 0,
+            totalUnrealizedProfit: 0,
+            totalMarginBalance: 0,
+            totalMaintMargin: 0,
+            totalInitialMargin: 0,
+            totalPositionInitialMargin: 0,
+            totalOpenOrderInitialMargin: 0,
+            totalCrossWalletBalance: 0,
+            totalCrossUnPnl: 0,
+            availableBalance: 0,
+            maxWithdrawAmount: 0,
+            accountEquity: 0,
+            accountMaintMargin: 0,
+            accountMarginRatio: 0,
+            accountInitialMarginRatio: 0,
+            accountOpenOrderMarginRatio: 0,
+            accountMarginBuffer: 0,
+            capturedAt: null,
+            cacheOnly: true,
+        };
+    }
+    if(!force && persistedSnapshot && maxAgeMs > 0){
+        const persistedAt = persistedSnapshot.capturedAt ? new Date(persistedSnapshot.capturedAt).getTime() : 0;
+        if(persistedAt > 0 && (now - persistedAt) < maxAgeMs){
+            return {
+                ...persistedSnapshot,
+                hasCredentials,
+                connected: Boolean(meta?.connected),
+                runtimeStatus: meta?.status || 'DISCONNECTED',
+            };
+        }
+    }
     const excluded = isExcludedRuntimeUid(uid);
     if(excluded){
         markBinanceRuntimeExcluded(uid);
@@ -7578,10 +10337,7 @@ exports.getBinanceAccountRiskCurrent = async (uid, options = {}) => {
         runtimeStatus: meta?.status || 'DISCONNECTED',
     };
 
-    if(cache){
-        cache.latest = snapshot;
-        cache.lastFetchedAt = snapshot.capturedAt;
-    }
+    rememberAccountRiskSnapshot(uid, snapshot);
 
     updateBinanceRuntimeMeta(uid, {
         lastAccountRiskAt: snapshot.capturedAt,
@@ -7596,9 +10352,7 @@ exports.getBinanceAccountRiskCurrent = async (uid, options = {}) => {
         const lastPersistedAt = cache?.lastPersistedAt ? new Date(cache.lastPersistedAt).getTime() : 0;
         if(force || !lastPersistedAt || (now - lastPersistedAt) >= 60000){
             await persistAccountRiskSnapshot(snapshot);
-            if(cache){
-                cache.lastPersistedAt = snapshot.capturedAt;
-            }
+            rememberAccountRiskSnapshot(uid, snapshot, { persisted: true });
             updateBinanceRuntimeMeta(uid, {
                 lastRiskSnapshotAt: snapshot.capturedAt,
             });
@@ -8026,8 +10780,16 @@ exports.truthSyncLiveGridRuntime = async (uid, options = {}) => {
         force = false,
         limit = 12,
     } = options;
+    const runStartedAt = Date.now();
 
-    if(!uid || !canRunGridTruthSync(uid, minIntervalMs, force)){
+    if(!uid){
+        logSeparatedGridAuditTrace('GRID_REST_TRUTH_SYNC_RUN_SKIP', {
+            uid,
+            reason: 'UID_MISSING',
+            minIntervalMs,
+            force,
+            limit,
+        });
         return {
             checkedAt: new Date().toISOString(),
             uid,
@@ -8036,6 +10798,51 @@ exports.truthSyncLiveGridRuntime = async (uid, options = {}) => {
             skipped: true,
         };
     }
+
+    const lastRunAt = Number(gridTruthSyncAt.get(uid) || 0);
+    if(!force && lastRunAt > 0 && (runStartedAt - lastRunAt) < minIntervalMs){
+        logSeparatedGridAuditTrace('GRID_REST_TRUTH_SYNC_RUN_SKIP', {
+            uid,
+            reason: 'MIN_INTERVAL_NOT_ELAPSED',
+            minIntervalMs,
+            force,
+            limit,
+            lastRunAt,
+            waitMsRemaining: Math.max(0, minIntervalMs - (runStartedAt - lastRunAt)),
+        });
+        return {
+            checkedAt: new Date().toISOString(),
+            uid,
+            rows: [],
+            repaired: [],
+            skipped: true,
+        };
+    }
+
+    if(!canRunGridTruthSync(uid, minIntervalMs, force)){
+        logSeparatedGridAuditTrace('GRID_REST_TRUTH_SYNC_RUN_SKIP', {
+            uid,
+            reason: 'GATE_REJECTED',
+            minIntervalMs,
+            force,
+            limit,
+        });
+        return {
+            checkedAt: new Date().toISOString(),
+            uid,
+            rows: [],
+            repaired: [],
+            skipped: true,
+        };
+    }
+
+    logSeparatedGridAuditTrace('GRID_REST_TRUTH_SYNC_RUN_START', {
+        uid,
+        minIntervalMs,
+        force,
+        limit,
+        startedAt: new Date(runStartedAt).toISOString(),
+    });
 
     const rows = await loadLiveGridTruthSyncRows(uid, { limit });
     const repaired = [];
@@ -8051,7 +10858,7 @@ exports.truthSyncLiveGridRuntime = async (uid, options = {}) => {
         }
     }
 
-    return {
+    const result = {
         checkedAt: new Date().toISOString(),
         uid,
         rows: rows.map((row) => ({
@@ -8062,6 +10869,14 @@ exports.truthSyncLiveGridRuntime = async (uid, options = {}) => {
         repaired,
         skipped: false,
     };
+    logSeparatedGridAuditTrace('GRID_REST_TRUTH_SYNC_LATENCY', {
+        uid,
+        rowCount: rows.length,
+        repairedCount: repaired.length,
+        elapsedMs: Date.now() - runStartedAt,
+        checkedAt: result.checkedAt,
+    });
+    return result;
 }
 
 exports.getBinanceRuntimeReconciliation = async (uid) => {
@@ -8092,6 +10907,8 @@ exports.cancelGridOrders = async ({
     leg = null,
     includeEntries = true,
     includeExits = true,
+    targetOrderId = null,
+    targetClientOrderId = null,
 } = {}) => {
     if(!uid || !symbol || !pid){
         return 0;
@@ -8102,6 +10919,22 @@ exports.cancelGridOrders = async ({
         return 0;
     }
 
+    const normalizedTargetOrderId = String(targetOrderId || '').trim();
+    const normalizedTargetClientOrderId = String(targetClientOrderId || '').trim();
+    const hasBoundTarget = Boolean(normalizedTargetOrderId || normalizedTargetClientOrderId);
+    const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
+    const matchesBoundTarget = (order = {}) => {
+        if(!hasBoundTarget){
+            return true;
+        }
+        const orderId = String(order.orderId || '').trim();
+        const clientOrderId = String(order.clientOrderId || '').trim();
+        return Boolean(
+            (normalizedTargetClientOrderId && clientOrderId === normalizedTargetClientOrderId)
+            || (normalizedTargetOrderId && orderId === normalizedTargetOrderId)
+        );
+    };
+
     let canceledCount = 0;
     const canceledClientOrderIds = [];
     for(const order of openOrders){
@@ -8110,6 +10943,9 @@ exports.cancelGridOrders = async ({
         const isExit = prefix === 'GTP' || prefix === 'GSTOP';
 
         if((isEntry && !includeEntries) || (isExit && !includeExits)){
+            continue;
+        }
+        if(!matchesBoundTarget(order)){
             continue;
         }
 
@@ -8125,7 +10961,7 @@ exports.cancelGridOrders = async ({
           });
           if(order.type === 'algo'){
               await privateFuturesAlgoRequest(uid, '/fapi/v1/algoOrder', {
-                  symbol,
+                  symbol: exchangeSymbol,
                   clientAlgoId: order.clientOrderId,
                 }, 'DELETE');
             }else{
@@ -8874,7 +11710,9 @@ const findExchangeOrder = async (uid, symbol, { orderId = null, clientOrderId = 
         return null;
     }
 
-    const params = {};
+    const params = {
+        symbol: normalizeBinanceFuturesSymbol(symbol),
+    };
 
     if(orderId){
         params.orderId = orderId;
@@ -8887,7 +11725,7 @@ const findExchangeOrder = async (uid, symbol, { orderId = null, clientOrderId = 
     }
 
     try{
-        return await binance[uid].futuresOrderStatus(symbol, params);
+        return await privateFuturesSignedRequest(uid, '/fapi/v1/order', params, 'GET');
     }catch(error){
         const info = extractBinanceError(error);
         if(info.code === -2013 || info.code === -2011){
@@ -9170,7 +12008,7 @@ const initAPI = async (uid, APP_KEY, APP_SECRET, options = {}) => {
         let { listenKey } = await binance[uid].futuresGetDataStream();
         logOrderRuntimeTrace('USER_STREAM_LISTEN_KEY', {
             uid,
-            listenKey,
+            listenKeyMasked: maskApiKey(listenKey),
             appKeyMasked: maskApiKey(APP_KEY),
         });
         
@@ -9178,13 +12016,13 @@ const initAPI = async (uid, APP_KEY, APP_SECRET, options = {}) => {
         ws.on('open', () => {
             logOrderRuntimeTrace('USER_STREAM_CONNECT', {
                 uid,
-                listenKey,
+                listenKeyMasked: maskApiKey(listenKey),
             });
         });
         ws.on('error', (error) => {
             logOrderRuntimeTrace('USER_STREAM_ERROR', {
                 uid,
-                listenKey,
+                listenKeyMasked: maskApiKey(listenKey),
                 message: error?.message || String(error),
                 stack: error?.stack || null,
             });
@@ -9200,7 +12038,7 @@ const initAPI = async (uid, APP_KEY, APP_SECRET, options = {}) => {
         ws.on('close', () => {
             logOrderRuntimeTrace('USER_STREAM_CLOSE', {
                 uid,
-                listenKey,
+                listenKeyMasked: maskApiKey(listenKey),
             });
             console.log(`userStream CLOSE uid:${uid}`);
             exports.msgAdd('userStream', 'CLOSE', '?ъ슜???곗씠???ㅽ듃由??곌껐??醫낅즺?섏뿀?듬땲??', uid, null, null, null, null);
@@ -9213,13 +12051,53 @@ const initAPI = async (uid, APP_KEY, APP_SECRET, options = {}) => {
             disableBinanceClient(uid, 30000);
         });
         ws.on('message', (msg) => {
+            const socketReceivedAt = Date.now();
             updateBinanceRuntimeMeta(uid, {
                 connected: true,
                 status: 'CONNECTED',
                 lastMessageAt: new Date().toISOString(),
             });
             const data = JSON.parse(msg);
+            Object.defineProperty(data, '__privateSocketReceivedAt', {
+                value: socketReceivedAt,
+                enumerable: false,
+                configurable: true,
+            });
             if (data.e === 'ORDER_TRADE_UPDATE') {
+                const clientOrderId = data?.o?.c || null;
+                const gridRoute = isGridClientOrderId(clientOrderId);
+                logSeparatedGridAuditTrace('GRID_PRIVATE_SOCKET_RAW_ORDER_TRADE_UPDATE_INGRESS', {
+                    uid,
+                    eventType: data.e,
+                    symbol: data?.o?.s || null,
+                    side: data?.o?.S || null,
+                    positionSide: data?.o?.ps || null,
+                    orderId: data?.o?.i || null,
+                    clientOrderId,
+                    eventTime: data?.E || data?.T || null,
+                    tradeTime: data?.o?.T || null,
+                    receivedAt: socketReceivedAt,
+                    socketIngressLatencyMs: buildAuditLatencyMs(data?.E || data?.T || data?.o?.T, socketReceivedAt),
+                    routeCandidate: gridRoute ? 'grid' : 'non-grid',
+                    beforeDedupe: true,
+                });
+                logSeparatedGridAuditTrace('GRID_PRIVATE_SOCKET_ORDER_TRADE_UPDATE_PARSED', {
+                    uid,
+                    eventType: data.e,
+                    symbol: data?.o?.s || null,
+                    side: data?.o?.S || null,
+                    positionSide: data?.o?.ps || null,
+                    orderId: data?.o?.i || null,
+                    clientOrderId,
+                    executionType: data?.o?.x || null,
+                    orderStatus: data?.o?.X || null,
+                    orderType: data?.o?.o || null,
+                    origType: data?.o?.ot || null,
+                    eventTime: data?.E || data?.T || null,
+                    tradeTime: data?.o?.T || null,
+                    routeCandidate: gridRoute ? 'grid' : 'non-grid',
+                    socketIngressLatencyMs: buildAuditLatencyMs(data?.E || data?.T || data?.o?.T, socketReceivedAt),
+                });
                 logOrderRuntimeTrace('USER_STREAM_INGRESS', {
                     uid,
                     eventType: data.e,
@@ -9232,6 +12110,15 @@ const initAPI = async (uid, APP_KEY, APP_SECRET, options = {}) => {
                     tradeTime: data?.o?.T || null,
                 });
                 if(shouldSkipDuplicateOrderRuntimeEvent(uid, data)){
+                    logSeparatedGridAuditTrace('GRID_PRIVATE_SOCKET_ORDER_TRADE_UPDATE_DISPATCH_ROUTE', {
+                        uid,
+                        eventType: data.e,
+                        symbol: data?.o?.s || null,
+                        orderId: data?.o?.i || null,
+                        clientOrderId,
+                        route: 'dedupe-skip',
+                        socketHandlerLatencyMs: Date.now() - socketReceivedAt,
+                    });
                     return;
                 }
                 logOrderTradeRuntimeEvent(uid, data);
@@ -9288,7 +12175,7 @@ const initAPI = async (uid, APP_KEY, APP_SECRET, options = {}) => {
                     await binance[uid].futuresKeepDataStream({listenKey});
                     logOrderRuntimeTrace('USER_STREAM_KEEPALIVE_SUCCESS', {
                         uid,
-                        listenKey,
+                        listenKeyMasked: maskApiKey(listenKey),
                     });
                     updateBinanceRuntimeMeta(uid, {
                         connected: true,
@@ -9299,7 +12186,7 @@ const initAPI = async (uid, APP_KEY, APP_SECRET, options = {}) => {
             }catch(error){
                 logOrderRuntimeTrace('USER_STREAM_KEEPALIVE_FAILURE', {
                     uid,
-                    listenKey,
+                    listenKeyMasked: maskApiKey(listenKey),
                     message: error?.message || String(error),
                     stack: error?.stack || null,
                 });
@@ -9345,7 +12232,7 @@ const initAPI = async (uid, APP_KEY, APP_SECRET, options = {}) => {
             handleBinanceClientError('positionSideDual', uid, error);
         });
 
-        console.log(`END initAPI ID:${uid} ::: ${listenKey}`);
+        console.log(`END initAPI ID:${uid} ::: ${maskApiKey(listenKey)}`);
         delete binanceInitRetryAt[uid];
         return true;
     }catch(e){
@@ -9391,17 +12278,64 @@ const getTick = async () => {
     binance.futuresBookTickerStream(false, (re)=>{
         if(symbolList.includes(re.symbol)){
             const slot = ensurePriceSlot(re.symbol);
+            const bestBid = toAuditNumber(re.bestBid || re.bidPrice, 0);
+            const bestAsk = toAuditNumber(re.bestAsk || re.askPrice, 0);
+            const midPrice = (
+                bestBid > 0
+                && bestAsk > 0
+            )
+                ? (bestBid + bestAsk) / 2
+                : toAuditNumber(re.lastPrice || re.price, 0);
             dt.price[re.symbol] = {
                 ...slot,
                 ...re,
+                bestBid,
+                bestAsk,
+                lastPrice: slot.lastPrice || midPrice,
                 quoteTime: re.eventTime || Date.now(),
             };
+            logGridPublicPriceIngress({
+                symbol: re.symbol,
+                price: midPrice,
+                bestBid,
+                bestAsk,
+                lastPrice: slot.lastPrice || midPrice,
+                markPrice: slot.markPrice || null,
+                quoteTime: re.eventTime || Date.now(),
+                markTime: slot.markTime || null,
+                eventTime: re.eventTime || null,
+                source: 'bookTicker',
+            });
+            auditGridPublicPriceCrossingHints({
+                symbol: re.symbol,
+                price: midPrice,
+                bestBid,
+                bestAsk,
+                lastPrice: slot.lastPrice || midPrice,
+                markPrice: slot.markPrice || null,
+                quoteTime: re.eventTime || Date.now(),
+                markTime: slot.markTime || null,
+                eventTime: re.eventTime || null,
+                source: 'bookTicker',
+            }).catch((error) => {
+                logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_PRICE_CROSS_HINT_SKIP', {
+                    symbol: re.symbol,
+                    normalizedSymbol: normalizeBinanceFuturesSymbol(re.symbol),
+                    source: 'bookTicker',
+                    skipReason: 'AUDIT_ERROR',
+                    message: error?.message || String(error),
+                }, {
+                    throttleKey: `GRID_PUBLIC_PRICE_HINT_AUDIT_ERROR:bookTicker:${normalizeBinanceFuturesSymbol(re.symbol)}`,
+                    throttleMs: 60000,
+                });
+            });
         }
     });
 
     symbolList.forEach((symbol)=>{
         binance.futuresAggTradeStream(symbol, (re)=>{
             const slot = ensurePriceSlot(re.symbol);
+            const tradePrice = toAuditNumber(re.price, 0);
             dt.price[re.symbol] = {
                 ...slot,
                 lastPrice: re.price,
@@ -9409,6 +12343,41 @@ const getTick = async () => {
                 lastTradeTime: re.tradeTime || re.eventTime || Date.now(),
                 quoteTime: slot.quoteTime || 0,
             };
+            logGridPublicPriceIngress({
+                symbol: re.symbol,
+                price: tradePrice,
+                bestBid: slot.bestBid || null,
+                bestAsk: slot.bestAsk || null,
+                lastPrice: tradePrice,
+                markPrice: slot.markPrice || null,
+                quoteTime: slot.quoteTime || null,
+                markTime: slot.markTime || null,
+                eventTime: re.tradeTime || re.eventTime || null,
+                source: 'aggTrade',
+            });
+            auditGridPublicPriceCrossingHints({
+                symbol: re.symbol,
+                price: tradePrice,
+                bestBid: slot.bestBid || null,
+                bestAsk: slot.bestAsk || null,
+                lastPrice: tradePrice,
+                markPrice: slot.markPrice || null,
+                quoteTime: slot.quoteTime || null,
+                markTime: slot.markTime || null,
+                eventTime: re.tradeTime || re.eventTime || null,
+                source: 'aggTrade',
+            }).catch((error) => {
+                logSeparatedGridAuditTrace('GRID_PUBLIC_PRICE_HINT_PRICE_CROSS_HINT_SKIP', {
+                    symbol: re.symbol,
+                    normalizedSymbol: normalizeBinanceFuturesSymbol(re.symbol),
+                    source: 'aggTrade',
+                    skipReason: 'AUDIT_ERROR',
+                    message: error?.message || String(error),
+                }, {
+                    throttleKey: `GRID_PUBLIC_PRICE_HINT_AUDIT_ERROR:aggTrade:${normalizeBinanceFuturesSymbol(re.symbol)}`,
+                    throttleMs: 60000,
+                });
+            });
         });
     });
 
@@ -9633,6 +12602,7 @@ const reOrderGet = async (uid, data) => {
     
 
     const reData = data.o;
+    const privateSocketReceivedAt = toAuditTimestamp(data?.__privateSocketReceivedAt);
     const status = reData.x;        // ?ㅽ뻾 ???(TRADE = 泥닿껐, NEW = ?좉퇋 ?깅줉 ??
     const endStatus = reData.X;        // FILLED
     const oid = reData.i; 
@@ -9660,6 +12630,18 @@ const reOrderGet = async (uid, data) => {
     const charge = reData.n;        //?섏닔猷?
     const pnl = reData.rp;        //?ㅽ쁽 ?먯씡 (Realized PnL)
     const updateTime = reData.T;        //泥닿껐 ?쒓컙
+    if(privateSocketReceivedAt){
+        Object.defineProperty(reData, '__privateSocketReceivedAt', {
+            value: privateSocketReceivedAt,
+            enumerable: false,
+            configurable: true,
+        });
+        Object.defineProperty(reData, '__privateSocketEventTime', {
+            value: data?.E || data?.T || reData.T || null,
+            enumerable: false,
+            configurable: true,
+        });
+    }
     if(rawClientOrderId && oid){
         await pidPositionLedger.bindReservationActualOrderId(rawClientOrderId, oid);
     }
@@ -9693,12 +12675,38 @@ const reOrderGet = async (uid, data) => {
     }
 
     if(isGridClientOrderId(rawClientOrderId)){
+        logSeparatedGridAuditTrace('GRID_PRIVATE_SOCKET_ORDER_TRADE_UPDATE_DISPATCH_ROUTE', {
+            ...runtimeTracePayload,
+            route: 'grid',
+            socketHandlerLatencyMs: privateSocketReceivedAt ? Date.now() - privateSocketReceivedAt : null,
+        });
         try{
             const gridHandled = await getGridEngine().handleLiveOrderTradeUpdate(uid, data);
             runtimeTraceOutcome = gridHandled ? 'GRID_HANDLER_HANDLED' : 'GRID_HANDLER_IGNORED';
+            logSeparatedGridAuditTrace('GRID_PRIVATE_SOCKET_GRID_HANDLER_RESULT', {
+                ...runtimeTracePayload,
+                route: 'grid',
+                handled: Boolean(gridHandled),
+                socketHandlerLatencyMs: privateSocketReceivedAt ? Date.now() - privateSocketReceivedAt : null,
+            });
+            logSeparatedGridAuditTrace('GRID_PRIVATE_SOCKET_LATENCY', {
+                ...runtimeTracePayload,
+                route: 'grid',
+                handled: Boolean(gridHandled),
+                socketIngressLatencyMs: buildAuditLatencyMs(data?.E || data?.T || reData.T, privateSocketReceivedAt),
+                socketHandlerLatencyMs: privateSocketReceivedAt ? Date.now() - privateSocketReceivedAt : null,
+            });
             return gridHandled;
         }catch(gridError){
             runtimeTraceOutcome = 'GRID_HANDLER_ERROR';
+            logSeparatedGridAuditTrace('GRID_PRIVATE_SOCKET_GRID_HANDLER_RESULT', {
+                ...runtimeTracePayload,
+                route: 'grid',
+                handled: false,
+                outcome: 'ERROR',
+                message: gridError?.message || String(gridError),
+                socketHandlerLatencyMs: privateSocketReceivedAt ? Date.now() - privateSocketReceivedAt : null,
+            });
             logOrderRuntimeTrace('REORDER_GET_ERROR', {
                 ...runtimeTracePayload,
                 message: gridError?.message || String(gridError),
@@ -11717,7 +14725,7 @@ exports.sendEnter = async (symbol = null, side = null, lv = null, userMargin = n
 
 exports.ensurePublicMarketPrice = async (symbol, options = {}) => {
     try{
-        let current = dt.getPrice(symbol);
+        let current = getMergedGridPriceSlot(symbol);
         const quoteFreshness = gridPriceSource.requireFreshGridQuote(current);
         const markFreshness = gridPriceSource.getMarkFreshness(current);
         const includeMark = options.includeMark === true;
@@ -11731,9 +14739,9 @@ exports.ensurePublicMarketPrice = async (symbol, options = {}) => {
         if(includeMark && !gridPriceSource.getMarkFreshness(current).usable){
             current = await hydratePriceSlotFromMarkPrice(symbol);
         }
-        return current;
+        return getMergedGridPriceSlot(symbol);
     }catch(error){
-        return dt.getPrice(symbol);
+        return getMergedGridPriceSlot(symbol);
     }
 }
 
@@ -11875,7 +14883,7 @@ const getApiValidationMessageKoSafe = (info = {}, action = null) => {
     return '\u0042\u0069\u006e\u0061\u006e\u0063\u0065 \u0041\u0050\u0049 \uc5f0\uacb0 \uac80\uc99d\uc5d0 \uc2e4\ud328\ud588\uc2b5\ub2c8\ub2e4. \u0041\u0050\u0049 \uad8c\ud55c, \u0049\u0050 \uc81c\ud55c, \u0053\u0065\u0063\u0072\u0065\u0074 \u004b\u0065\u0079\ub97c \ud655\uc778\ud574 \uc8fc\uc138\uc694.';
 };
 
-const validateProvidedBinanceKeysReadOnly = async (appKey, appSecret) => {
+const validateProvidedBinanceKeysReadOnly = async (appKey, appSecret, options = {}) => {
     if(!appKey || !appSecret){
         const messageKo = getApiValidationMessageKoSafe({ code: 'API_KEY_MISSING' });
         return {
@@ -11888,21 +14896,10 @@ const validateProvidedBinanceKeysReadOnly = async (appKey, appSecret) => {
             secretReturned: false,
         };
     }
-    if(!appKey || !appSecret){
-        return {
-            ok: false,
-            code: 'API_KEY_MISSING',
-            status: 'API_KEY_MISSING',
-            action: 'register_credentials',
-            messageKo: 'API 키를 먼저 등록해 주세요.',
-            message: 'API 키를 먼저 등록해 주세요.',
-            secretReturned: false,
-        };
-    }
-
+    const guardUid = options.uid || 'validation';
     try{
         binanceReadGuard.assertPrivateRequestAllowed({
-            uid: 'validation',
+            uid: guardUid,
             endpoint: '/fapi/v3/account',
             method: 'GET',
         });
@@ -11936,11 +14933,48 @@ const validateProvidedBinanceKeysReadOnly = async (appKey, appSecret) => {
         });
 
         binanceReadGuard.recordPrivateRequestSuccess({
-            uid: 'validation',
+            uid: guardUid,
             endpoint: '/fapi/v3/account',
             method: 'GET',
         });
         const successMessageKo = getApiValidationMessageKoSafe({ code: 'OK', message: 'connected' });
+        let accountSnapshot = null;
+        if(options.uid && options.persistAccountSnapshot === true && response?.data){
+            const snapshot = {
+                ...buildAccountRiskSnapshot(options.uid, response.data, { hedgeMode: false }),
+                hasCredentials: true,
+                connected: true,
+                runtimeStatus: REST_ONLY_RUNTIME_STATUS,
+            };
+            await persistAccountRiskSnapshot(snapshot);
+            rememberAccountRiskSnapshot(options.uid, snapshot, { persisted: true });
+            updateBinanceRuntimeMeta(options.uid, {
+                lastAccountRiskAt: snapshot.capturedAt,
+                lastRiskSnapshotAt: snapshot.capturedAt,
+                lastRiskLevel: snapshot.riskLevel,
+                lastHedgeMode: snapshot.hedgeMode,
+                lastAccountMarginRatio: snapshot.accountMarginRatio,
+                lastAccountEquity: snapshot.accountEquity,
+                lastAccountMaintMargin: snapshot.accountMaintMargin,
+            });
+            accountSnapshot = {
+                uid: snapshot.uid,
+                hasCredentials: true,
+                connected: snapshot.connected,
+                runtimeStatus: snapshot.runtimeStatus,
+                accountMode: snapshot.accountMode,
+                hedgeMode: snapshot.hedgeMode,
+                positionMode: snapshot.positionMode,
+                riskLevel: snapshot.riskLevel,
+                positionCount: snapshot.positionCount,
+                availableBalance: snapshot.availableBalance,
+                accountEquity: snapshot.accountEquity,
+                accountMaintMargin: snapshot.accountMaintMargin,
+                accountMarginRatio: snapshot.accountMarginRatio,
+                accountMarginBuffer: snapshot.accountMarginBuffer,
+                capturedAt: snapshot.capturedAt,
+            };
+        }
         return {
             ok: true,
             code: 'OK',
@@ -11948,21 +14982,12 @@ const validateProvidedBinanceKeysReadOnly = async (appKey, appSecret) => {
             messageKo: successMessageKo,
             message: successMessageKo,
             futuresAccountRead: Boolean(response?.data),
-            secretReturned: false,
-        };
-        const messageKo = 'Binance API 연결 검증에 성공했습니다.';
-        return {
-            ok: true,
-            code: 'OK',
-            status: 'CONNECTED',
-            messageKo: 'Binance API 연결 검증에 성공했습니다.',
-            message: 'Binance API 연결 검증에 성공했습니다.',
-            futuresAccountRead: Boolean(response?.data),
+            accountSnapshot,
             secretReturned: false,
         };
     }catch(error){
         binanceReadGuard.recordPrivateRequestFailure({
-            uid: 'validation',
+            uid: guardUid,
             endpoint: '/fapi/v3/account',
             method: 'GET',
             error,
@@ -11990,47 +15015,60 @@ const validateProvidedBinanceKeysReadOnly = async (appKey, appSecret) => {
     }
 };
 
-exports.validateMemberApiKeys = async (appKey, appSecret) => {
-    return validateProvidedBinanceKeysReadOnly(appKey, appSecret);
-    if(!appKey || !appSecret){
-        return {
-            ok: false,
-            code: 'EMPTY_KEYS',
-            message: 'API Key? Secret Key瑜?紐⑤몢 ?낅젰??二쇱꽭??',
-        };
+const readFuturesPositionRisk = async (uid, symbol = null) => {
+    const mockRead = await callQaReplayMockFuturesRead(uid, 'futuresPositionRisk');
+    if(mockRead.handled){
+        const exchangeSymbol = symbol ? normalizeBinanceFuturesSymbol(symbol) : null;
+        const rows = Array.isArray(mockRead.data) ? mockRead.data : [];
+        return exchangeSymbol
+            ? rows.filter((row) => String(row?.symbol || '').trim().toUpperCase() === exchangeSymbol)
+            : rows;
     }
+    return await privateFuturesSignedRequest(
+        uid,
+        '/fapi/v2/positionRisk',
+        symbol ? { symbol: normalizeBinanceFuturesSymbol(symbol) } : {},
+        'GET'
+    );
+}
 
-    try{
-        const revealedSecret = credentialSecrets.revealSecret(appSecret);
-        const client = new Binance().options({
-            APIKEY: appKey,
-            APISECRET: revealedSecret,
-            test: TEST_MODE,
-            reconnect: true,
-            verbose: false,
-        });
-
-        await client.futuresBalance();
-
-        return {
-            ok: true,
-            code: 'OK',
-            message: '諛붿씠?몄뒪 ?좊Ъ API 寃利앹씠 ?꾨즺?섏뿀?듬땲??',
-        };
-    }catch(error){
-        const info = extractBinanceError(error);
-        const action = classifyBinanceError(info.code);
-        return {
-            ok: false,
-            code: info.code,
-            action,
-            message: formatBinanceErrorGuideClean(
-                info.msg || '諛붿씠?몄뒪 API 寃利앹뿉 ?ㅽ뙣?덉뒿?덈떎.',
-                info.code,
-                action
-            ),
-        };
+const readFuturesOpenOrders = async (uid, symbol) => {
+    const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
+    const mockRead = await callQaReplayMockFuturesRead(uid, 'futuresOpenOrders', [exchangeSymbol]);
+    if(mockRead.handled){
+        return mockRead.data;
     }
+    return await privateFuturesSignedRequest(uid, '/fapi/v1/openOrders', {
+        symbol: exchangeSymbol,
+    }, 'GET');
+}
+
+const readFuturesAllOrders = async (uid, symbol, options = {}) => {
+    const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
+    const mockRead = await callQaReplayMockFuturesRead(uid, 'futuresAllOrders', [exchangeSymbol, options]);
+    if(mockRead.handled){
+        return mockRead.data;
+    }
+    return await privateFuturesSignedRequest(uid, '/fapi/v1/allOrders', {
+        symbol: exchangeSymbol,
+        ...options,
+    }, 'GET');
+}
+
+const readFuturesUserTrades = async (uid, symbol, options = {}) => {
+    const exchangeSymbol = normalizeBinanceFuturesSymbol(symbol);
+    const mockRead = await callQaReplayMockFuturesRead(uid, 'futuresUserTrades', [exchangeSymbol, options]);
+    if(mockRead.handled){
+        return mockRead.data;
+    }
+    return await privateFuturesSignedRequest(uid, '/fapi/v1/userTrades', {
+        symbol: exchangeSymbol,
+        ...options,
+    }, 'GET');
+}
+
+exports.validateMemberApiKeys = async (appKey, appSecret, options = {}) => {
+    return validateProvidedBinanceKeysReadOnly(appKey, appSecret, options);
 }
 
 exports.getBinanceReadGuardSnapshot = () => binanceReadGuard.getStateSnapshot();

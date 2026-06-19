@@ -110,7 +110,13 @@ const getSignalEntryPendingStaleInfo = (play, options = {}) => {
   };
 };
 
+const normalizeSignalTimeToUtcString = (value) => {
+  const parsed = parseDatabaseUtcDateTime(value);
+  return parsed ? parsed.format("YYYY-MM-DD HH:mm:ss") : null;
+};
+
 module.exports = {
   parseDatabaseUtcDateTime,
+  normalizeSignalTimeToUtcString,
   getSignalEntryPendingStaleInfo,
 };

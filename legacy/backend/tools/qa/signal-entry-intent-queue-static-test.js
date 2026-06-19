@@ -134,11 +134,19 @@ const loadRowsForUid = async (uid) => {
     ownershipReadiness: { enabled: true, status: "OK", legacyDisabled: false },
     mock: true,
     now: "2026-05-06 00:00:05",
-    mockSignalEntryResult: { orderId: "MOCK_SIGNAL_ORDER" },
+    mockSignalEntryResult: {
+      orderId: "MOCK_SIGNAL_ORDER",
+      convergence: {
+        ok: true,
+        state: orderIntentWorker.SIGNAL_ENTRY_QUEUE_STATE.ENTRY_LIFECYCLE_COMPLETE,
+        reason: orderIntentWorker.SIGNAL_ENTRY_QUEUE_STATE.ENTRY_LIFECYCLE_COMPLETE,
+        protectionChildState: "PROTECTION_ACTIVE",
+      },
+    },
   });
   assert.strictEqual(mockSuccess.status, orderIntentQueue.STATUS.DONE);
   rows = await loadRowsForUid(mockUid);
-  assert.strictEqual(rows[0].result.projectionState, orderIntentWorker.SIGNAL_ENTRY_QUEUE_STATE.SUBMITTED);
+  assert.strictEqual(rows[0].result.projectionState, orderIntentWorker.SIGNAL_ENTRY_QUEUE_STATE.ENTRY_LIFECYCLE_COMPLETE);
 
   const redisUid = BASE_UID + 4;
   await enqueue(buildPayload({ uid: redisUid, pid: 9405, sourceRuntimeTid: "redis-block" }));

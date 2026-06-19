@@ -38,6 +38,17 @@ check("lastWebhookPayloadJson side triggers override legacy center trigger", () 
   assert.strictEqual(gridEngine.getGridLegTriggerPrice(row, "SHORT"), 106.5);
 });
 
+check("strict 35/65 grid row does not silently fall back to center trigger", () => {
+  const row = {
+    triggerPrice: 105,
+    lastWebhookPayloadJson: JSON.stringify({
+      triggerProfile: "35_65",
+    }),
+  };
+  assert.strictEqual(gridEngine.getGridLegTriggerPrice(row, "LONG"), 0);
+  assert.strictEqual(gridEngine.getGridLegTriggerPrice(row, "SHORT"), 0);
+});
+
 check("hydrated row side triggers override stored payload", () => {
   const row = {
     triggerPrice: 105,
@@ -50,6 +61,32 @@ check("hydrated row side triggers override stored payload", () => {
   };
   assert.strictEqual(gridEngine.getGridLegTriggerPrice(row, "LONG"), 104);
   assert.strictEqual(gridEngine.getGridLegTriggerPrice(row, "SHORT"), 106);
+});
+
+check("side trigger metadata carries box context across worker projection", () => {
+  const row = {
+    supportPrice: null,
+    resistancePrice: null,
+    triggerPrice: null,
+    lastWebhookPayloadJson: JSON.stringify({
+      supportPrice: 6.84,
+      resistancePrice: 7.02,
+      triggerPrice: 6.93,
+      longTriggerPrice: 6.903,
+      shortTriggerPrice: 6.957,
+      triggerProfile: "35_65",
+      gridRegimeKey: "GRIDREGIME|v1|NY_BOX_GRID_35_65|AVAXUSDT.P|15MIN|6.84|7.02|6.93|2026-06-17T00:00:00",
+    }),
+  };
+  const metadata = gridEngine.__qa.getGridSideTriggerMetadata(row);
+  assert.strictEqual(metadata.supportPrice, 6.84);
+  assert.strictEqual(metadata.resistancePrice, 7.02);
+  assert.strictEqual(metadata.payloadTriggerPrice, 6.93);
+  assert.strictEqual(metadata.longTriggerPrice, 6.903);
+  assert.strictEqual(metadata.shortTriggerPrice, 6.957);
+  assert.strictEqual(metadata.triggerProfile, "35_65");
+  assert.strictEqual(gridEngine.__qa.computeLegStopPrice(row, "LONG"), 6.84);
+  assert.strictEqual(gridEngine.__qa.computeLegStopPrice(row, "SHORT"), 7.02);
 });
 
 check("NY_BOX_GRID_* ARM requires side triggers", () => {
@@ -231,6 +268,8 @@ check("Binance adapter converts perp suffix only at API boundary", () => {
   assert.ok(coinSource.includes("const normalizeBinanceFuturesSymbol"));
   assert.ok(coinSource.includes("futuresOrder(type, side, exchangeSymbol"));
   assert.ok(coinSource.includes("futuresCancel(exchangeSymbol"));
+  assert.ok(coinSource.includes("openAlgoOrders', { symbol: exchangeSymbol }"));
+  assert.ok(coinSource.includes("symbol: exchangeSymbol"));
   assert.ok(coinSource.includes("exchangeSymbol: params?.symbol ? requestParams.symbol : null"));
 });
 

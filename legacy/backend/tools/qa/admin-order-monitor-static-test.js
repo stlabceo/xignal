@@ -1,4 +1,6 @@
 const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
 const monitor = require("../../admin-order-monitor");
 
 const assertEqual = (actual, expected, message) => {
@@ -162,6 +164,17 @@ const run = () => {
   });
   assertEqual(activeEntry.lifecycleStatus, "ACTIVE_ENTRY_PENDING", "active entry pending lifecycle");
   assertEqual(activeEntry.currentRisk, true, "active entry must appear as current risk");
+
+  const adminMonitorSource = fs.readFileSync(path.resolve(__dirname, "../../admin-order-monitor.js"), "utf8");
+  const seonSource = fs.readFileSync(path.resolve(__dirname, "../../seon.js"), "utf8");
+  assert.ok(
+    adminMonitorSource.includes("CURRENT_ONLY_BOOT_SAFETY"),
+    "admin monitor must support current-only boot safety without per-symbol historical reads"
+  );
+  assert.ok(
+    seonSource.includes("buildAdminOrderMonitor(uid, { currentOnly: true })"),
+    "boot safety gate must use current-only admin monitor mode"
+  );
 
   const keyA = monitor.buildIssueKey({
     uid: 147,

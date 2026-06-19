@@ -252,13 +252,24 @@ const makeHarness = ({
     assert.strictEqual(liveResult.closeResults.length, 1);
   });
 
-  check("cancel call is exact-scoped, not broad", () => {
+  check("entry cancel call is exact-scoped and does not cancel protection before close", () => {
     assert.deepStrictEqual(harness.state.cancels[0], {
       uid: 156,
       symbol: "PUMPUSDT",
       pid: 204,
       leg: null,
       includeEntries: true,
+      includeExits: false,
+    });
+  });
+
+  check("protection cleanup is exact-scoped after flat close", () => {
+    assert.deepStrictEqual(harness.state.cancels[1], {
+      uid: 156,
+      symbol: "PUMPUSDT",
+      pid: 204,
+      leg: null,
+      includeEntries: false,
       includeExits: true,
     });
   });

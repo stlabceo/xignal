@@ -353,7 +353,7 @@ const executeGridExitForRoute = async ({
     pid: row.id,
     leg: null,
     includeEntries: true,
-    includeExits: true,
+    includeExits: false,
   });
 
   let synced = null;
@@ -398,7 +398,16 @@ const executeGridExitForRoute = async ({
     LONG: await readExchangeLegQty({ coin, uid: row.uid, symbol: row.symbol, leg: "LONG" }),
     SHORT: await readExchangeLegQty({ coin, uid: row.uid, symbol: row.symbol, leg: "SHORT" }),
   };
+  let protectionCleanupCount = 0;
   if (toNumber(postCloseExchange.LONG) <= 0 && toNumber(postCloseExchange.SHORT) <= 0) {
+    protectionCleanupCount = await coin.cancelGridOrders({
+      uid: row.uid,
+      symbol: row.symbol,
+      pid: row.id,
+      leg: null,
+      includeEntries: false,
+      includeExits: true,
+    });
     if (positionOwnershipApi && typeof positionOwnershipApi.releaseAllPositionBucketOwnersByPid === "function") {
       await positionOwnershipApi.releaseAllPositionBucketOwnersByPid({
         ownerPid: row.id,
@@ -450,6 +459,7 @@ const executeGridExitForRoute = async ({
       gridRegimeKey: payload.gridRegimeKey,
     },
     cancelCount,
+    protectionCleanupCount,
     closeResults,
     closeDecisionLocal: {
       preCancelOwnerOpenQtyByLeg: preCancelLocal.ownerOpenQtyByLeg,

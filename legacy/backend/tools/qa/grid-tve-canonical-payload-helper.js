@@ -45,6 +45,9 @@ const buildCanonicalBase = (input = {}) => ({
   supportPrice: pick(input.supportPrice, input.support, input.supportLine, input.lowerLine),
   resistancePrice: pick(input.resistancePrice, input.resistance, input.resistanceLine, input.upperLine),
   triggerPrice: pick(input.triggerPrice, input.trigger, input.triggerLine, input.centerLine),
+  longTriggerPrice: pick(input.longTriggerPrice, input.long_trigger_price, input.longTrigger, input.longEntryPrice, input.buyTriggerPrice),
+  shortTriggerPrice: pick(input.shortTriggerPrice, input.short_trigger_price, input.shortTrigger, input.shortEntryPrice, input.sellTriggerPrice),
+  triggerProfile: pick(input.triggerProfile, input.trigger_profile),
   signalTime: pick(input.signalTime, input.time, input.eventTime, input.triggeredAt),
 });
 
@@ -69,6 +72,9 @@ const buildGridArmTvePayloadUsingCanonicalKey = (input = {}) => {
     supportPrice: base.supportPrice,
     resistancePrice: base.resistancePrice,
     triggerPrice: base.triggerPrice,
+    longTriggerPrice: base.longTriggerPrice,
+    shortTriggerPrice: base.shortTriggerPrice,
+    triggerProfile: base.triggerProfile,
     signalTime: base.signalTime,
   };
   const expectedGridRegimeKey = gridRuntime.buildGridRegimeKey(payload);
@@ -104,6 +110,9 @@ const buildGridExitTvePayloadUsingCanonicalKey = (input = {}) => {
     supportPrice: base.supportPrice,
     resistancePrice: base.resistancePrice,
     triggerPrice: base.triggerPrice,
+    longTriggerPrice: base.longTriggerPrice,
+    shortTriggerPrice: base.shortTriggerPrice,
+    triggerProfile: base.triggerProfile,
     signalTime: base.signalTime,
   };
   const expectedGridRegimeKey = gridRuntime.buildGridRegimeKey(payload);

@@ -7,6 +7,7 @@ const path = require("path");
 const policy = require("../../grid-reentry-sl-policy");
 
 const gridEngineSource = fs.readFileSync(path.resolve(__dirname, "../../grid-engine.js"), "utf8");
+const orderIntentWorkerSource = fs.readFileSync(path.resolve(__dirname, "../../order-intent-worker.js"), "utf8");
 
 const assertNoAmbiguousOpenOrderOnlyEvidence = () => {
   assert(
@@ -83,6 +84,21 @@ assert(
 assert(
   gridEngineSource.includes("GRID_RECOVERED_TP_REENTRY_INTENT_PENDING"),
   "recovered TP branch must trace pending re-entry intent"
+);
+assert(
+  orderIntentWorkerSource.includes("const getGridReentryDispatcher") &&
+    orderIntentWorkerSource.includes("coin.placeGridEntryOrder") &&
+    orderIntentWorkerSource.includes("dispatchGridReentryCreateIntent"),
+  "GRID_REENTRY_CREATE worker must submit same-side re-entry through coin.placeGridEntryOrder"
+);
+assert(
+  /if \(actualDispatchGate\.allowed\) \{[\s\S]+dispatchGridReentryCreateIntent/.test(orderIntentWorkerSource),
+  "actual dispatch gate pass must execute re-entry dispatcher instead of blocking"
+);
+assert(
+  orderIntentWorkerSource.includes("touchGridReentryOwnershipForIntent") &&
+    orderIntentWorkerSource.includes("ownerState: \"ENTRY_ARMED\""),
+  "re-entry worker must restore PID ownership as ENTRY_ARMED after order submission"
 );
 
 assertNoAmbiguousOpenOrderOnlyEvidence();

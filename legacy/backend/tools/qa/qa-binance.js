@@ -9,6 +9,9 @@ let futuresServerOffsetMs = 0;
 let futuresServerOffsetSyncedAt = 0;
 const readCache = new Map();
 
+const normalizeFuturesSymbol = (value, fallback = "BTCUSDT") =>
+  normalizeSymbol(value, fallback).replace(/\.P$/i, "");
+
 const cacheKey = (...parts) => parts.map((part) => String(part ?? "")).join("|");
 
 const getCached = (key) => {
@@ -145,12 +148,12 @@ const getPositionRisk = async (uid, symbol = null) => {
   if (!symbol) {
     return Array.isArray(positions) ? positions : [];
   }
-  const normalizedSymbol = normalizeSymbol(symbol);
+  const normalizedSymbol = normalizeFuturesSymbol(symbol);
   return (Array.isArray(positions) ? positions : []).filter((item) => item.symbol === normalizedSymbol);
 };
 
 const getOpenOrders = async (uid, symbol = null) => {
-  const normalizedSymbol = symbol ? normalizeSymbol(symbol) : "";
+  const normalizedSymbol = symbol ? normalizeFuturesSymbol(symbol) : "";
   const allKey = cacheKey("openOrders", uid, "ALL");
   if (!normalizedSymbol || readCache.has(allKey)) {
     const rows = readCache.has(allKey)
@@ -165,7 +168,7 @@ const getOpenOrders = async (uid, symbol = null) => {
 };
 
 const getOpenAlgoOrders = async (uid, symbol = null) => {
-  const normalizedSymbol = symbol ? normalizeSymbol(symbol) : "";
+  const normalizedSymbol = symbol ? normalizeFuturesSymbol(symbol) : "";
   const allKey = cacheKey("openAlgoOrders", uid, "ALL");
   if (!normalizedSymbol || readCache.has(allKey)) {
     const rows = readCache.has(allKey)
@@ -180,16 +183,16 @@ const getOpenAlgoOrders = async (uid, symbol = null) => {
 };
 
 const getAllOrders = async (uid, symbol, limit = 50) =>
-  getCached(cacheKey("allOrders", uid, normalizeSymbol(symbol), limit))
-  || setCached(cacheKey("allOrders", uid, normalizeSymbol(symbol), limit), await signedGet(uid, "/fapi/v1/allOrders", {
-      symbol: normalizeSymbol(symbol),
+  getCached(cacheKey("allOrders", uid, normalizeFuturesSymbol(symbol), limit))
+  || setCached(cacheKey("allOrders", uid, normalizeFuturesSymbol(symbol), limit), await signedGet(uid, "/fapi/v1/allOrders", {
+      symbol: normalizeFuturesSymbol(symbol),
       limit,
     }));
 
 const getUserTrades = async (uid, symbol, limit = 50) =>
-  getCached(cacheKey("userTrades", uid, normalizeSymbol(symbol), limit))
-  || setCached(cacheKey("userTrades", uid, normalizeSymbol(symbol), limit), await signedGet(uid, "/fapi/v1/userTrades", {
-      symbol: normalizeSymbol(symbol),
+  getCached(cacheKey("userTrades", uid, normalizeFuturesSymbol(symbol), limit))
+  || setCached(cacheKey("userTrades", uid, normalizeFuturesSymbol(symbol), limit), await signedGet(uid, "/fapi/v1/userTrades", {
+      symbol: normalizeFuturesSymbol(symbol),
       limit,
     }));
 
@@ -277,4 +280,5 @@ module.exports = {
   getPositionMode,
   getReadOnlyConnectivity,
   getReadGuardSnapshot: () => binanceReadGuard.getStateSnapshot(),
+  normalizeFuturesSymbol,
 };

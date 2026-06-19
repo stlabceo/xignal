@@ -91,6 +91,37 @@ const buildGridRuntimeTracePayload = (handler, parsed, reData, extra = {}) => ({
   ...extra,
 });
 
+const toAuditTimestamp = (value) => {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return numeric;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const buildLatencyMs = (from, to = Date.now()) => {
+  const fromMs = toAuditTimestamp(from);
+  const toMs = toAuditTimestamp(to);
+  if (!(fromMs > 0) || !(toMs > 0)) {
+    return null;
+  }
+  return Math.max(0, toMs - fromMs);
+};
+
+const buildPrivateSocketLatencyPayload = (reData = {}) => {
+  const receivedAt = toAuditTimestamp(reData?.__privateSocketReceivedAt);
+  const eventTime = toAuditTimestamp(reData?.__privateSocketEventTime || reData?.T);
+  return {
+    socketIngressLatencyMs: eventTime && receivedAt ? buildLatencyMs(eventTime, receivedAt) : null,
+    socketHandlerLatencyMs: receivedAt ? Date.now() - receivedAt : null,
+    socketConvergenceLatencyMs: null,
+  };
+};
+
 const withGridRuntimeTraceScope = async (handler, parsed, reData, worker) => {
   let outcome = "IGNORED";
   const tracePayload = buildGridRuntimeTracePayload(handler, parsed, reData);
@@ -532,6 +563,25 @@ const pickGridPayloadValue = (...values) => {
   return null;
 };
 
+const GRID_CONTEXT_PRESERVE_FIELDS = [
+  "supportPrice",
+  "resistancePrice",
+  "triggerPrice",
+  "lastWebhookPayloadJson",
+];
+
+const isBlankGridContextValue = (value) =>
+  value === undefined || value === null || String(value).trim() === "";
+
+const isLiveGridStrategyTable = (tableName) =>
+  String(tableName || "").trim() === "live_grid_strategy_list";
+
+const isStrictSideTriggerGridRow = (row = {}) => {
+  const profile = String(getGridTriggerProfile(row) || "").trim().toUpperCase();
+  const signal = String(row.strategySignal || "").trim().toUpperCase();
+  return profile === "35_65" || signal.endsWith("_35_65");
+};
+
 const getGridRowPayload = (row = {}) => {
   if (row.gridPayload && typeof row.gridPayload === "object") {
     return row.gridPayload;
@@ -544,10 +594,32 @@ const getGridTriggerProfile = (row = {}) => {
   return String(pickGridPayloadValue(row.triggerProfile, payload.triggerProfile, payload.trigger_profile) || "").trim();
 };
 
+const getGridSupportPrice = (row = {}) => {
+  const payload = getGridRowPayload(row);
+  return toNumber(pickGridPayloadValue(
+    row.supportPrice,
+    payload.supportPrice,
+    payload.support,
+    payload.supportLine,
+    payload.lowerLine
+  ));
+};
+
+const getGridResistancePrice = (row = {}) => {
+  const payload = getGridRowPayload(row);
+  return toNumber(pickGridPayloadValue(
+    row.resistancePrice,
+    payload.resistancePrice,
+    payload.resistance,
+    payload.resistanceLine,
+    payload.upperLine
+  ));
+};
+
 const getGridLegTriggerPrice = (row = {}, leg = "LONG") => {
   const payload = getGridRowPayload(row);
   const fallbackTriggerPrice = pickGridPayloadValue(row.triggerPrice, payload.triggerPrice, payload.trigger, payload.price);
-  const value = leg === "SHORT"
+  const sideValue = leg === "SHORT"
     ? pickGridPayloadValue(
         row.shortTriggerPrice,
         row.short_trigger_price,
@@ -555,8 +627,7 @@ const getGridLegTriggerPrice = (row = {}, leg = "LONG") => {
         payload.short_trigger_price,
         payload.shortTrigger,
         payload.shortEntryPrice,
-        payload.sellTriggerPrice,
-        fallbackTriggerPrice
+        payload.sellTriggerPrice
       )
     : pickGridPayloadValue(
         row.longTriggerPrice,
@@ -565,18 +636,31 @@ const getGridLegTriggerPrice = (row = {}, leg = "LONG") => {
         payload.long_trigger_price,
         payload.longTrigger,
         payload.longEntryPrice,
-        payload.buyTriggerPrice,
-        fallbackTriggerPrice
+        payload.buyTriggerPrice
       );
-  return toNumber(value);
+  if (isStrictSideTriggerGridRow(row) && !(toNumber(sideValue) > 0)) {
+    return 0;
+  }
+  return toNumber(pickGridPayloadValue(sideValue, fallbackTriggerPrice));
 };
 
-const getGridSideTriggerMetadata = (row = {}) => ({
-  payloadTriggerPrice: toNumber(row.triggerPrice || getGridRowPayload(row).triggerPrice),
-  longTriggerPrice: getGridLegTriggerPrice(row, "LONG"),
-  shortTriggerPrice: getGridLegTriggerPrice(row, "SHORT"),
-  triggerProfile: getGridTriggerProfile(row) || null,
-});
+const getGridSideTriggerMetadata = (row = {}) => {
+  const payload = getGridRowPayload(row);
+  return {
+    supportPrice: getGridSupportPrice(row),
+    resistancePrice: getGridResistancePrice(row),
+    payloadTriggerPrice: toNumber(pickGridPayloadValue(row.triggerPrice, payload.triggerPrice, payload.trigger, payload.price)),
+    longTriggerPrice: getGridLegTriggerPrice(row, "LONG"),
+    shortTriggerPrice: getGridLegTriggerPrice(row, "SHORT"),
+    triggerProfile: getGridTriggerProfile(row) || null,
+    gridRegimeKey: pickGridPayloadValue(
+      row.gridRegimeKey,
+      payload.gridRegimeKey,
+      payload.canonicalGridRegimeKey,
+      extractGridRegimeKeyFromLastPayload(row.lastWebhookPayloadJson)
+    ) || null,
+  };
+};
 
 const computeLegTakeProfitPrice = (row, leg, entryPrice) => {
   const profitPercent = toNumber(row.profit);
@@ -589,7 +673,7 @@ const computeLegTakeProfitPrice = (row, leg, entryPrice) => {
 };
 
 const computeLegStopPrice = (row, leg) =>
-  leg === "LONG" ? toNumber(row.supportPrice) : toNumber(row.resistancePrice);
+  leg === "LONG" ? getGridSupportPrice(row) : getGridResistancePrice(row);
 
 const getEntryFillPriceFromTicker = (leg, price) => {
   if (!price?.st) {
@@ -705,6 +789,11 @@ const canArmEntriesForRow = (row) =>
   && row?.regimeEndReason !== "BOX_BREAK"
   && row?.regimeEndReason !== "BOX_BREAK_WAITING";
 
+const canArmInitialLiveEntriesForRow = (row) =>
+  canArmEntriesForRow(row)
+  && !hasOpenPosition(row)
+  && !hasAnyEntryArmed(row);
+
 const getLegPatchForReset = (leg) => {
   const prefix = getLegFieldPrefix(leg);
   return {
@@ -809,13 +898,88 @@ const buildSqlSetClause = (patch) =>
     .map((key) => `${key} = ?`)
     .join(", ");
 
-const applyGridPatch = async (tableName, id, patch = {}) => {
-  const entries = Object.entries(patch);
-  if (entries.length === 0) {
+const isSafeGridPatchColumn = (column) => /^[A-Za-z0-9_]+$/.test(String(column || ""));
+
+const areGridPatchValuesEquivalent = (current, next) => {
+  if (current == null && next == null) {
+    return true;
+  }
+  if (current == null || next == null) {
+    return false;
+  }
+  if (current instanceof Date || next instanceof Date) {
+    const currentTime = current instanceof Date ? current.getTime() : Date.parse(String(current));
+    const nextTime = next instanceof Date ? next.getTime() : Date.parse(String(next));
+    return Number.isFinite(currentTime) && Number.isFinite(nextTime) && currentTime === nextTime;
+  }
+  const currentNumber = Number(current);
+  const nextNumber = Number(next);
+  if (Number.isFinite(currentNumber) && Number.isFinite(nextNumber)) {
+    return currentNumber === nextNumber;
+  }
+  return String(current) === String(next);
+};
+
+const isNoopGridPatch = async (tableName, id, patch = {}) => {
+  const columns = Object.keys(patch);
+  if (!id || columns.length === 0 || columns.some((column) => !isSafeGridPatchColumn(column))) {
     return false;
   }
 
-  const sql = `UPDATE ${tableName} SET ${buildSqlSetClause(patch)}, updatedAt = NOW() WHERE id = ? LIMIT 1`;
+  const [rows] = await db.query(
+    `SELECT ${columns.join(", ")}
+       FROM ${tableName}
+      WHERE id = ?
+      LIMIT 1`,
+    [id]
+  );
+  const current = rows?.[0];
+  if (!current) {
+    return false;
+  }
+  return columns.every((column) => areGridPatchValuesEquivalent(current[column], patch[column]));
+};
+
+const preserveLiveGridContextPatch = async (tableName, id, patch = {}) => {
+  if (!isLiveGridStrategyTable(tableName) || !id || !patch || typeof patch !== "object") {
+    return patch;
+  }
+
+  const resetFields = GRID_CONTEXT_PRESERVE_FIELDS.filter((field) =>
+    Object.prototype.hasOwnProperty.call(patch, field) && isBlankGridContextValue(patch[field])
+  );
+  if (resetFields.length === 0) {
+    return patch;
+  }
+
+  const [rows] = await db.query(
+    `SELECT ${GRID_CONTEXT_PRESERVE_FIELDS.join(", ")}
+       FROM live_grid_strategy_list
+      WHERE id = ?
+      LIMIT 1`,
+    [id]
+  );
+  const current = rows?.[0] || {};
+  const preserved = { ...patch };
+  for (const field of resetFields) {
+    if (!isBlankGridContextValue(current[field])) {
+      preserved[field] = current[field];
+    }
+  }
+  return preserved;
+};
+
+const applyGridPatch = async (tableName, id, patch = {}) => {
+  const finalPatch = await preserveLiveGridContextPatch(tableName, id, patch);
+  const entries = Object.entries(finalPatch);
+  if (entries.length === 0) {
+    return false;
+  }
+  if (await isNoopGridPatch(tableName, id, finalPatch)) {
+    return false;
+  }
+
+  const sql = `UPDATE ${tableName} SET ${buildSqlSetClause(finalPatch)}, updatedAt = NOW() WHERE id = ? LIMIT 1`;
   await db.query(sql, [...entries.map(([, value]) => value), id]);
   return true;
 };
@@ -1086,6 +1250,7 @@ const enqueueLiveGridCancelIntent = async (row, options = {}) => {
       targetType,
       targetOrderId: options.targetOrderId || null,
       targetClientOrderId: options.targetClientOrderId || options.clientOrderId || null,
+      protectionOrderRefs: Array.isArray(options.protectionOrderRefs) ? options.protectionOrderRefs : [],
       includeEntries: options.includeEntries !== false,
       includeExits: options.includeExits !== false,
       reason: options.reason || "GRID_CANCEL",
@@ -1205,6 +1370,117 @@ const loadLiveGridLegProtectionState = async (row, leg) => {
   return {
     activeReservations,
     activeReservationCount: activeReservations.length,
+  };
+};
+
+const cleanupLiveGridProtectionAfterFlatClose = async (
+  row,
+  leg,
+  reason = "GRID_CLOSE_CONVERGED_PROTECTION_CLEANUP",
+  filledClientOrderId = null
+) => {
+  const protectionBeforeCleanup = await loadLiveGridLegProtectionState(row, leg);
+  if (protectionBeforeCleanup.activeReservationCount <= 0) {
+    await appendGridRuntimeLog(
+      row,
+      "gridProtection",
+      `${reason}_NOOP`,
+      `leg:${leg}, activeProtectionBefore:0, flatClose:Y`,
+      leg
+    );
+    return {
+      pending: false,
+      reason: "NO_ACTIVE_PROTECTION",
+      activeProtectionBefore: 0,
+    };
+  }
+
+  await cancelAllGridOrders("LIVE", row, buildSiblingProtectionCancelOptions({
+    leg,
+    filledClientOrderId,
+    activeReservations: protectionBeforeCleanup.activeReservations,
+    reason,
+  }));
+  await appendGridRuntimeLog(
+    row,
+    "gridProtection",
+    `${reason}_QUEUED`,
+    `leg:${leg}, activeProtectionBefore:${protectionBeforeCleanup.activeReservationCount}, flatClose:Y`,
+    leg
+  );
+  return {
+    pending: true,
+    reason,
+    activeProtectionBefore: protectionBeforeCleanup.activeReservationCount,
+  };
+};
+
+const getGridProtectionReservationRole = (reservation = {}) => {
+  const kind = String(reservation.reservationKind || "").trim().toUpperCase();
+  const clientOrderId = String(reservation.clientOrderId || "").trim().toUpperCase();
+  if (kind === "GRID_TP" || clientOrderId.startsWith("GTP_")) {
+    return "TP";
+  }
+  if (kind === "GRID_STOP" || clientOrderId.startsWith("GSTOP_")) {
+    return "STOP";
+  }
+  return null;
+};
+
+const getFilledProtectionRole = (clientOrderId = "") => {
+  const normalized = String(clientOrderId || "").trim().toUpperCase();
+  if (normalized.startsWith("GTP_")) {
+    return "TP";
+  }
+  if (normalized.startsWith("GSTOP_")) {
+    return "STOP";
+  }
+  return null;
+};
+
+const buildSiblingProtectionCancelOptions = ({
+  leg,
+  filledClientOrderId = null,
+  activeReservations = [],
+  reason = "GRID_PROTECTION_SIBLING_CLEANUP",
+} = {}) => {
+  const filledRole = getFilledProtectionRole(filledClientOrderId);
+  const siblingRole = filledRole === "TP" ? "STOP" : filledRole === "STOP" ? "TP" : null;
+  const protectionOrderRefs = []
+    .concat(activeReservations || [])
+    .filter((reservation) => {
+      const clientOrderId = String(reservation.clientOrderId || "").trim();
+      if (!clientOrderId || clientOrderId === filledClientOrderId) {
+        return false;
+      }
+      const role = getGridProtectionReservationRole(reservation);
+      if (!role) {
+        return false;
+      }
+      return siblingRole ? role === siblingRole : true;
+    })
+    .map((reservation) => ({
+      kind: getGridProtectionReservationRole(reservation) || "PROTECTION",
+      clientOrderId: String(reservation.clientOrderId || "").trim(),
+      orderId: pickGridPayloadValue(
+        reservation.actualOrderId,
+        reservation.sourceOrderId,
+        reservation.orderId
+      ),
+      reservationId: reservation.id || null,
+    }));
+
+  const firstRef = protectionOrderRefs[0] || {};
+  return {
+    leg,
+    includeEntries: false,
+    includeExits: true,
+    targetType: "PROTECTION",
+    reason,
+    sourceReason: reason,
+    targetClientOrderId: firstRef.clientOrderId || null,
+    targetOrderId: firstRef.orderId || null,
+    protectionOrderRefs,
   };
 };
 
@@ -1436,11 +1712,14 @@ const convergeLiveGridLegToExchangeFlat = async (
     return false;
   }
 
-  const canceledProtectionCount = await cancelAllGridOrders("LIVE", current, {
+  const canceledProtectionCount = await cancelAllGridOrders("LIVE", current, buildSiblingProtectionCancelOptions({
     leg,
-    includeEntries: false,
-    includeExits: true,
-  });
+    filledClientOrderId: recoveredExecution?.clientOrderId || null,
+    activeReservations: protectionBefore.activeReservations,
+    reason: recoveredExecution
+      ? "GRID_TP_SIBLING_PROTECTION_CLEANUP"
+      : "GRID_PROTECTION_SIBLING_CLEANUP",
+  }));
   const protectionAfter = await loadLiveGridLegProtectionState(current, leg);
   const shouldFlatten =
     Boolean(recoveredExecution) ||
@@ -1596,6 +1875,65 @@ const reconcileEndedGridLegIfExchangeFlat = async (
   });
 };
 
+const handleEndedLiveGridLegExchangeFlatBeforeClose = async (
+  row,
+  leg,
+  logScope,
+  logCode,
+  message,
+  fallbackReason = "BOX_BREAK",
+  exchangeSnapshotCache = null
+) => {
+  const coin = getCoin();
+  const cacheKey = `${row.uid}:${row.symbol}`;
+  let exchangeSnapshot = null;
+  if (exchangeSnapshotCache?.has(cacheKey)) {
+    exchangeSnapshot = exchangeSnapshotCache.get(cacheKey);
+  } else if (exchangeSnapshotCache) {
+    exchangeSnapshot = await coin.getExchangePositionSnapshot(row.uid, row.symbol);
+    exchangeSnapshotCache.set(cacheKey, exchangeSnapshot);
+  }
+  const exchangePosition = await coin.getGridLegExchangePosition({
+    uid: row.uid,
+    symbol: row.symbol,
+    leg,
+    exchangeSnapshot,
+  });
+  if (exchangePosition?.readOk === false) {
+    return false;
+  }
+  if (toNumber(exchangePosition?.qty) > 0) {
+    return false;
+  }
+
+  const protectionState = await loadLiveGridLegProtectionState(row, leg);
+  if (protectionState.activeReservationCount > 0) {
+    await cleanupLiveGridProtectionAfterFlatClose(
+      row,
+      leg,
+      "ENDED_EXCHANGE_FLAT_PROTECTION_CLEANUP"
+    );
+    await appendGridRuntimeLog(
+      row,
+      logScope,
+      `${logCode}_PROTECTION_CLEANUP_QUEUED`,
+      `${message}, leg:${leg}, exchangeQty:0, activeProtection:${protectionState.activeReservationCount}, closeIntent:N`,
+      leg
+    );
+    return true;
+  }
+
+  return await convergeLiveGridLegToExchangeFlat(row, leg, {
+    logScope,
+    logCode,
+    message,
+    fallbackReason,
+    recoveredExecution: null,
+    allowLocalFlatten: true,
+    exchangeSnapshotCache,
+  });
+};
+
 const reconcileLiveGridRuntimeIssue = async ({ row, issue } = {}) => {
   if (!row?.id || !row?.uid || !issue) {
     return null;
@@ -1746,11 +2084,22 @@ const truthSyncLiveGridRow = async ({ row, exchangeSnapshotCache = null } = {}) 
     return null;
   }
 
+  const rowStartedAt = Date.now();
   let refreshed = (await loadGridItem("LIVE", row.id)) || row;
   const coin = getCoin();
   const repaired = [];
+  logGridRuntimeTrace("GRID_REST_TRUTH_SYNC_ROW_START", {
+    uid: refreshed.uid,
+    pid: refreshed.id,
+    symbol: refreshed.symbol || null,
+    enabled: refreshed.enabled || null,
+    regimeStatus: refreshed.regimeStatus || null,
+    longLegStatus: refreshed.longLegStatus || null,
+    shortLegStatus: refreshed.shortLegStatus || null,
+  });
 
   for (const leg of ["LONG", "SHORT"]) {
+    const legStartedAt = Date.now();
     const prefix = getLegFieldPrefix(leg);
     const snapshotState = await loadLiveGridLegSnapshotState(refreshed, leg);
     const protectionState = await loadLiveGridLegProtectionState(refreshed, leg);
@@ -1769,6 +2118,17 @@ const truthSyncLiveGridRow = async ({ row, exchangeSnapshotCache = null } = {}) 
       exchangeSnapshot,
     });
     if (exchangePosition?.readOk === false) {
+      logGridRuntimeTrace("GRID_REST_TRUTH_SYNC_ROW_SKIP", {
+        uid: refreshed.uid,
+        pid: refreshed.id,
+        symbol: refreshed.symbol,
+        positionSide: leg,
+        snapshotQty: snapshotState.qty,
+        activeReservationCount: protectionState.activeReservationCount,
+        skipReason: "EXCHANGE_READ_FAILED",
+        readError: exchangePosition.readError || null,
+        elapsedMs: Date.now() - legStartedAt,
+      });
       logGridRuntimeTrace("GRID_TRUTH_SYNC_SKIPPED_EXCHANGE_READ_FAILED", {
         uid: refreshed.uid,
         pid: refreshed.id,
@@ -1784,6 +2144,20 @@ const truthSyncLiveGridRow = async ({ row, exchangeSnapshotCache = null } = {}) 
       snapshotState.qty > 0 ||
       localRowQty > 0 ||
       refreshed?.[`${prefix}LegStatus`] === "OPEN";
+    logGridRuntimeTrace("GRID_REST_TRUTH_SYNC_ROW_START", {
+      uid: refreshed.uid,
+      pid: refreshed.id,
+      symbol: refreshed.symbol || null,
+      positionSide: leg,
+      enabled: refreshed.enabled || null,
+      regimeStatus: refreshed.regimeStatus || null,
+      legStatus: refreshed?.[`${prefix}LegStatus`] || null,
+      snapshotQty: snapshotState.qty,
+      rowQty: localRowQty,
+      exchangeQty,
+      hasActiveReservation: protectionState.activeReservationCount > 0,
+      activeReservationCount: protectionState.activeReservationCount,
+    });
 
     if (exchangeQty > 0) {
       if (
@@ -1816,6 +2190,15 @@ const truthSyncLiveGridRow = async ({ row, exchangeSnapshotCache = null } = {}) 
           });
           refreshed = syncedRecovery.row || (await loadGridItem("LIVE", refreshed.id)) || refreshed;
           if (syncedRecovery.closed) {
+            logGridRuntimeTrace("GRID_REST_TRUTH_SYNC_LATENCY", {
+              uid: refreshed.uid,
+              pid: refreshed.id,
+              symbol: refreshed.symbol || null,
+              positionSide: leg,
+              action: "RECOVER_EXIT_FILL",
+              elapsedMs: Date.now() - legStartedAt,
+              truthSyncRecoveryLatencyMs: buildLatencyMs(recoveredExecution.tradeTime, Date.now()),
+            });
             continue;
           }
         }
@@ -1852,9 +2235,30 @@ const truthSyncLiveGridRow = async ({ row, exchangeSnapshotCache = null } = {}) 
               clientOrderId: recoveredEntry.clientOrderId,
               orderId: recoveredEntry.orderId,
             });
+            logGridRuntimeTrace("GRID_REST_TRUTH_SYNC_LATENCY", {
+              uid: refreshed.uid,
+              pid: refreshed.id,
+              symbol: refreshed.symbol || null,
+              positionSide: leg,
+              action: "RECOVER_ENTRY_FILL",
+              clientOrderId: recoveredEntry.clientOrderId,
+              orderId: recoveredEntry.orderId,
+              elapsedMs: Date.now() - legStartedAt,
+              truthSyncRecoveryLatencyMs: buildLatencyMs(recoveredEntry.tradeTime, Date.now()),
+            });
             refreshed = (await loadGridItem("LIVE", refreshed.id)) || latest;
             continue;
           }
+          logGridRuntimeTrace("GRID_REST_TRUTH_SYNC_ROW_SKIP", {
+            uid: refreshed.uid,
+            pid: refreshed.id,
+            symbol: refreshed.symbol || null,
+            positionSide: leg,
+            skipReason: "ENTRY_RECOVERY_CONVERGENCE_FAILED",
+            clientOrderId: recoveredEntry.clientOrderId || null,
+            orderId: recoveredEntry.orderId || null,
+            elapsedMs: Date.now() - legStartedAt,
+          });
         }
       }
 
@@ -1866,6 +2270,14 @@ const truthSyncLiveGridRow = async ({ row, exchangeSnapshotCache = null } = {}) 
             leg,
             action: "RESTORE_EXIT_ORDERS",
           });
+          logGridRuntimeTrace("GRID_REST_TRUTH_SYNC_LATENCY", {
+            uid: refreshed.uid,
+            pid: refreshed.id,
+            symbol: refreshed.symbol || null,
+            positionSide: leg,
+            action: "RESTORE_EXIT_ORDERS",
+            elapsedMs: Date.now() - legStartedAt,
+          });
           refreshed = (await loadGridItem("LIVE", refreshed.id)) || latest;
         }
       }
@@ -1873,6 +2285,18 @@ const truthSyncLiveGridRow = async ({ row, exchangeSnapshotCache = null } = {}) 
     }
 
     if (!(hasLocalOpen || protectionState.activeReservationCount > 0 || refreshed.regimeStatus === "ENDED")) {
+      logGridRuntimeTrace("GRID_REST_TRUTH_SYNC_ROW_SKIP", {
+        uid: refreshed.uid,
+        pid: refreshed.id,
+        symbol: refreshed.symbol || null,
+        positionSide: leg,
+        snapshotQty: snapshotState.qty,
+        rowQty: localRowQty,
+        exchangeQty,
+        activeReservationCount: protectionState.activeReservationCount,
+        skipReason: "NO_LOCAL_OR_PROTECTION_STATE",
+        elapsedMs: Date.now() - legStartedAt,
+      });
       continue;
     }
 
@@ -1895,7 +2319,7 @@ const truthSyncLiveGridRow = async ({ row, exchangeSnapshotCache = null } = {}) 
       allowLocalFlatten: true,
       exchangeSnapshotCache,
     });
-    if (flattened) {
+      if (flattened) {
       repaired.push({
         leg,
         action: recoveredExecution
@@ -1903,14 +2327,42 @@ const truthSyncLiveGridRow = async ({ row, exchangeSnapshotCache = null } = {}) 
           : "LOCAL_STALE_FLATTENED",
         clientOrderId: recoveredExecution?.clientOrderId || null,
         orderId: recoveredExecution?.orderId || null,
+        });
+      logGridRuntimeTrace("GRID_REST_TRUTH_SYNC_LATENCY", {
+        uid: refreshed.uid,
+        pid: refreshed.id,
+        symbol: refreshed.symbol || null,
+        positionSide: leg,
+        action: recoveredExecution ? "RECOVER_EXIT_FILL_FLATTENED" : "LOCAL_STALE_FLATTENED",
+        clientOrderId: recoveredExecution?.clientOrderId || null,
+        orderId: recoveredExecution?.orderId || null,
+        elapsedMs: Date.now() - legStartedAt,
+        truthSyncRecoveryLatencyMs: recoveredExecution
+          ? buildLatencyMs(recoveredExecution.tradeTime, Date.now())
+          : null,
       });
       refreshed = (await loadGridItem("LIVE", refreshed.id)) || refreshed;
     }
   }
 
   if (repaired.length === 0) {
+    logGridRuntimeTrace("GRID_REST_TRUTH_SYNC_LATENCY", {
+      uid: refreshed.uid,
+      pid: refreshed.id,
+      symbol: refreshed.symbol || null,
+      repairedCount: 0,
+      elapsedMs: Date.now() - rowStartedAt,
+    });
     return null;
   }
+
+  logGridRuntimeTrace("GRID_REST_TRUTH_SYNC_LATENCY", {
+    uid: refreshed.uid,
+    pid: refreshed.id,
+    symbol: refreshed.symbol || null,
+    repairedCount: repaired.length,
+    elapsedMs: Date.now() - rowStartedAt,
+  });
 
   return {
     pid: refreshed.id,
@@ -1920,13 +2372,32 @@ const truthSyncLiveGridRow = async ({ row, exchangeSnapshotCache = null } = {}) 
 };
 
 const emergencyCloseLiveGridLeg = async (row, leg, qty, logCode, message) => {
-  await cancelAllGridOrders("LIVE", row, {
-    leg,
-    includeEntries: false,
-    includeExits: true,
-    reason: `${logCode}_PROTECTION_CANCEL`,
-  });
-  const closeIntent = await enqueueLiveGridCloseIntent(row, leg, qty, logCode, {
+  const snapshotState = await loadLiveGridLegSnapshotState(row, leg).catch(() => null);
+  const closeQty = Math.max(toNumber(qty), toNumber(snapshotState?.qty));
+  if (!(closeQty > 0)) {
+    const refreshed = (await loadGridItem("LIVE", row.id)) || row;
+    const synced = await syncLiveGridRowFromPidState(refreshed, {
+      regimeStatus: "ENDED",
+      regimeEndReason: refreshed.regimeEndReason || logCode,
+      clearOpenLegOrderRefs: false,
+    });
+    await appendGridRuntimeLog(
+      synced || refreshed,
+      "gridLiveSafety",
+      `${logCode}_NOOP_FLAT`,
+      `${message}, leg:${leg}, closeQty:0, snapshotQty:${toNumber(snapshotState?.qty)}, protectionCancel:N`,
+      leg
+    );
+    await finalizeEndedGridRegimeIfIdle(
+      "LIVE",
+      synced || refreshed,
+      (synced || refreshed)?.regimeEndReason || logCode
+    );
+    return true;
+  }
+
+  const protectionState = await loadLiveGridLegProtectionState(row, leg);
+  const closeIntent = await enqueueLiveGridCloseIntent(row, leg, closeQty, logCode, {
     routePath: "grid-emergency-close",
   });
   const refreshed = (await loadGridItem("LIVE", row.id)) || row;
@@ -1941,7 +2412,7 @@ const emergencyCloseLiveGridLeg = async (row, leg, qty, logCode, message) => {
     synced || refreshed,
     "gridLiveSafety",
     closeIntent.pending ? `${logCode}_QUEUED` : `${logCode}_QUEUE_FAILED`,
-    `${message}, closeIntent:${closeIntent.intentSummary?.intent?.intentKey || "NONE"}, closeClientOrderId:${closeIntent.closeClientOrderId || "NONE"}`,
+    `${message}, closeQty:${closeQty}, closeIntent:${closeIntent.intentSummary?.intent?.intentKey || "NONE"}, closeClientOrderId:${closeIntent.closeClientOrderId || "NONE"}, activeProtectionRetained:${protectionState.activeReservationCount}`,
     leg
   );
   return closeIntent.pending;
@@ -2202,6 +2673,7 @@ const enqueueLiveProtectionIntentForLeg = async (row, leg, qty, entryPrice, opti
   const prefix = getLegFieldPrefix(leg);
   const takeProfitPrice = computeLegTakeProfitPrice(row, leg, entryPrice);
   const stopPrice = computeLegStopPrice(row, leg);
+  const sideTriggerMetadata = getGridSideTriggerMetadata(row);
   const entryOrderId = options.entryOrderId || row?.[`${prefix}EntryOrderId`] || null;
   const ownershipQty = await positionOwnership.resolveOwnedCloseQty({
     uid: row.uid,
@@ -2293,6 +2765,14 @@ const enqueueLiveProtectionIntentForLeg = async (row, leg, qty, entryPrice, opti
       sourceTradeId: options.sourceTradeId || null,
       takeProfitPrice,
       stopPrice,
+      supportPrice: sideTriggerMetadata.supportPrice || null,
+      resistancePrice: sideTriggerMetadata.resistancePrice || null,
+      payloadTriggerPrice: sideTriggerMetadata.payloadTriggerPrice || null,
+      longTriggerPrice: sideTriggerMetadata.longTriggerPrice || null,
+      shortTriggerPrice: sideTriggerMetadata.shortTriggerPrice || null,
+      triggerProfile: sideTriggerMetadata.triggerProfile || null,
+      gridRegimeKey: sideTriggerMetadata.gridRegimeKey || null,
+      contextMissingReason: !(stopPrice > 0) ? "GRID_PROTECTION_CONTEXT_MISSING" : null,
       oneLegEmergency: options.oneLegEmergency === true,
       fillEvidence: options.fillEvidence || null,
     },
@@ -3252,9 +3732,12 @@ const enqueueLiveReentryIntentAfterTakeProfit = async (row, parsed, reData) => {
       positionSide: leg,
       triggerPrice,
       payloadTriggerPrice: sideTriggerMetadata.payloadTriggerPrice,
+      supportPrice: sideTriggerMetadata.supportPrice,
+      resistancePrice: sideTriggerMetadata.resistancePrice,
       longTriggerPrice: sideTriggerMetadata.longTriggerPrice,
       shortTriggerPrice: sideTriggerMetadata.shortTriggerPrice,
       triggerProfile: sideTriggerMetadata.triggerProfile,
+      gridRegimeKey: sideTriggerMetadata.gridRegimeKey,
       reentryQty,
       ownedQtyBasis: closedQty,
       sourceTakeProfitClientOrderId: parsed.clientOrderId,
@@ -3410,12 +3893,15 @@ const terminateLiveGridRegimeAfterStopFill = async ({
     row?.shortEntryOrderId,
     row?.longExitOrderId,
     row?.shortExitOrderId,
+    row?.longStopOrderId,
+    row?.shortStopOrderId,
   ]
     .filter(Boolean)
     .filter((clientOrderId) => String(clientOrderId) !== String(stoppedClientOrderId || ""));
-  const canceledCount = await cancelAllGridOrders("LIVE", row, {
+  await cancelAllGridOrders("LIVE", row, {
     includeEntries: true,
-    includeExits: true,
+    includeExits: false,
+    reason: "GRID_STOP_TERMINAL_ENTRY_CLEANUP",
   });
 
   if (remainingStoppedQty > 0) {
@@ -3433,7 +3919,7 @@ const terminateLiveGridRegimeAfterStopFill = async ({
     return {
       state: gridReentrySlPolicy.GRID_SL_STATE.OPPOSITE_CRITICAL,
       reason: "STOP_PARTIAL_REMAINING",
-      canceledCount,
+      canceledCount: 0,
       closed,
     };
   }
@@ -3466,32 +3952,17 @@ const terminateLiveGridRegimeAfterStopFill = async ({
     return {
       state: gridReentrySlPolicy.GRID_SL_STATE.OPPOSITE_CRITICAL,
       reason: gridReentrySlPolicy.GRID_SL_REASON.OPPOSITE_CLOSE_REQUIRED,
-      canceledCount,
+      canceledCount: 0,
       closed,
     };
   }
 
-  if (cleanupOrderRefsBefore.length > 0 && canceledCount <= 0) {
-    await applyGridPatch("live_grid_strategy_list", row.id, {
-      ...getLegPatchForClosed(stoppedLeg),
-      regimeStatus: gridReentrySlPolicy.GRID_SL_STATE.CLEANUP_PENDING,
-      regimeEndReason: gridReentrySlPolicy.GRID_SL_REASON.CLEANUP_PENDING,
-    });
-    await releaseGridLegPositionOwnership(row, stoppedLeg).catch(() => {});
-    await appendGridRuntimeLog(
-      row,
-      "gridLiveStop",
-      "SL_CLEANUP_PENDING",
-      `leg:${stoppedLeg}, refs:${cleanupOrderRefsBefore.join("+")}`,
-      stoppedLeg
-    );
-    return {
-      state: gridReentrySlPolicy.GRID_SL_STATE.CLEANUP_PENDING,
-      reason: gridReentrySlPolicy.GRID_SL_REASON.CLEANUP_PENDING,
-      canceledCount,
-      closed: true,
-    };
-  }
+  const protectionCleanup = await cleanupLiveGridProtectionAfterFlatClose(
+    refreshed,
+    stoppedLeg,
+    "GRID_STOP_FLAT_PROTECTION_CLEANUP",
+    stoppedClientOrderId
+  );
 
   await applyGridPatch("live_grid_strategy_list", row.id, {
     ...buildEndedRegimePatch(refreshed, gridReentrySlPolicy.GRID_SL_REASON.TERMINATED),
@@ -3502,7 +3973,7 @@ const terminateLiveGridRegimeAfterStopFill = async ({
     row,
     "gridLiveStop",
     gridReentrySlPolicy.GRID_SL_REASON.TERMINATED,
-    `leg:${stoppedLeg}, stopExitPrice:${toNumber(reData.ap || reData.L)}, canceled:${canceledCount}`,
+    `leg:${stoppedLeg}, stopExitPrice:${toNumber(reData.ap || reData.L)}, refsBefore:${cleanupOrderRefsBefore.join("+") || "NONE"}, protectionCleanup:${protectionCleanup.reason}`,
     stoppedLeg
   );
   const latest = (await loadGridItem("LIVE", row.id)) || refreshed;
@@ -3514,7 +3985,7 @@ const terminateLiveGridRegimeAfterStopFill = async ({
   return {
     state: "ENDED",
     reason: gridReentrySlPolicy.GRID_SL_REASON.TERMINATED,
-    canceledCount,
+    canceledCount: 0,
     closed: true,
   };
 };
@@ -4268,6 +4739,8 @@ const deactivateGridStrategy = async (mode, row, reason = "MANUAL_OFF") => {
 
   if (mode === "LIVE") {
     await cancelAllGridOrders("LIVE", row, {
+      includeEntries: true,
+      includeExits: false,
       reason,
       targetType: "REGIME_CLEANUP",
     });
@@ -4485,9 +4958,24 @@ const runLiveCycleForItem = async (row) => {
   }
 
   if (row.regimeStatus === "ENDED") {
+    const exchangeSnapshotCache = new Map();
     for (const leg of ["LONG", "SHORT"]) {
       const prefix = getLegFieldPrefix(leg);
       if (row[`${prefix}LegStatus`] !== "OPEN" && !(toNumber(row[`${prefix}Qty`]) > 0)) {
+        continue;
+      }
+
+      const exchangeFlatHandled = await handleEndedLiveGridLegExchangeFlatBeforeClose(
+        row,
+        leg,
+        "gridEnded",
+        "ENDED_EXCHANGE_FLAT_BEFORE_CLOSE",
+        `regime already ended:${row.regimeEndReason || "BOX_BREAK"}`,
+        row.regimeEndReason || "BOX_BREAK",
+        exchangeSnapshotCache
+      );
+      if (exchangeFlatHandled) {
+        row = (await loadGridItem("LIVE", row.id)) || row;
         continue;
       }
 
@@ -4511,7 +4999,7 @@ const runLiveCycleForItem = async (row) => {
       return false;
     }
 
-    if (!canArmEntriesForRow(refreshed)) {
+    if (!canArmInitialLiveEntriesForRow(refreshed)) {
       return false;
     }
     return await enqueueLiveGridArmIntentForRuntimeRow(refreshed);
@@ -4596,8 +5084,18 @@ const primeLiveEntriesForTargetItems = async (targetItems = []) => {
 const handleLiveGridEntryFill = async (parsed, reData) => {
   return await withQueuedLiveGridEventLock("ENTRY", parsed.clientOrderId, async () => {
     return await withGridRuntimeTraceScope("GRID_ENTRY_FILL_HANDLER", parsed, reData, async ({ setOutcome }) => {
+    const handlerEnteredAt = Date.now();
+    logGridRuntimeTrace("GRID_PRIVATE_SOCKET_GRID_HANDLER_ENTER", {
+      ...buildGridRuntimeTracePayload("GRID_ENTRY_FILL_HANDLER", parsed, reData),
+      ...buildPrivateSocketLatencyPayload(reData),
+    });
     const row = await loadGridItem("LIVE", parsed.pid);
     if (!row || row.uid !== parsed.uid) {
+      logGridRuntimeTrace("GRID_PRIVATE_SOCKET_GRID_HANDLER_SKIP", {
+        ...buildGridRuntimeTracePayload("GRID_ENTRY_FILL_HANDLER", parsed, reData),
+        reason: "ROW_NOT_FOUND",
+        ...buildPrivateSocketLatencyPayload(reData),
+      });
       setOutcome("ROW_NOT_FOUND");
       return false;
     }
@@ -4621,11 +5119,25 @@ const handleLiveGridEntryFill = async (parsed, reData) => {
         `leg:${parsed.leg}, entryOrderId:${parsed.clientOrderId}, reason:already-open-with-exits`,
         parsed.leg
       );
+      logGridRuntimeTrace("GRID_PRIVATE_SOCKET_GRID_HANDLER_SKIP", {
+        ...buildGridRuntimeTracePayload("GRID_ENTRY_FILL_HANDLER", parsed, reData),
+        reason: "ENTRY_SKIP_ALREADY_OPEN_WITH_EXITS",
+        existingLegQty,
+        reportedQty,
+        ...buildPrivateSocketLatencyPayload(reData),
+      });
       setOutcome("ENTRY_SKIP_ALREADY_OPEN_WITH_EXITS");
       return true;
     }
 
     if (!(entryFillQty > 0) || !(entryFillPrice > 0)) {
+      logGridRuntimeTrace("GRID_PRIVATE_SOCKET_GRID_HANDLER_SKIP", {
+        ...buildGridRuntimeTracePayload("GRID_ENTRY_FILL_HANDLER", parsed, reData),
+        reason: "ENTRY_INVALID_FILL",
+        entryFillQty,
+        entryFillPrice,
+        ...buildPrivateSocketLatencyPayload(reData),
+      });
       setOutcome("ENTRY_INVALID_FILL");
       return true;
     }
@@ -4661,6 +5173,28 @@ const handleLiveGridEntryFill = async (parsed, reData) => {
         failureMessage: `leg:${parsed.leg}, entryOrderId:${parsed.clientOrderId}, qty:${entryFillQty}, entryPrice:${entryFillPrice}`,
       }
     );
+    logGridRuntimeTrace("GRID_PRIVATE_SOCKET_GRID_HANDLER_APPLIED", {
+      ...buildGridRuntimeTracePayload("GRID_ENTRY_FILL_HANDLER", parsed, reData),
+      converged: Boolean(convergence.converged),
+      entryFillQty,
+      entryFillPrice,
+      ...buildPrivateSocketLatencyPayload(reData),
+      socketConvergenceLatencyMs: Date.now() - handlerEnteredAt,
+    });
+    logGridRuntimeTrace("GRID_FILL_TO_PROTECTION_LATENCY", {
+      uid: row.uid,
+      pid: row.id,
+      symbol: row.symbol,
+      leg: parsed.leg,
+      clientOrderId: parsed.clientOrderId,
+      orderId: reData.i || null,
+      tradeTime: reData.T || null,
+      source: "SOCKET",
+      converged: Boolean(convergence.converged),
+      fillToProtectionLatencyMs: Date.now() - handlerEnteredAt,
+      socketIngressLatencyMs: buildPrivateSocketLatencyPayload(reData).socketIngressLatencyMs,
+      socketHandlerLatencyMs: buildPrivateSocketLatencyPayload(reData).socketHandlerLatencyMs,
+    });
     setOutcome(convergence.converged ? "ENTRY_FILL_CONVERGED" : "ENTRY_FILL_CONVERGENCE_FAILED");
     return convergence.converged;
     });
@@ -4704,11 +5238,13 @@ const handleLiveGridTakeProfitFill = async (parsed, reData) => {
   await pidPositionLedger.syncGridLegSnapshot(row.id, parsed.leg);
 
   if (reData.X === "PARTIALLY_FILLED" && remainingQty > 0) {
-    await cancelAllGridOrders("LIVE", row, {
+    const protectionBeforeCleanup = await loadLiveGridLegProtectionState(row, parsed.leg);
+    await cancelAllGridOrders("LIVE", row, buildSiblingProtectionCancelOptions({
       leg: parsed.leg,
-      includeEntries: false,
-      includeExits: true,
-    });
+      filledClientOrderId: parsed.clientOrderId,
+      activeReservations: protectionBeforeCleanup.activeReservations,
+      reason: "GRID_TP_SIBLING_PROTECTION_CLEANUP",
+    }));
     const protection = await protectGridOpenLegOrClose({
       row,
       leg: parsed.leg,
@@ -4766,11 +5302,13 @@ const handleLiveGridTakeProfitFill = async (parsed, reData) => {
     includeEntries: true,
     includeExits: false,
   });
-  await cancelAllGridOrders("LIVE", row, {
+  const protectionBeforeCleanup = await loadLiveGridLegProtectionState(row, parsed.leg);
+  await cancelAllGridOrders("LIVE", row, buildSiblingProtectionCancelOptions({
     leg: parsed.leg,
-    includeEntries: false,
-    includeExits: true,
-  });
+    filledClientOrderId: parsed.clientOrderId,
+    activeReservations: protectionBeforeCleanup.activeReservations,
+    reason: "GRID_TP_SIBLING_PROTECTION_CLEANUP",
+  }));
 
   if (remainingQty > 0) {
     const protection = await protectGridOpenLegOrClose({
@@ -4966,6 +5504,12 @@ const handleLiveGridManualCloseFill = async (parsed, reData) => {
       return retryIntent.pending;
     }
 
+    const protectionCleanup = await cleanupLiveGridProtectionAfterFlatClose(
+      refreshed,
+      parsed.leg,
+      "GRID_CLOSE_CONVERGED_PROTECTION_CLEANUP",
+      parsed.clientOrderId
+    );
     await releaseGridLegPositionOwnership(row, parsed.leg);
     const synced = await syncLiveGridRowFromPidState(refreshed, {
       regimeStatus: "ENDED",
@@ -4977,7 +5521,7 @@ const handleLiveGridManualCloseFill = async (parsed, reData) => {
       synced || refreshed,
       "gridLiveManualClose",
       "MANUAL_CLOSE_FILLED",
-      `leg:${parsed.leg}, exitPrice:${toNumber(reData.ap || reData.L)}, qty:${toNumber(reData.l || reData.z)}`,
+      `leg:${parsed.leg}, exitPrice:${toNumber(reData.ap || reData.L)}, qty:${toNumber(reData.l || reData.z)}, protectionCleanup:${protectionCleanup.reason}`,
       parsed.leg
     );
     await finalizeEndedGridRegimeIfIdle(
@@ -5011,8 +5555,57 @@ const handleLiveOrderTradeUpdate = async (uid, data) => {
     const execType = reData.x;
     const endStatus = reData.X;
     if (endStatus === "CANCELED" || endStatus === "EXPIRED" || endStatus === "EXPIRED_IN_MATCH" || endStatus === "REJECTED") {
+      const terminalExecutedQty = toNumber(reData.z || reData.l);
+      if (terminalExecutedQty > 0) {
+        const row = await loadGridItem("LIVE", parsed.pid);
+        if (row && row.uid === parsed.uid) {
+          const repairedRow = await truthSyncLiveGridRow({
+            row,
+            exchangeSnapshotCache: new Map(),
+          }).catch(() => null);
+          await appendGridRuntimeLog(
+            repairedRow || row,
+            "gridRuntimeOrder",
+            "ORDER_TERMINAL_WITH_FILL_RECOVERY",
+            `leg:${parsed.leg}, type:${parsed.type}, status:${endStatus}, executedQty:${terminalExecutedQty}, clientOrderId:${parsed.clientOrderId}, repaired:${Boolean(repairedRow)}`,
+            parsed.leg
+          );
+          setOutcome(`ORDER_${endStatus}_WITH_FILL_RECOVERY`);
+          return true;
+        }
+      }
       if (parsed.type === "GTP" || parsed.type === "GSTOP" || parsed.type === "GMANUAL") {
         await pidPositionLedger.markReservationsCanceled([parsed.clientOrderId]);
+      }
+      if (parsed.type === "GENTRY" && !(terminalExecutedQty > 0)) {
+        const row = await loadGridItem("LIVE", parsed.pid);
+        if (row && row.uid === parsed.uid) {
+          const prefix = getLegFieldPrefix(parsed.leg);
+          if (prefix && row[`${prefix}EntryOrderId`] === parsed.clientOrderId) {
+            await applyGridPatch("live_grid_strategy_list", row.id, {
+              [`${prefix}EntryOrderId`]: null,
+            });
+            await appendGridRuntimeLog(
+              row,
+              "gridLiveEntry",
+              "ENTRY_ORDER_TERMINATED_NO_FILL",
+              `leg:${parsed.leg}, status:${endStatus}, clientOrderId:${parsed.clientOrderId}, terminal:N, refCleared:Y`,
+              parsed.leg
+            );
+          }
+        }
+      }
+      if (parsed.type === "GSTOP" && !(toNumber(reData.z || reData.l) > 0)) {
+        const row = await loadGridItem("LIVE", parsed.pid);
+        if (row && row.uid === parsed.uid) {
+          await appendGridRuntimeLog(
+            row,
+            "gridLiveStop",
+            "STOP_ORDER_TERMINATED_NO_FILL",
+            `leg:${parsed.leg}, status:${endStatus}, clientOrderId:${parsed.clientOrderId}, terminal:N`,
+            parsed.leg
+          );
+        }
       }
       if (parsed.type === "GMANUAL") {
         const row = await loadGridItem("LIVE", parsed.pid);
@@ -5084,5 +5677,8 @@ module.exports = {
   __qa: {
     applyGridEntryFillConvergence,
     restoreLiveGridLegAfterRecoveredEntryFill,
+    buildSiblingProtectionCancelOptions,
+    computeLegStopPrice,
+    getGridSideTriggerMetadata,
   },
 };

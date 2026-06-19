@@ -1,6 +1,8 @@
 "use strict";
 
 const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
 const gridEngine = require("../../grid-engine");
 
 let tests = 0;
@@ -275,6 +277,14 @@ check("terminal state is rejected", () => {
 
 check("static test performs no DB mutation or Binance write", () => {
   assert.strictEqual(true, true);
+});
+
+check("runtime live-cycle only initial-arms flat idle rows", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../../grid-engine.js"), "utf8");
+  assert.ok(source.includes("const canArmInitialLiveEntriesForRow"));
+  assert.ok(source.includes("&& !hasOpenPosition(row)"));
+  assert.ok(source.includes("&& !hasAnyEntryArmed(row)"));
+  assert.ok(source.includes("if (!canArmInitialLiveEntriesForRow(refreshed))"));
 });
 
 console.log(JSON.stringify({ ok: true, tests, dbMutation: 0, binanceWrite: 0 }, null, 2));

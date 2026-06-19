@@ -222,7 +222,8 @@ const loadRowsForUid = async (uid) => {
     redisClient: redisReady,
     mock: true,
   });
-  assert.strictEqual(closeResult.status, orderIntentQueue.STATUS.DONE);
+  assert.strictEqual(closeResult.status, orderIntentQueue.STATUS.BLOCKED);
+  assert.strictEqual(closeResult.reason, orderIntentWorker.SIGNAL_CLOSE_QUEUE_STATE.ACCEPTED_NOT_CONVERGED);
   rows = await loadRowsForUid(closeUid);
   assert.strictEqual(Number(rows[0].result.closeQty), 1, "Signal close qty uses ownership bucket");
 

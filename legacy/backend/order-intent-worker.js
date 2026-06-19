@@ -173,6 +173,74 @@ const GRID_EXIT_MARKET_CLOSE_PLAN_QUEUE_STATE = Object.freeze({
 });
 
 const getLegPrefix = (leg) => (String(leg || "").toUpperCase() === "SHORT" ? "short" : "long");
+const getGridLegSignalSide = (leg) => (String(leg || "").toUpperCase() === "SHORT" ? "SELL" : "BUY");
+
+const toPositiveNumberOrNull = (value) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+};
+
+const buildGridProjectionContextPatch = (payload = {}) => {
+  const supportPrice = toPositiveNumberOrNull(payload.supportPrice || payload.gridPayload?.supportPrice);
+  const resistancePrice = toPositiveNumberOrNull(payload.resistancePrice || payload.gridPayload?.resistancePrice);
+  const triggerPrice = toPositiveNumberOrNull(
+    payload.payloadTriggerPrice ||
+      payload.triggerPrice ||
+      payload.gridPayload?.triggerPrice
+  );
+  const longTriggerPrice = toPositiveNumberOrNull(payload.longTriggerPrice || payload.gridPayload?.longTriggerPrice);
+  const shortTriggerPrice = toPositiveNumberOrNull(payload.shortTriggerPrice || payload.gridPayload?.shortTriggerPrice);
+  const triggerProfile = String(payload.triggerProfile || payload.gridPayload?.triggerProfile || "").trim();
+  const gridRegimeKey = String(payload.gridRegimeKey || payload.regimeKey || payload.gridPayload?.gridRegimeKey || "").trim();
+  const patch = {};
+
+  if (supportPrice) patch.supportPrice = supportPrice;
+  if (resistancePrice) patch.resistancePrice = resistancePrice;
+  if (triggerPrice) patch.triggerPrice = triggerPrice;
+
+  const hasSideTriggerContext = Boolean(longTriggerPrice || shortTriggerPrice || triggerProfile);
+  if (supportPrice || resistancePrice || triggerPrice || hasSideTriggerContext || gridRegimeKey) {
+    patch.lastWebhookPayloadJson = JSON.stringify({
+      eventType: "GRID_CONTEXT_RESTORED",
+      strategySignal: payload.strategySignal || null,
+      symbol: payload.symbol || null,
+      timeframe: payload.timeframe || payload.bunbong || null,
+      supportPrice,
+      resistancePrice,
+      triggerPrice,
+      longTriggerPrice,
+      shortTriggerPrice,
+      triggerProfile: triggerProfile || null,
+      gridRegimeKey: gridRegimeKey || null,
+      contextSource: payload.action || payload.routePath || "ORDER_INTENT_WORKER",
+    });
+  }
+
+  return patch;
+};
+
+const filterGridCancelOpenOrdersByScope = (openOrders = [], payload = {}) => {
+  const includeEntries = payload.includeEntries !== false;
+  const includeExits = payload.includeExits !== false;
+  const targetType = String(payload.targetType || "").trim().toUpperCase();
+  return []
+    .concat(openOrders || [])
+    .filter((order) => {
+      const clientOrderId = String(order.clientOrderId || order.origClientOrderId || order.clientAlgoId || "").trim();
+      const prefix = clientOrderId.split("_")[0];
+      const isEntry = prefix === "GENTRY";
+      const isExit = prefix === "GTP" || prefix === "GSTOP";
+      if (targetType === "PROTECTION") return isExit && includeExits;
+      if (isEntry) return includeEntries;
+      if (isExit) return includeExits;
+      return true;
+    });
+};
+
+const isGridProtectionOnlyCancelProjection = (payload = {}) => {
+  const targetType = String(payload.targetType || "").trim().toUpperCase();
+  return targetType === "PROTECTION" && payload.includeEntries === false && payload.includeExits !== false;
+};
 
 const evaluateActualDispatchGateForIntent = async ({ intent, options = {} } = {}) =>
   await orderIntentDispatchGate.evaluateWorkerActualDispatchGate({
@@ -299,6 +367,7 @@ const updateGridProtectionProjection = async ({ payload = {}, outcome = {}, stat
   const prefix = getLegPrefix(leg);
   const protectionQty = Number(payload.ownedQty || payload.qty || 0);
   const patch = {
+    ...buildGridProjectionContextPatch(payload),
     [`${prefix}LegStatus`]: "OPEN",
     [`${prefix}EntryOrderId`]: payload.entryOrderId || null,
     [`${prefix}Qty`]: protectionQty,
@@ -368,6 +437,7 @@ const loadLiveGridProjectionRow = async (payload = {}) => {
   }
   const [rows] = await db.query(
     `SELECT id, uid, enabled, regimeStatus, regimeEndReason,
+            supportPrice, resistancePrice, triggerPrice, lastWebhookPayloadJson,
             longLegStatus, shortLegStatus, longQty, shortQty,
             longEntryOrderId, shortEntryOrderId, longExitOrderId, shortExitOrderId,
             longStopOrderId, shortStopOrderId
@@ -389,6 +459,19 @@ const shouldPreserveTerminalGridProjection = async ({ payload = {}, projectionTy
   if (regimeStatus !== "ENDED") {
     return { preserve: false, current };
   }
+  const hasActiveLocalContext =
+    Number(current.longQty || 0) > 0 ||
+    Number(current.shortQty || 0) > 0 ||
+    Boolean(current.longEntryOrderId || current.shortEntryOrderId) ||
+    Boolean(current.longExitOrderId || current.shortExitOrderId) ||
+    Boolean(current.longStopOrderId || current.shortStopOrderId);
+  if (hasActiveLocalContext) {
+    return {
+      preserve: false,
+      current,
+      reason: `${projectionType}_TERMINAL_ROW_HAS_ACTIVE_CONTEXT`,
+    };
+  }
   return {
     preserve: true,
     current,
@@ -405,6 +488,7 @@ const updateGridReentryProjection = async ({ payload = {}, state, clientOrderId 
   const leg = String(payload.positionSide || payload.leg || "").toUpperCase();
   const prefix = getLegPrefix(leg);
   const patch = {
+    ...buildGridProjectionContextPatch(payload),
     [`${prefix}LegStatus`]: state === REENTRY_QUEUE_STATE.PENDING ? "ENTRY_ARMED" : "IDLE",
     [`${prefix}EntryOrderId`]: state === REENTRY_QUEUE_STATE.PENDING ? clientOrderId : null,
     [`${prefix}ExitOrderId`]: null,
@@ -434,6 +518,9 @@ const updateGridCancelProjection = async ({ payload = {}, state, reason = null }
   if (!(rowId > 0) || !payload.uid) {
     return false;
   }
+  if (isGridProtectionOnlyCancelProjection(payload)) {
+    return true;
+  }
   const terminalGuard = await shouldPreserveTerminalGridProjection({
     payload,
     projectionType: "GRID_CANCEL_PROJECTION",
@@ -445,14 +532,19 @@ const updateGridCancelProjection = async ({ payload = {}, state, reason = null }
       current: terminalGuard.current,
     };
   }
+  const patch = {
+    ...buildGridProjectionContextPatch(payload),
+    regimeStatus: state,
+    regimeEndReason: reason || state,
+  };
+  const assignments = Object.keys(patch).map((key) => `${key} = ?`).join(", ");
   await db.query(
     `UPDATE live_grid_strategy_list
-        SET regimeStatus = ?,
-            regimeEndReason = ?,
+        SET ${assignments},
             updatedAt = CURRENT_TIMESTAMP
       WHERE id = ?
         AND uid = ?`,
-    [state, reason || state, rowId, Number(payload.uid || 0)]
+    [...Object.values(patch), rowId, Number(payload.uid || 0)]
   );
   return true;
 };
@@ -2358,7 +2450,7 @@ const getGridCancelReadOpenOrders = (options = {}) =>
           payload.pid,
           payload.positionSide || null
         );
-        return { openOrders };
+        return { openOrders: filterGridCancelOpenOrdersByScope(openOrders, payload) };
       };
 
 const completeGridCancelDispatch = async ({
@@ -2451,9 +2543,9 @@ const dispatchGridCancelIntent = async ({ intent, payload = {}, options = {}, ac
     cancelResponse,
     verification,
   });
-  const reason = cancelScopeDiagnostic.noopReason || verification.reason || (status === orderIntentQueue.STATUS.DONE
-    ? CANCEL_QUEUE_STATE.VERIFIED_GONE
-    : CANCEL_QUEUE_STATE.VERIFY_PENDING);
+  const reason = verification.ok && verification.terminal
+    ? (cancelScopeDiagnostic.noopReason || verification.reason || CANCEL_QUEUE_STATE.VERIFIED_GONE)
+    : verification.reason || cancelScopeDiagnostic.noopReason || CANCEL_QUEUE_STATE.VERIFY_PENDING;
 
   return await completeGridCancelDispatch({
     intent,
@@ -2560,7 +2652,11 @@ const processGridCancelIntent = async (intent, options = {}) => {
       cancelResponse,
       verification,
     });
-    const reason = mock.reason || cancelScopeDiagnostic.noopReason || verification.reason;
+    const reason = mock.reason || (
+      verification.ok && verification.terminal
+        ? (cancelScopeDiagnostic.noopReason || verification.reason)
+        : (verification.reason || cancelScopeDiagnostic.noopReason)
+    );
 
     await updateGridCancelProjection({ payload, state: projectionState, reason }).catch(() => {});
     await orderIntentQueue.completeIntent({
@@ -3017,6 +3113,199 @@ const deriveReentryClientOrderId = (payload = {}) => {
   );
 };
 
+const normalizeGridReentryDispatchOrder = (order) => {
+  if (!order) {
+    return null;
+  }
+  return {
+    ...order,
+    ok: order.ok !== false,
+    clientOrderId: order.clientOrderId || order.origClientOrderId || order.requestedClientOrderId || null,
+    orderId: order.orderId || order.sourceOrderId || null,
+    errorCode: order.errorCode || null,
+    errorMessage: order.errorMessage || null,
+  };
+};
+
+const touchGridReentryOwnershipForIntent = async ({ payload = {}, clientOrderId = null, orderId = null } = {}) => {
+  if (!payload.uid || !payload.pid || !payload.symbol || !payload.positionSide) {
+    return false;
+  }
+  const positionSide = String(payload.positionSide || "").toUpperCase();
+  return await positionOwnership.touchPositionBucketOwner({
+    uid: Number(payload.uid),
+    symbol: payload.symbol,
+    positionSide,
+    ownerPid: Number(payload.pid),
+    ownerStrategyCategory: "grid",
+    ownerSignalType: getGridLegSignalSide(positionSide),
+    ownerState: "ENTRY_ARMED",
+    sourceClientOrderId: clientOrderId,
+    sourceOrderId: orderId == null ? null : String(orderId),
+    note: "grid take-profit reentry order placed",
+  });
+};
+
+const getGridReentryDispatcher = (options = {}) =>
+  typeof options.gridReentryDispatcher === "function"
+    ? options.gridReentryDispatcher
+    : async ({ payload, clientOrderId, reentryQty }) => {
+        const coin = require("./coin");
+        if (typeof coin.placeGridEntryOrder !== "function") {
+          throw new Error("coin grid re-entry handler is unavailable");
+        }
+        return await coin.placeGridEntryOrder({
+          uid: payload.uid,
+          pid: payload.pid,
+          symbol: payload.symbol,
+          leg: payload.positionSide || payload.leg,
+          triggerPrice: payload.triggerPrice,
+          qty: reentryQty,
+          marginType: payload.marginType || null,
+          leverage: payload.leverage || null,
+          clientOrderId,
+        });
+      };
+
+const dispatchGridReentryCreateIntent = async ({
+  intent,
+  payload = {},
+  reentryQty = 0,
+  clientOrderId = null,
+  priceDecision = null,
+  options = {},
+  actualDispatchGate = null,
+} = {}) => {
+  const dispatcher = getGridReentryDispatcher(options);
+  let ownershipReservation = null;
+  try {
+    ownershipReservation = await positionOwnership.acquirePositionBucketOwner({
+      uid: payload.uid,
+      symbol: payload.symbol,
+      positionSide: payload.positionSide || payload.leg,
+      ownerPid: payload.pid,
+      ownerStrategyCategory: "grid",
+      ownerSignalType: getGridLegSignalSide(payload.positionSide || payload.leg),
+      ownerState: "ENTRY_ARMED",
+      sourceClientOrderId: clientOrderId,
+      sourceOrderId: null,
+      note: "grid take-profit reentry intent",
+    });
+    if (!ownershipReservation?.ok) {
+      const error = new Error(`REENTRY_OWNERSHIP_FAILED:${ownershipReservation?.reason || "UNKNOWN"}`);
+      error.code = ownershipReservation?.reason || "REENTRY_OWNERSHIP_FAILED";
+      throw error;
+    }
+
+    const dispatchResult = normalizeGridReentryDispatchOrder(
+      await dispatcher({ intent, payload, reentryQty, clientOrderId, options, actualDispatchGate })
+    );
+    if (!dispatchResult?.ok || !dispatchResult.clientOrderId) {
+      const reason = dispatchResult?.errorCode || "REENTRY_SUBMIT_FAILED";
+      await updateGridReentryProjection({
+        payload,
+        state: REENTRY_QUEUE_STATE.FAILED,
+        clientOrderId,
+        reason,
+      }).catch(() => {});
+      await orderIntentQueue.completeIntent({
+        id: intent.id,
+        status: orderIntentQueue.STATUS.FAILED,
+        result: {
+          ok: false,
+          intentType: intent.intentType,
+          fifoKey: intent.fifoKey,
+          dispatchEntered: true,
+          projectionState: REENTRY_QUEUE_STATE.FAILED,
+          reason,
+          clientOrderId: dispatchResult?.clientOrderId || clientOrderId,
+          errorCode: dispatchResult?.errorCode || null,
+          errorMessage: dispatchResult?.errorMessage || null,
+          actualDispatchGate,
+        },
+        errorCode: reason,
+        errorMessage: dispatchResult?.errorMessage || "Grid re-entry dispatch failed.",
+      });
+      await positionOwnership.releasePositionBucketOwner({
+        uid: payload.uid,
+        symbol: payload.symbol,
+        positionSide: payload.positionSide || payload.leg,
+        ownerPid: payload.pid,
+        ownerStrategyCategory: "grid",
+      }).catch(() => {});
+      return { processed: true, status: orderIntentQueue.STATUS.FAILED, reason };
+    }
+
+    await touchGridReentryOwnershipForIntent({
+      payload,
+      clientOrderId: dispatchResult.clientOrderId,
+      orderId: dispatchResult.orderId || null,
+    }).catch(() => {});
+    await updateGridReentryProjection({
+      payload,
+      state: REENTRY_QUEUE_STATE.PENDING,
+      clientOrderId: dispatchResult.clientOrderId,
+    }).catch(() => {});
+
+    const result = {
+      ok: true,
+      mock: false,
+      dryRun: false,
+      intentType: intent.intentType,
+      fifoKey: intent.fifoKey,
+      dispatchEntered: true,
+      projectionState: REENTRY_QUEUE_STATE.PENDING,
+      clientOrderId: dispatchResult.clientOrderId,
+      orderId: dispatchResult.orderId || null,
+      reentryQty,
+      triggerPrice: payload.triggerPrice,
+      priceDecision,
+      actualDispatchGate,
+    };
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.DONE,
+      result,
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.DONE, reason: REENTRY_QUEUE_STATE.PENDING };
+  } catch (error) {
+    const reason = error?.code || "REENTRY_SUBMIT_FAILED";
+    await updateGridReentryProjection({
+      payload,
+      state: REENTRY_QUEUE_STATE.FAILED,
+      clientOrderId,
+      reason,
+    }).catch(() => {});
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.FAILED,
+      result: {
+        ok: false,
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        dispatchEntered: true,
+        projectionState: REENTRY_QUEUE_STATE.FAILED,
+        reason,
+        clientOrderId,
+        error: error?.message || String(error),
+        actualDispatchGate,
+      },
+      errorCode: reason,
+      errorMessage: error?.message || "Grid re-entry dispatch failed.",
+    });
+    if (ownershipReservation?.ok) {
+      await positionOwnership.releasePositionBucketOwner({
+        uid: payload.uid,
+        symbol: payload.symbol,
+        positionSide: payload.positionSide || payload.leg,
+        ownerPid: payload.pid,
+        ownerStrategyCategory: "grid",
+      }).catch(() => {});
+    }
+    return { processed: true, status: orderIntentQueue.STATUS.FAILED, reason };
+  }
+};
+
 const processGridReentryCreateIntent = async (intent, options = {}) => {
   const env = options.env || process.env;
   const payload = intent?.payload?.reentry || intent?.payload || {};
@@ -3183,6 +3472,19 @@ const processGridReentryCreateIntent = async (intent, options = {}) => {
       result,
     });
     return { processed: true, status: orderIntentQueue.STATUS.DONE, reason: REENTRY_QUEUE_STATE.PENDING };
+  }
+
+  const actualDispatchGate = await evaluateActualDispatchGateForIntent({ intent, options });
+  if (actualDispatchGate.allowed) {
+    return await dispatchGridReentryCreateIntent({
+      intent,
+      payload,
+      reentryQty,
+      clientOrderId,
+      priceDecision,
+      options,
+      actualDispatchGate,
+    });
   }
 
   return await blockIntentByActualDispatchGate({
@@ -4225,4 +4527,9 @@ module.exports = {
   startOrderIntentWorker,
   stopOrderIntentWorker,
   getOrderIntentWorkerHealth,
+  __qa: {
+    buildGridProjectionContextPatch,
+    filterGridCancelOpenOrdersByScope,
+    isGridProtectionOnlyCancelProjection,
+  },
 };

@@ -7,8 +7,18 @@ const loadCoinQaModule = () => {
   const source = fs.readFileSync(targetPath, "utf8");
   const appended = `${source}
 
+const __qaBinanceProxy = new Proxy(binance, {
+  set(target, property, value) {
+    if (value && typeof value === "object") {
+      markQaReplayMockBinanceClient(value);
+    }
+    target[property] = value;
+    return true;
+  },
+});
+
 module.exports.__qa = {
-  binance,
+  binance: __qaBinanceProxy,
   buildSignalTruthSyncOrderBy,
   loadLiveSignalTruthSyncRows,
   truthSyncLiveSignalPlay,

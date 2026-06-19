@@ -8,6 +8,7 @@ dayjs.extend(utc);
 
 const {
   parseDatabaseUtcDateTime,
+  normalizeSignalTimeToUtcString,
   getSignalEntryPendingStaleInfo,
 } = require("../../signal-stale-time");
 
@@ -29,6 +30,12 @@ assert.strictEqual(
   parseDatabaseUtcDateTime("2026-05-05 15:15:04").toISOString(),
   "2026-05-05T15:15:04.000Z",
   "DB DATETIME string parses as UTC"
+);
+
+assert.strictEqual(
+  normalizeSignalTimeToUtcString(mysql2LocalDate),
+  "2026-05-05 15:15:04",
+  "Signal intent identity time is normalized to UTC wall-clock text"
 );
 
 const immediate = getSignalEntryPendingStaleInfo(

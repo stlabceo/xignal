@@ -119,6 +119,14 @@ assert.deepStrictEqual(
 const gridEngineSource = fs.readFileSync(path.resolve(__dirname, "../../grid-engine.js"), "utf8");
 const coinSource = fs.readFileSync(path.resolve(__dirname, "../../coin.js"), "utf8");
 const canonicalSource = fs.readFileSync(path.resolve(__dirname, "../../canonical-runtime-state.js"), "utf8");
+const orderIntentQueueSource = fs.readFileSync(path.resolve(__dirname, "../../order-intent-queue.js"), "utf8");
+
+assert(
+  orderIntentQueueSource.includes("const protectionUnitIdentity = normalized.entryOrderId") &&
+    orderIntentQueueSource.indexOf("normalized.entryOrderId") <
+      orderIntentQueueSource.indexOf("normalized.sourceOrderId", orderIntentQueueSource.indexOf("const protectionUnitIdentity")),
+  "GRID_PROTECTION_CREATE intent key must prioritize entryOrderId over source trade/order evidence"
+);
 
 for (const snippet of [
   "protectGridOpenLegOrClose",
@@ -138,6 +146,33 @@ assert.ok(
     coinSource.includes("requestedClientOrderId") &&
     coinSource.includes("immediateTrigger"),
   "coin.js should preserve deterministic protection id and expose -2021 immediate trigger"
+);
+assert.ok(
+  coinSource.includes("GRID_RESERVATION_EXIT_RECOVERY_SKIPPED_OPEN_ALGO_ACTIVE") &&
+    coinSource.includes("isReservationOpenAlgoActive") &&
+    coinSource.indexOf("isReservationOpenAlgoActive(reservation)") <
+      coinSource.indexOf(
+        "loadGridExitOrderByReservation",
+        coinSource.indexOf("isReservationOpenAlgoActive(reservation)")
+      ),
+  "active openAlgo protection must skip direct order lookup recovery"
+);
+const reservationRecoverySource = coinSource.slice(
+  coinSource.indexOf("const loadGridReservationOwnedExitExecutionsFromExchange"),
+  coinSource.indexOf("exports.recoverGridExitFillFromExchange")
+);
+assert.ok(
+  reservationRecoverySource.indexOf("const recoveryReservations") <
+    reservationRecoverySource.indexOf("futuresAllOrders"),
+  "active openAlgo protection must be filtered before allOrders/userTrades recovery reads"
+);
+const truthSyncLoaderSource = coinSource.slice(
+  coinSource.indexOf("const loadLiveGridTruthSyncRows"),
+  coinSource.indexOf("const canRunGridTruthSync")
+);
+assert.ok(
+  !truthSyncLoaderSource.includes("OR regimeStatus <> 'WAITING_WEBHOOK'"),
+  "grid truth-sync candidates must not include disabled terminal rows by regimeStatus alone"
 );
 assert.ok(
   canonicalSource.includes("GRID_PARTIAL_PROTECTION") &&
