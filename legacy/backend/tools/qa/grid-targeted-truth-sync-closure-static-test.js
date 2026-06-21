@@ -23,7 +23,7 @@ mustInclude(coin, "GRID_TARGETED_TRUTH_SYNC_REPEAT_COOLDOWN_MS", "repeat cooldow
 mustInclude(coin, "GRID_TARGETED_TRUTH_SYNC_IN_FLIGHT_LOCK_TTL_MS", "in-flight lock TTL must be explicit");
 mustInclude(coin, "GRID_TARGETED_TRUTH_SYNC_TERMINAL_SUPPRESSION_MS", "terminal suppression must be explicit");
 mustInclude(coin, "setTimeout(() =>", "first verify grace must be a separate scheduler delay");
-mustInclude(coin, "getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_FIRST_VERIFY_GRACE_MS', 2500, 1)", "first verify grace must default safely and reject invalid env values");
+mustInclude(coin, "getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_FIRST_VERIFY_GRACE_MS', 5000, 1)", "first verify grace must default safely and reject invalid env values");
 mustInclude(coin, "if(!Number.isFinite(parsed))", "targeted truth-sync env parser must reject NaN/invalid values");
 mustInclude(coin, "firstVerifyGraceMsOverride", "follow-up scheduler must be able to bypass the initial broad grace safely");
 mustInclude(coin, "? Number(firstVerifyGraceMsOverride)", "first verify delay must accept an explicit positive override");

@@ -10,7 +10,7 @@ const coin = fs.readFileSync(path.join(root, "coin.js"), "utf8");
 const mustInclude = (needle, message) => assert(coin.includes(needle), message || `missing ${needle}`);
 const mustNotInclude = (needle, message) => assert(!coin.includes(needle), message || `unexpected ${needle}`);
 
-mustInclude("getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_FIRST_VERIFY_GRACE_MS', 2500, 1)", "first verify grace must be configurable and default above zero");
+mustInclude("getGridTargetedTruthSyncEnvNumber('GRID_TARGETED_TRUTH_SYNC_FIRST_VERIFY_GRACE_MS', 5000, 1)", "first verify grace must be configurable and default above zero");
 mustInclude("if(!Number.isFinite(parsed))", "invalid targeted truth-sync env values must fall back safely");
 mustInclude("const firstVerifyGraceMs = Math.max(", "scheduled grace must be clamped above zero");
 mustInclude("? Number(firstVerifyGraceMsOverride)", "exact follow-up must be able to override the broad grace safely");
