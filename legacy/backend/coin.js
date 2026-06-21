@@ -57,8 +57,11 @@ const accountRiskSnapshotCache = {};
 const futuresTimeSyncState = binanceWriteTimeSync.createFuturesTimeSyncState();
 const DEBUG_RUNTIME_TRACE = process.env.DEBUG_TIME_EXPIRY === '1' || process.env.DEBUG_RUNTIME_TRACE === '1';
 const isQaReplayMode = binanceWriteGuard.isQaReplayMode;
+const isOrderIntentWorkerSignalDirectDispatch = (options = {}) =>
+    options.orderIntentWorkerActualDispatch === true;
 const isLegacySignalDirectWriteOverride = (options = {}) =>
-    options.useDurableSignalQueue === false && process.env.ALLOW_LEGACY_SIGNAL_DIRECT_WRITE === '1';
+    isOrderIntentWorkerSignalDirectDispatch(options)
+    || (options.useDurableSignalQueue === false && process.env.ALLOW_LEGACY_SIGNAL_DIRECT_WRITE === '1');
 
 let io = null;
 const FUTURES_BASE_URL = 'https://fapi.binance.com';
@@ -7534,6 +7537,23 @@ const recoverSignalExitFillFromExchange = async ({
         await pidPositionLedger.syncSignalPlaySnapshot(row.id, positionSide);
     }
 
+    if(timeExitRecovery && (appliedFillCount > 0 || duplicateFillCount > 0)){
+        const convergedSnapshot = await pidPositionLedger.loadSnapshot({
+            uid,
+            pid: row.id,
+            strategyCategory: 'signal',
+            positionSide,
+        });
+        await completeSignalTimeExitIntentAfterConvergence({
+            uid,
+            pid: row.id,
+            positionSide,
+            clientOrderIds: recoveredFills.map((fill) => fill?.clientOrderId || null),
+            orderIds: recoveredFills.map((fill) => fill?.orderId || null).filter(Boolean),
+            remainingQty: Number(convergedSnapshot?.openQty || 0),
+        });
+    }
+
     exports.msgAdd(
         'signalReconcile',
         'EXIT_FILL_RECOVERED',
@@ -7547,6 +7567,222 @@ const recoverSignalExitFillFromExchange = async ({
 
     return execution;
 }
+
+const parseJsonSafeForSignalQueue = (value, fallback = {}) => {
+    if(!value){
+        return fallback;
+    }
+
+    try{
+        return typeof value === 'string' ? JSON.parse(value) : value;
+    }catch(error){
+        return fallback;
+    }
+};
+
+const completeSignalTimeExitIntentAfterConvergence = async ({
+    uid,
+    pid,
+    positionSide,
+    clientOrderIds = [],
+    orderIds = [],
+    remainingQty = 0,
+} = {}) => {
+    const uniqueClientOrderIds = Array.from(new Set(
+        (clientOrderIds || [])
+            .map((value) => String(value || '').trim())
+            .filter(Boolean)
+    ));
+    if(!uid || !pid || uniqueClientOrderIds.length === 0 || Number(remainingQty || 0) > 1e-9){
+        return 0;
+    }
+
+    let completedCount = 0;
+    for(const clientOrderId of uniqueClientOrderIds){
+        const [rows] = await db.query(
+            `SELECT id, resultJson
+               FROM order_intent_queue
+              WHERE uid = ?
+                AND pid = ?
+                AND strategyCategory = 'signal'
+                AND intentType = ?
+                AND status = ?
+                AND (
+                  LOCATE(?, COALESCE(intentKey, '')) > 0
+                  OR LOCATE(?, COALESCE(payloadJson, '')) > 0
+                  OR LOCATE(?, COALESCE(resultJson, '')) > 0
+                )
+              ORDER BY id DESC
+              LIMIT 1`,
+            [
+                uid,
+                pid,
+                orderIntentQueue.INTENT_TYPE.SIGNAL_STOP_TIME_EXIT,
+                orderIntentQueue.STATUS.BLOCKED,
+                clientOrderId,
+                clientOrderId,
+                clientOrderId,
+            ]
+        );
+        const rowToComplete = rows?.[0] || null;
+        if(!rowToComplete){
+            continue;
+        }
+
+        const currentResult = parseJsonSafeForSignalQueue(rowToComplete.resultJson, {});
+        await orderIntentQueue.completeIntent({
+            id: rowToComplete.id,
+            status: orderIntentQueue.STATUS.DONE,
+            result: {
+                ...currentResult,
+                ok: true,
+                closeConverged: true,
+                projectionState: 'SIGNAL_CLOSE_CONVERGED',
+                reason: 'SIGNAL_CLOSE_CONVERGED',
+                closeClientOrderId: clientOrderId,
+                orderIds,
+                remainingQty: 0,
+                positionSide,
+            },
+            errorCode: null,
+            errorMessage: null,
+        });
+        completedCount += 1;
+    }
+
+    if(completedCount > 0){
+        logOrderRuntimeTrace('SIGNAL_TIME_EXIT_QUEUE_CONVERGED', {
+            uid,
+            pid,
+            positionSide,
+            clientOrderIds: uniqueClientOrderIds,
+            completedCount,
+        });
+    }
+
+    return completedCount;
+};
+
+const completeConvergedSignalTimeExitIntentsForRow = async ({
+    uid,
+    row,
+} = {}) => {
+    if(!uid || !row?.id){
+        return 0;
+    }
+
+    const resolvedSignalType = getResolvedLiveSignalType(row);
+    const positionSide = getSignalPositionSide(resolvedSignalType);
+    if(!positionSide){
+        return 0;
+    }
+
+    const snapshot = await pidPositionLedger.loadSnapshot({
+        uid,
+        pid: row.id,
+        strategyCategory: 'signal',
+        positionSide,
+    });
+    if(
+        !snapshot
+        || String(snapshot.status || '').toUpperCase() !== 'CLOSED'
+        || Number(snapshot.openQty || 0) > 1e-9
+    ){
+        return 0;
+    }
+
+    const [blockedRows] = await db.query(
+        `SELECT id, intentKey, payloadJson, resultJson
+           FROM order_intent_queue
+          WHERE uid = ?
+            AND pid = ?
+            AND strategyCategory = 'signal'
+            AND intentType = ?
+            AND status = ?
+            AND lastErrorCode = ?
+          ORDER BY id ASC`,
+        [
+            uid,
+            row.id,
+            orderIntentQueue.INTENT_TYPE.SIGNAL_STOP_TIME_EXIT,
+            orderIntentQueue.STATUS.BLOCKED,
+            'SIGNAL_CLOSE_ACCEPTED_NOT_CONVERGED',
+        ]
+    );
+    if(!Array.isArray(blockedRows) || blockedRows.length === 0){
+        return 0;
+    }
+
+    let completedCount = 0;
+    for(const blockedRow of blockedRows){
+        const payload = parseJsonSafeForSignalQueue(blockedRow.payloadJson, {});
+        const result = parseJsonSafeForSignalQueue(blockedRow.resultJson, {});
+        const clientOrderId = String(
+            result.closeClientOrderId
+            || result.clientOrderId
+            || payload.closeClientOrderId
+            || payload.clientOrderId
+            || ''
+        ).trim();
+        if(!clientOrderId){
+            continue;
+        }
+
+        const [reservationRows] = await db.query(
+            `SELECT id, actualOrderId, filledQty, status
+               FROM live_pid_exit_reservation
+              WHERE uid = ?
+                AND pid = ?
+                AND strategyCategory = 'signal'
+                AND positionSide = ?
+                AND reservationKind = 'MARKET_TIME'
+                AND clientOrderId = ?
+                AND status = 'FILLED'
+                AND filledQty > 0
+              ORDER BY id DESC
+              LIMIT 1`,
+            [uid, row.id, positionSide, clientOrderId]
+        );
+        const timeReservation = reservationRows?.[0] || null;
+        if(!timeReservation){
+            continue;
+        }
+
+        const [ledgerRows] = await db.query(
+            `SELECT id, sourceOrderId
+               FROM live_pid_position_ledger
+              WHERE uid = ?
+                AND pid = ?
+                AND strategyCategory = 'signal'
+                AND positionSide = ?
+                AND eventType = 'EXCHANGE_RECONCILED_EXIT_FILL'
+                AND sourceClientOrderId = ?
+                AND openQtyAfter <= 0.000000001
+              ORDER BY id DESC
+              LIMIT 1`,
+            [uid, row.id, positionSide, clientOrderId]
+        );
+        const exitLedger = ledgerRows?.[0] || null;
+        if(!exitLedger){
+            continue;
+        }
+
+        completedCount += await completeSignalTimeExitIntentAfterConvergence({
+            uid,
+            pid: row.id,
+            positionSide,
+            clientOrderIds: [clientOrderId],
+            orderIds: [
+                result.orderId,
+                timeReservation.actualOrderId,
+                exitLedger.sourceOrderId,
+            ].filter(Boolean),
+            remainingQty: 0,
+        });
+    }
+
+    return completedCount;
+};
 
 const recoverSignalEntryFillFromExchange = async ({
     uid,
@@ -10754,6 +10990,18 @@ exports.truthSyncLiveSignalRuntime = async (uid, options = {}) => {
             r_qty: Number(row.r_qty || 0),
             r_exactPrice: Number(row.r_exactPrice || 0),
         });
+        const completedTimeExitIntents = await completeConvergedSignalTimeExitIntentsForRow({
+            uid,
+            row,
+        });
+        if(completedTimeExitIntents > 0){
+            repaired.push({
+                pid: row.id,
+                symbol: row.symbol,
+                repaired: 'SIGNAL_TIME_EXIT_QUEUE_CONVERGED',
+                completedTimeExitIntents,
+            });
+        }
         const repairedRow = await truthSyncLiveSignalPlay({
             row,
             exchangeSnapshotCache,
@@ -14468,7 +14716,7 @@ exports.sendForcing = async (type = null, symbol = null, side = null, userQty = 
         return sendData;
     }
     
-    const clientOrderId = getCloseClientOrderId(type, uid, pid, r_tid);
+    const clientOrderId = options.closeClientOrderId || getCloseClientOrderId(type, uid, pid, r_tid);
     let submittedCloseOrderId = null;
     let positionSide = null;
     let closeQty = 0;
@@ -14563,7 +14811,7 @@ exports.sendForcing = async (type = null, symbol = null, side = null, userQty = 
         );
 
         if(pid){
-            await cancelBoundExitOrders(uid, symbol, pid);
+            await cancelBoundExitOrders(uid, symbol, pid, null, options);
         }
 
         const closeOrder = await submitFuturesOrder(
@@ -14618,6 +14866,11 @@ exports.sendForcing = async (type = null, symbol = null, side = null, userQty = 
             });
         }
         sendData.status = true;
+        sendData.orderId = submittedCloseOrderId;
+        sendData.closeClientOrderId = clientOrderId;
+        sendData.closeQty = closeQty;
+        sendData.side = side == 'BUY' ? 'SELL' : 'BUY';
+        sendData.positionSide = positionSide;
         return sendData;
     }catch(e){
         const errorInfo = extractBinanceError(e);
@@ -14636,6 +14889,11 @@ exports.sendForcing = async (type = null, symbol = null, side = null, userQty = 
 
                 if(isRecoverableExchangeOrder(recoveredOrder)){
                     sendData.status = true;
+                    sendData.orderId = recoveredOrder?.orderId || submittedCloseOrderId || null;
+                    sendData.closeClientOrderId = recoveredOrder?.clientOrderId || clientOrderId;
+                    sendData.closeQty = closeQty;
+                    sendData.side = side == 'BUY' ? 'SELL' : 'BUY';
+                    sendData.positionSide = positionSide;
                     sendData.errMsg = toRuntimeMessage(sendData.errMsg, describeOrderForLog(recoveredOrder));
                     return sendData;
                 }
@@ -14693,6 +14951,11 @@ exports.sendForcing = async (type = null, symbol = null, side = null, userQty = 
                         });
                     }
                     sendData.status = true;
+                    sendData.orderId = retriedOrder?.orderId || submittedCloseOrderId || null;
+                    sendData.closeClientOrderId = clientOrderId;
+                    sendData.closeQty = closeQty;
+                    sendData.side = side == 'BUY' ? 'SELL' : 'BUY';
+                    sendData.positionSide = positionSide;
                     sendData.errMsg = toRuntimeMessage(sendData.errMsg, `retryOrderId:${retriedOrder.orderId}`);
                     return sendData;
                 }
@@ -14735,6 +14998,11 @@ exports.sendForcing = async (type = null, symbol = null, side = null, userQty = 
                         });
                     }
                     sendData.status = true;
+                    sendData.orderId = queriedOrder?.orderId || submittedCloseOrderId || null;
+                    sendData.closeClientOrderId = queriedOrder?.clientOrderId || clientOrderId;
+                    sendData.closeQty = closeQty;
+                    sendData.side = side == 'BUY' ? 'SELL' : 'BUY';
+                    sendData.positionSide = positionSide;
                     sendData.errMsg = toRuntimeMessage(sendData.errMsg, describeOrderForLog(queriedOrder));
                     return sendData;
                 }
@@ -14778,9 +15046,54 @@ exports.sendForcing = async (type = null, symbol = null, side = null, userQty = 
     }
 }
 
+exports.dispatchSignalCloseFromIntent = async ({
+    intent = null,
+    payload = {},
+    closeQty = 0,
+    actualDispatchGate = null,
+} = {}) => {
+    const uid = Number(payload.uid || intent?.uid || 0);
+    const pid = Number(payload.pid || intent?.pid || 0);
+    const symbol = String(payload.symbol || '').trim().toUpperCase();
+    const side = String(payload.side || '').trim().toUpperCase();
+    const requestedQty = Number(closeQty || payload.qty || payload.ownedQtyBasis || 0);
+    const intentType = String(intent?.intentType || payload.intentType || '').trim().toUpperCase();
+    const reason = String(payload.reason || '').trim().toUpperCase();
+    const closeType = intentType === orderIntentQueue.INTENT_TYPE.SIGNAL_STOP_TIME_EXIT || reason.includes('TIME')
+        ? 'TIME'
+        : 'FORCED_CLOSE';
 
+    const dispatchResult = await exports.sendForcing(
+        closeType,
+        symbol,
+        side,
+        requestedQty,
+        uid,
+        pid,
+        payload.rTid || payload.r_tid || payload.sourceEventId || intent?.sourceEventId || null,
+        payload.limitST || 'N',
+        {
+            useDurableSignalQueue: false,
+            orderIntentWorkerActualDispatch: true,
+            closeClientOrderId: payload.closeClientOrderId || null,
+        }
+    );
 
-
+    const ok = dispatchResult?.status === true;
+    return {
+        ok,
+        reason: ok ? 'SIGNAL_CLOSE_SUBMITTED' : (dispatchResult?.errCode || dispatchResult?.errAction || 'SIGNAL_CLOSE_SUBMIT_FAILED'),
+        errorMessage: ok ? null : (dispatchResult?.errMsg || 'Signal close dispatch failed'),
+        orderId: dispatchResult?.orderId || null,
+        closeClientOrderId: dispatchResult?.closeClientOrderId || payload.closeClientOrderId || null,
+        closeQty: Number(dispatchResult?.closeQty || requestedQty || 0),
+        reduceOnly: true,
+        positionSide: dispatchResult?.positionSide || payload.positionSide || getSignalPositionSide(side),
+        side: dispatchResult?.side || (side === 'BUY' ? 'SELL' : 'BUY'),
+        actualDispatchGate,
+        raw: dispatchResult,
+    };
+};
 
 exports.sendEnter = async (symbol = null, side = null, lv = null, userMargin = null, uid = null, pid = null, limitST = 'N', enterPrice = null) => {
     if(!symbol){

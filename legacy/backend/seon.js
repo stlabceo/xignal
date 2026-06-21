@@ -1484,7 +1484,7 @@ const runPlayLive = async (st_ = false) => {
                         endType = pendingCloseReason === 'reverse-signal' ? 'STOP' : 'MANUAL';
                     }
 
-                    const timeExpiryState = getTimeExpiryState(play);
+                    const timeExpiryState = getTimeExpiryState(play, dayjs.utc(), { dateObjectAsUtcWallClock: true });
                     logTimeExpiryDebug('live', play, timeExpiryState);
                     if(!endType && timeExpiryState.triggered){
                         endType = 'STOP';

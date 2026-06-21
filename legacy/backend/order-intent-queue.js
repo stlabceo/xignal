@@ -5472,16 +5472,69 @@ const enqueueSignalCloseIntent = async ({
   );
 
   const inserted = Number(result?.affectedRows || 0) === 1;
+  let requeued = 0;
+  let existingIntentId = null;
+  if (!inserted) {
+    const [existingRows] = await db.query(
+      `SELECT id, status, lastErrorMessage
+         FROM order_intent_queue
+        WHERE intentKey = ?
+        LIMIT 1`,
+      [intentKey]
+    );
+    const existing = existingRows?.[0] || null;
+    existingIntentId = existing?.id || null;
+    const existingStatus = String(existing?.status || "").trim().toUpperCase();
+    const recoverableHandlerFailure =
+      resolvedIntentType === INTENT_TYPE.SIGNAL_STOP_TIME_EXIT &&
+      existingStatus === STATUS.FAILED &&
+      /handler is unavailable/i.test(String(existing?.lastErrorMessage || ""));
+
+    if (recoverableHandlerFailure) {
+      const [updateResult] = await db.query(
+        `UPDATE order_intent_queue
+            SET status = ?,
+                attemptCount = 0,
+                lockedBy = NULL,
+                lockedAt = NULL,
+                availableAt = NOW(),
+                startedAt = NULL,
+                finishedAt = NULL,
+                sourceEventId = ?,
+                payloadHash = ?,
+                payloadJson = ?,
+                resultJson = NULL,
+                lastErrorCode = NULL,
+                lastErrorMessage = NULL,
+                updatedAt = NOW()
+          WHERE id = ?
+            AND status = ?
+          LIMIT 1`,
+        [
+          STATUS.PENDING,
+          sourceEventId,
+          payloadHash,
+          safeJsonStringify(intentPayload),
+          existing.id,
+          STATUS.FAILED,
+        ]
+      );
+      requeued = Number(updateResult?.affectedRows || 0) === 1 ? 1 : 0;
+    }
+  }
+
   return {
     requested: 1,
     inserted: inserted ? 1 : 0,
-    duplicate: inserted ? 0 : 1,
+    requeued,
+    duplicate: inserted || requeued ? 0 : 1,
+    existingIntentId,
     intent: {
       intentKey,
       fifoKey,
       uid: normalized.uid,
       pid: normalized.pid,
-      status: inserted ? STATUS.PENDING : "DUPLICATE",
+      status: inserted || requeued ? STATUS.PENDING : "DUPLICATE",
       payloadHash,
       intentType: resolvedIntentType,
       closeClientOrderId: normalized.closeClientOrderId,

@@ -21,6 +21,11 @@ assert.strictEqual(
   "function",
   "coin.dispatchSignalProtectionOrdersFromIntent must be exported for SIGNAL_PROTECTION_CREATE dispatch"
 );
+assert.strictEqual(
+  typeof coin.dispatchSignalCloseFromIntent,
+  "function",
+  "coin.dispatchSignalCloseFromIntent must be exported for SIGNAL_FORCED_CLOSE/SIGNAL_STOP_TIME_EXIT dispatch"
+);
 
 assert(
   workerSource.includes("coin.confirmSignalMarketEntryAfterAccepted"),
@@ -29,6 +34,10 @@ assert(
 assert(
   workerSource.includes("coin.dispatchSignalProtectionOrdersFromIntent"),
   "order-intent-worker must call the Signal protection dispatch handler"
+);
+assert(
+  workerSource.includes("coin.dispatchSignalCloseFromIntent"),
+  "order-intent-worker must call the Signal close dispatch handler"
 );
 assert(
   coinSource.includes("entryIntentId") && coinSource.includes("ownerRowId"),
@@ -41,6 +50,11 @@ assert(
 assert(
   coinSource.includes("placeBoundExitOrder"),
   "Signal protection handler must reuse the canonical bound exit order creator"
+);
+assert(
+  coinSource.includes("orderIntentWorkerActualDispatch") &&
+    coinSource.includes("closeClientOrderId: payload.closeClientOrderId"),
+  "Signal close handler must reuse canonical sendForcing close dispatch without requeueing"
 );
 
 console.log("signal-live-handler-availability-static-test PASS");

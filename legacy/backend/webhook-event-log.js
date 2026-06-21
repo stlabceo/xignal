@@ -125,6 +125,44 @@ const insertWebhookEventLog = async (event = {}) => {
   }
 };
 
+const updateWebhookEventLogOutcome = async (eventId, outcome = {}) => {
+  if (!eventId) {
+    return false;
+  }
+
+  try {
+    const [result] = await db.query(
+      `UPDATE webhook_event_log
+          SET status = ?,
+              result_code = ?,
+              matched_count = ?,
+              processed_count = ?,
+              ignored_count = ?,
+              http_status = ?,
+              note = ?,
+              response_body = ?
+        WHERE id = ?
+        LIMIT 1`,
+      [
+        String(outcome.status || "PROCESSED").trim().toUpperCase(),
+        String(outcome.resultCode || "PROCESSED").trim().toUpperCase(),
+        Number(outcome.matchedCount || 0),
+        Number(outcome.processedCount || 0),
+        Number(outcome.ignoredCount || 0),
+        outcome.httpStatus || null,
+        outcome.note || null,
+        safeJsonStringify(outcome.responseBody),
+        Number(eventId),
+      ]
+    );
+
+    return Number(result?.affectedRows || 0) > 0;
+  } catch (error) {
+    console.log("[webhook-log] outcome update failed", error?.message || error);
+    return false;
+  }
+};
+
 const insertWebhookEventTargetLogs = async (eventId, items = []) => {
   if (!eventId || !Array.isArray(items) || !items.length) {
     return 0;
@@ -194,5 +232,6 @@ module.exports = {
   safeJsonStringify,
   buildWebhookPayloadHash,
   insertWebhookEventLog,
+  updateWebhookEventLogOutcome,
   insertWebhookEventTargetLogs,
 };

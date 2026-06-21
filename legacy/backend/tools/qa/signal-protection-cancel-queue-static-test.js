@@ -124,7 +124,7 @@ const buildClosePayload = ({
 
 const loadRowsForUid = async (uid) => {
   const [rows] = await db.query(
-    `SELECT id, intentKey, fifoKey, uid, pid, intentType, status, resultJson, lastErrorCode
+    `SELECT id, intentKey, fifoKey, uid, pid, intentType, status, resultJson, lastErrorCode, lastErrorMessage
        FROM order_intent_queue
       WHERE uid = ?
       ORDER BY id ASC`,
@@ -236,6 +236,23 @@ const loadRowsForUid = async (uid) => {
     routePath: "qa-signal-time-exit-test",
   });
   assert.strictEqual(timeExit.inserted, 1, "Signal stop/time exit intent queued");
+  rows = await loadRowsForUid(timeUid);
+  await orderIntentQueue.completeIntent({
+    id: rows[0].id,
+    status: orderIntentQueue.STATUS.FAILED,
+    result: { ok: false, reason: "SIGNAL_CLOSE_FAILED" },
+    errorCode: "SIGNAL_CLOSE_FAILED",
+    errorMessage: "Signal close failed:coin.dispatchSignalCloseFromIntent handler is unavailable",
+  });
+  const timeExitRequeue = await orderIntentQueue.enqueueSignalCloseIntent({
+    intentType: orderIntentQueue.INTENT_TYPE.SIGNAL_STOP_TIME_EXIT,
+    payload: buildClosePayload({ uid: timeUid, pid: 9521, qty: 1, reason: "TIME" }),
+    routePath: "qa-signal-time-exit-test",
+  });
+  assert.strictEqual(timeExitRequeue.requeued, 1, "recoverable handler-missing Signal time exit failure must requeue");
+  rows = await loadRowsForUid(timeUid);
+  assert.strictEqual(rows[0].status, orderIntentQueue.STATUS.PENDING);
+  assert.strictEqual(rows[0].lastErrorCode, null);
   await cleanupUid(timeUid);
 
   const overUid = BASE_UID + 22;
