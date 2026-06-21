@@ -20,6 +20,8 @@ const binanceWriteTimeSync = require("./binance-write-time-sync");
 const gridPriceSource = require("./grid-price-source");
 const orderIntentQueue = require("./order-intent-queue");
 const gridBinanceStatusClassifier = require("./grid-binance-status-classifier");
+const signalEntryConvergence = require("./signal-entry-convergence");
+const gridProtectionGuarantee = require("./grid-protection-guarantee");
 let gridEngine = null;
 let policyEngine = null;
 const Binance = require('node-binance-api');
@@ -11286,7 +11288,17 @@ const placeBoundExitOrder = async ({
     }
 }
 
-const syncLiveBoundExitOrders = async ({ uid, pid, symbol, entryOrderId = null, entryPrice = 0, qty = 0, useDurableSignalQueue = true }) => {
+const syncLiveBoundExitOrders = async ({
+    uid,
+    pid,
+    symbol,
+    entryOrderId = null,
+    entryPrice = 0,
+    qty = 0,
+    useDurableSignalQueue = true,
+    entryIntentId = null,
+    ownerRowId = null,
+}) => {
     if(!uid || !pid || !symbol){
         return false;
     }
@@ -11511,6 +11523,8 @@ const syncLiveBoundExitOrders = async ({ uid, pid, symbol, entryOrderId = null, 
                     splitStageQty,
                     splitStageIndex: Number(splitContext?.stageIndex || 0),
                     boundType: nextBoundType,
+                    entryIntentId,
+                    ownerRowId,
                     reason: isSplitTp ? 'SIGNAL_SPLIT_TP_CREATE' : 'SIGNAL_PROTECTION_CREATE',
                 },
             });
@@ -11703,6 +11717,411 @@ const syncLiveBoundExitOrders = async ({ uid, pid, symbol, entryOrderId = null, 
         return false;
     }
     });
+}
+
+const buildSignalProtectionHandlerOrderError = (kind, errorOrCode, message = null) => {
+    if(errorOrCode instanceof Error || errorOrCode?.response || errorOrCode?.message){
+        const info = extractBinanceError(errorOrCode);
+        return {
+            kind,
+            clientOrderId: null,
+            orderId: null,
+            errorCode: info.code || errorOrCode?.code || null,
+            errorMessage: info.msg || errorOrCode?.message || String(errorOrCode),
+        };
+    }
+
+    return {
+        kind,
+        clientOrderId: null,
+        orderId: null,
+        errorCode: errorOrCode || null,
+        errorMessage: message || String(errorOrCode || 'SIGNAL_PROTECTION_ORDER_FAILED'),
+    };
+}
+
+const getSignalSideFromPositionSide = (positionSide) => {
+    const normalized = String(positionSide || '').trim().toUpperCase();
+    if(normalized === 'LONG'){
+        return 'BUY';
+    }
+    if(normalized === 'SHORT'){
+        return 'SELL';
+    }
+    return null;
+}
+
+const findMatchingBoundOrderForTarget = (orders = [], target = {}, options = {}) => {
+    const prefix = String(target.prefix || '').trim().toUpperCase();
+    const quantity = Number(target.quantity || 0);
+    const triggerPrice = Number(target.triggerPrice || 0);
+    const quantityTolerance = Math.max(Number(options.quantityTolerance || 0), 1e-9);
+    const priceTolerance = Math.max(Number(options.priceTolerance || 0), 1e-9);
+
+    return (orders || []).find((order) => {
+        const orderPrefix = getBoundOrderPrefix(order.clientOrderId);
+        const orderQty = Number(order.quantity || order.raw?.origQty || order.raw?.quantity || 0);
+        const orderTriggerPrice = Number(order.triggerPrice || order.price || order.raw?.triggerPrice || order.raw?.stopPrice || order.raw?.price || 0);
+        return (
+            orderPrefix === prefix
+            && Math.abs(orderQty - quantity) <= quantityTolerance
+            && Math.abs(orderTriggerPrice - triggerPrice) <= priceTolerance
+        );
+    }) || null;
+}
+
+const normalizeExistingBoundOrderForHandler = (order = null) => {
+    if(!order){
+        return null;
+    }
+    return {
+        clientOrderId: order.clientOrderId || null,
+        orderId: order.orderId || null,
+        sourceOrderId: order.orderId || null,
+        existing: true,
+        raw: order.raw || order,
+    };
+}
+
+const loadSignalOpenOwnerForHandler = async ({ uid, pid, symbol, positionSide } = {}) => {
+    const [rows] = await db.query(
+        `SELECT *
+           FROM live_position_bucket_owner
+          WHERE uid = ?
+            AND ownerPid = ?
+            AND ownerStrategyCategory = 'signal'
+            AND symbol = ?
+            AND positionSide = ?
+            AND status = 'OPEN'
+            AND ownedQty > 0
+          ORDER BY id DESC
+          LIMIT 1`,
+        [uid, pid, symbol, positionSide]
+    );
+    return rows?.[0] || null;
+}
+
+exports.dispatchSignalProtectionOrdersFromIntent = async (params = {}) => {
+    const uid = Number(params.uid || 0);
+    const pid = Number(params.pid || 0);
+    const symbol = String(params.symbol || '').trim().toUpperCase();
+    const requestedPositionSide = String(params.positionSide || '').trim().toUpperCase();
+    const side = String(params.side || getSignalSideFromPositionSide(requestedPositionSide) || '').trim().toUpperCase();
+    const positionSide = requestedPositionSide || getSignalPositionSide(side);
+    const entryOrderId = params.entryOrderId || params.entryClientOrderId || params.sourceOrderId || params.sourceTradeId || null;
+    const requestedBoundType = String(params.boundType || 'PROFIT').trim().toUpperCase();
+    const boundType = requestedBoundType === 'SPLITTP' ? 'SPLITTP' : 'PROFIT';
+
+    const emptyResult = {
+        ok: false,
+        takeProfit: buildSignalProtectionHandlerOrderError('TP', 'SIGNAL_PROTECTION_HANDLER_NOT_STARTED'),
+        stop: buildSignalProtectionHandlerOrderError('STOP', 'SIGNAL_PROTECTION_HANDLER_NOT_STARTED'),
+    };
+
+    if(!uid || !pid || !symbol || !side || !positionSide || !entryOrderId){
+        return {
+            ...emptyResult,
+            takeProfit: buildSignalProtectionHandlerOrderError('TP', 'SIGNAL_PROTECTION_INVALID_PAYLOAD'),
+            stop: buildSignalProtectionHandlerOrderError('STOP', 'SIGNAL_PROTECTION_INVALID_PAYLOAD'),
+        };
+    }
+
+    const play = await loadLivePlaySnapshot(pid);
+    if(!play){
+        return {
+            ...emptyResult,
+            takeProfit: buildSignalProtectionHandlerOrderError('TP', 'SIGNAL_PROTECTION_NO_PLAY'),
+            stop: buildSignalProtectionHandlerOrderError('STOP', 'SIGNAL_PROTECTION_NO_PLAY'),
+        };
+    }
+
+    const orderRules = await loadSymbolOrderRules(uid, symbol);
+    if(!orderRules){
+        return {
+            ...emptyResult,
+            takeProfit: buildSignalProtectionHandlerOrderError('TP', 'SIGNAL_PROTECTION_ORDER_RULES_MISSING'),
+            stop: buildSignalProtectionHandlerOrderError('STOP', 'SIGNAL_PROTECTION_ORDER_RULES_MISSING'),
+        };
+    }
+
+    const resolvedQty = roundToStep(Number(params.qty || params.ownedQty || 0), orderRules.stepSize || 0.001, 'down');
+    if(!(resolvedQty >= Number(orderRules.minQty || 0))){
+        return {
+            ...emptyResult,
+            takeProfit: buildSignalProtectionHandlerOrderError('TP', 'SIGNAL_PROTECTION_QTY_TOO_SMALL'),
+            stop: buildSignalProtectionHandlerOrderError('STOP', 'SIGNAL_PROTECTION_QTY_TOO_SMALL'),
+        };
+    }
+
+    const positionReady = await waitForExchangeOpenPosition(uid, symbol, side, 5, 250);
+    if(!positionReady){
+        return {
+            ...emptyResult,
+            takeProfit: buildSignalProtectionHandlerOrderError('TP', 'SIGNAL_PROTECTION_POSITION_NOT_READY'),
+            stop: buildSignalProtectionHandlerOrderError('STOP', 'SIGNAL_PROTECTION_POSITION_NOT_READY'),
+        };
+    }
+
+    const takeProfitPrice = Number(params.takeProfitPrice || 0);
+    const stopPrice = Number(params.stopPrice || 0);
+    const splitStageQty = roundToStep(Number(params.splitStageQty || 0), orderRules.stepSize || 0.001, 'down');
+    const takeProfitQty = boundType === 'SPLITTP' ? splitStageQty : resolvedQty;
+    const targets = [];
+    if(takeProfitPrice > 0 && takeProfitQty > 0){
+        targets.push({
+            key: 'takeProfit',
+            prefix: boundType,
+            quantity: takeProfitQty,
+            triggerPrice: takeProfitPrice,
+        });
+    }
+    if(stopPrice > 0){
+        targets.push({
+            key: 'stop',
+            prefix: 'STOP',
+            quantity: resolvedQty,
+            triggerPrice: stopPrice,
+        });
+    }
+
+    const quantityTolerance = Math.max(Number(orderRules.stepSize || 0), 1e-9) / 2;
+    const priceTolerance = Math.max(Number(orderRules.tickSize || 0), 1e-9) / 2;
+    const existingBoundOrders = await listOpenBoundExitOrders(uid, symbol, pid);
+    const result = {
+        ok: false,
+        takeProfit: takeProfitPrice > 0
+            ? buildSignalProtectionHandlerOrderError('TP', 'PROTECTION_ORDER_EVIDENCE_MISSING')
+            : null,
+        stop: stopPrice > 0
+            ? buildSignalProtectionHandlerOrderError('STOP', 'PROTECTION_ORDER_EVIDENCE_MISSING')
+            : null,
+    };
+
+    for(const target of targets){
+        const existing = findMatchingBoundOrderForTarget(existingBoundOrders, target, {
+            quantityTolerance,
+            priceTolerance,
+        });
+        if(existing){
+            result[target.key] = normalizeExistingBoundOrderForHandler(existing);
+            continue;
+        }
+
+        try{
+            const created = await placeBoundExitOrder({
+                uid,
+                pid,
+                symbol,
+                side,
+                qty: target.quantity,
+                entryOrderId,
+                boundType: target.prefix,
+                triggerPrice: target.triggerPrice,
+                tickSize: orderRules.tickSize,
+            });
+            result[target.key] = created?.clientOrderId
+                ? created
+                : buildSignalProtectionHandlerOrderError(target.key === 'takeProfit' ? 'TP' : 'STOP', 'PROTECTION_ORDER_EVIDENCE_MISSING');
+        }catch(error){
+            result[target.key] = buildSignalProtectionHandlerOrderError(
+                target.key === 'takeProfit' ? 'TP' : 'STOP',
+                error
+            );
+        }
+    }
+
+    const outcome = gridProtectionGuarantee.classifyProtectionOutcome({
+        takeProfit: result.takeProfit,
+        stop: result.stop,
+    });
+
+    await persistLiveSplitRuntime(pid, {
+        r_qty: resolvedQty,
+        r_profitPrice: takeProfitPrice,
+        r_stopPrice: stopPrice,
+        r_splitStageIndex: Number(params.splitStageIndex || play.r_splitStageIndex || 0),
+    }).catch(() => {});
+
+    return {
+        ...result,
+        ok: outcome.protected,
+        protectionState: outcome.state,
+        protectionReason: outcome.reason,
+        missingProtection: outcome.missing,
+    };
+}
+
+exports.confirmSignalMarketEntryAfterAccepted = async ({
+    uid,
+    pid,
+    symbol,
+    side = null,
+    positionSide = null,
+    orderId = null,
+    clientOrderId = null,
+    ownerRowId = null,
+    intentId = null,
+    signalTime = null,
+    wsWaitMs = null,
+} = {}) => {
+    const normalizedUid = Number(uid || 0);
+    const normalizedPid = Number(pid || 0);
+    const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+    if(!normalizedUid || !normalizedPid || !normalizedSymbol){
+        return signalEntryConvergence.buildUnconfirmedP0Result({
+            payload: { uid, pid, symbol },
+            accepted: { uid, pid, symbol, orderId, clientOrderId, ownerRowId },
+            reason: 'SIGNAL_ENTRY_CONVERGENCE_INVALID_PAYLOAD',
+        });
+    }
+
+    const waitMs = Math.min(5000, Math.max(0, Number(wsWaitMs || signalEntryConvergence.DEFAULT_WS_WAIT_MS || 0)));
+    if(waitMs > 0){
+        await sleep(waitMs);
+    }
+
+    let play = await loadLivePlaySnapshot(normalizedPid);
+    if(!play){
+        return signalEntryConvergence.buildUnconfirmedP0Result({
+            payload: { uid: normalizedUid, pid: normalizedPid, symbol: normalizedSymbol },
+            accepted: { uid: normalizedUid, pid: normalizedPid, symbol: normalizedSymbol, orderId, clientOrderId, ownerRowId },
+            reason: 'SIGNAL_ENTRY_PLAY_NOT_FOUND',
+        });
+    }
+
+    const resolvedSide = String(side || getResolvedLiveSignalType(play) || getSignalSideFromPositionSide(positionSide) || '').trim().toUpperCase();
+    const resolvedPositionSide = String(positionSide || getSignalPositionSide(resolvedSide) || '').trim().toUpperCase();
+    if(!resolvedSide || !resolvedPositionSide){
+        return signalEntryConvergence.buildUnconfirmedP0Result({
+            payload: { uid: normalizedUid, pid: normalizedPid, symbol: normalizedSymbol },
+            accepted: { uid: normalizedUid, pid: normalizedPid, symbol: normalizedSymbol, orderId, clientOrderId, ownerRowId },
+            reason: 'SIGNAL_ENTRY_SIDE_UNRESOLVED',
+        });
+    }
+
+    let snapshot = await pidPositionLedger.loadSnapshot({
+        uid: normalizedUid,
+        pid: normalizedPid,
+        strategyCategory: 'signal',
+        positionSide: resolvedPositionSide,
+    });
+    let owner = await loadSignalOpenOwnerForHandler({
+        uid: normalizedUid,
+        pid: normalizedPid,
+        symbol: normalizedSymbol,
+        positionSide: resolvedPositionSide,
+    });
+
+    if(!(Number(snapshot?.openQty || 0) > 0) || !owner){
+        const recovered = await recoverSignalEntryFillFromExchange({
+            uid: normalizedUid,
+            row: play,
+            issue: { issues: ['SIGNAL_ENTRY_ACCEPTED_CONVERGENCE'] },
+        });
+        if(!recovered){
+            return signalEntryConvergence.buildUnconfirmedP0Result({
+                payload: { uid: normalizedUid, pid: normalizedPid, symbol: normalizedSymbol, side: resolvedSide, positionSide: resolvedPositionSide, signalTime },
+                accepted: { uid: normalizedUid, pid: normalizedPid, symbol: normalizedSymbol, side: resolvedSide, positionSide: resolvedPositionSide, orderId, clientOrderId, ownerRowId },
+                reason: 'ORDER_ACCEPTED_FILL_UNCONFIRMED_P0',
+            });
+        }
+
+        play = await loadLivePlaySnapshot(normalizedPid) || play;
+        snapshot = await pidPositionLedger.loadSnapshot({
+            uid: normalizedUid,
+            pid: normalizedPid,
+            strategyCategory: 'signal',
+            positionSide: resolvedPositionSide,
+        });
+        owner = await loadSignalOpenOwnerForHandler({
+            uid: normalizedUid,
+            pid: normalizedPid,
+            symbol: normalizedSymbol,
+            positionSide: resolvedPositionSide,
+        });
+    }
+
+    const openQty = Number(snapshot?.openQty || owner?.ownedQty || play.r_qty || 0);
+    const avgEntryPrice = Number(snapshot?.avgEntryPrice || play.r_exactPrice || 0);
+    if(!(openQty > 0) || !(avgEntryPrice > 0) || !owner){
+        return signalEntryConvergence.buildUnconfirmedP0Result({
+            payload: { uid: normalizedUid, pid: normalizedPid, symbol: normalizedSymbol, side: resolvedSide, positionSide: resolvedPositionSide, signalTime },
+            accepted: { uid: normalizedUid, pid: normalizedPid, symbol: normalizedSymbol, side: resolvedSide, positionSide: resolvedPositionSide, orderId, clientOrderId, ownerRowId },
+            reason: 'ORDER_ACCEPTED_FILL_UNCONFIRMED_P0',
+        });
+    }
+
+    const orderRules = await loadSymbolOrderRules(normalizedUid, normalizedSymbol);
+    const expectedTargets = orderRules
+        ? buildExpectedSignalBoundTargets({
+            play: {
+                ...play,
+                r_signalType: resolvedSide,
+            },
+            exactPrice: avgEntryPrice,
+            resolvedQty: openQty,
+            orderRules,
+        })
+        : [];
+    const openExitOrders = await listOpenBoundExitOrders(normalizedUid, normalizedSymbol, normalizedPid).catch(() => []);
+    const hasMatchingCoverage = expectedTargets.length > 0 && orderRules
+        ? hasMatchingBoundOrderCoverage(openExitOrders, expectedTargets, {
+            quantityTolerance: Math.max(Number(orderRules.stepSize || 0), 1e-9) / 2,
+            priceTolerance: Math.max(Number(orderRules.tickSize || 0), 1e-9) / 2,
+        })
+        : false;
+
+    let protectionChildState = hasMatchingCoverage
+        ? signalEntryConvergence.ENTRY_STATE.PROTECTION_EXCHANGE_VERIFIED
+        : signalEntryConvergence.ENTRY_STATE.PROTECTION_INTENT_CREATED;
+    let protection = {
+        existingCoverage: hasMatchingCoverage,
+        queued: false,
+        expectedTargetCount: expectedTargets.length,
+        openExitOrderCount: openExitOrders.length,
+    };
+
+    if(!hasMatchingCoverage){
+        const queued = await syncLiveBoundExitOrders({
+            uid: normalizedUid,
+            pid: normalizedPid,
+            symbol: normalizedSymbol,
+            entryOrderId: orderId || owner.sourceOrderId || play.r_tid || clientOrderId,
+            entryPrice: avgEntryPrice,
+            qty: openQty,
+            entryIntentId: intentId,
+            ownerRowId: ownerRowId || owner.id || null,
+        });
+        protection = {
+            ...protection,
+            queued: Boolean(queued),
+        };
+        if(!queued){
+            protectionChildState = signalEntryConvergence.ENTRY_STATE.UNPROTECTED_OPEN_P0;
+        }
+    }
+
+    return {
+        ok: signalEntryConvergence.isProtectionChildActive(protectionChildState),
+        state: signalEntryConvergence.ENTRY_STATE.ENTRY_LIFECYCLE_COMPLETE,
+        reason: signalEntryConvergence.isProtectionChildActive(protectionChildState)
+            ? signalEntryConvergence.ENTRY_STATE.ENTRY_LIFECYCLE_COMPLETE
+            : protectionChildState,
+        uid: normalizedUid,
+        pid: normalizedPid,
+        symbol: normalizedSymbol,
+        orderId: orderId || owner.sourceOrderId || play.r_tid || null,
+        clientOrderId: clientOrderId || owner.sourceClientOrderId || null,
+        ownerRowId: ownerRowId || owner.id || null,
+        fillConfirmed: true,
+        ledgerApplied: true,
+        ownershipOpen: true,
+        snapshotOpen: true,
+        openQty,
+        avgEntryPrice,
+        protectionChildState,
+        protection,
+    };
 }
 
 const findExchangeOrder = async (uid, symbol, { orderId = null, clientOrderId = null } = {}) => {
@@ -14532,6 +14951,10 @@ exports.sendEnter = async (symbol = null, side = null, lv = null, userMargin = n
 
         if(extData){
             sendData.status = true;
+            sendData.orderId = extData.orderId || null;
+            sendData.clientOrderId = clientOrderId;
+            sendData.acceptedAt = new Date().toISOString();
+            sendData.ownerRowId = ownershipReservation.owner?.id || null;
             keepSignalPositionOwnership = true;
         }
 
@@ -14559,6 +14982,10 @@ exports.sendEnter = async (symbol = null, side = null, lv = null, userMargin = n
                 if(isRecoverableExchangeOrder(recoveredOrder)){
                     await syncEnterOrderFromQuery(uid, pid, minQty, recoveredOrder);
                     sendData.status = true;
+                    sendData.orderId = recoveredOrder?.orderId || null;
+                    sendData.clientOrderId = recoveredOrder?.clientOrderId || clientOrderId;
+                    sendData.acceptedAt = recoveredOrder?.updateTime || recoveredOrder?.time || new Date().toISOString();
+                    sendData.ownerRowId = ownershipReservation.owner?.id || null;
                     keepSignalPositionOwnership = true;
                     sendData.errMsg = toRuntimeMessage(sendData.errMsg, describeOrderForLog(recoveredOrder));
                     return sendData;
@@ -14607,6 +15034,10 @@ exports.sendEnter = async (symbol = null, side = null, lv = null, userMargin = n
                     });
 
                     sendData.status = true;
+                    sendData.orderId = retriedOrder?.orderId || null;
+                    sendData.clientOrderId = clientOrderId;
+                    sendData.acceptedAt = new Date().toISOString();
+                    sendData.ownerRowId = ownershipReservation.owner?.id || null;
                     keepSignalPositionOwnership = true;
                     sendData.errMsg = toRuntimeMessage(sendData.errMsg, `retryOrderId:${retriedOrder.orderId}`);
                     return sendData;
@@ -14632,6 +15063,10 @@ exports.sendEnter = async (symbol = null, side = null, lv = null, userMargin = n
                 if(isRecoverableExchangeOrder(queriedOrder)){
                     await syncEnterOrderFromQuery(uid, pid, minQty, queriedOrder);
                     sendData.status = true;
+                    sendData.orderId = queriedOrder?.orderId || null;
+                    sendData.clientOrderId = queriedOrder?.clientOrderId || clientOrderId;
+                    sendData.acceptedAt = queriedOrder?.updateTime || queriedOrder?.time || new Date().toISOString();
+                    sendData.ownerRowId = ownershipReservation.owner?.id || null;
                     keepSignalPositionOwnership = true;
                     sendData.errMsg = toRuntimeMessage(sendData.errMsg, describeOrderForLog(queriedOrder));
                     return sendData;
@@ -14692,6 +15127,10 @@ exports.sendEnter = async (symbol = null, side = null, lv = null, userMargin = n
                 side
             );
             sendData.status = true;
+            sendData.orderId = extData.orderId || null;
+            sendData.clientOrderId = clientOrderId;
+            sendData.acceptedAt = extData.updateTime || extData.time || new Date().toISOString();
+            sendData.ownerRowId = ownershipReservation.owner?.id || null;
             keepSignalPositionOwnership = true;
             sendData.errMsg = toRuntimeMessage(sendData.errMsg, `entryRecovered:${extData.orderId}`);
             return sendData;
