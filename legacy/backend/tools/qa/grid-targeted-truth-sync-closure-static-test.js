@@ -70,10 +70,10 @@ mustInclude(coin, "TARGET_ALREADY_CONVERGED_BEFORE_VERIFY", "socket convergence 
 mustNotInclude(coin, "GRID_TARGETED_TRUTH_SYNC_VERIFY_COOLDOWN_MS", "old cooldown constant must not remain");
 mustNotInclude(coin, "gridTargetedTruthSyncVerifyRunning.add", "running lock must be a timestamp map, not a Set call");
 
-mustInclude(engine, "ORDER_TERMINAL_WITH_FILL_RECOVERY", "terminal-with-fill must route to recovery");
+mustInclude(engine, "ORDER_TERMINAL_PARTIAL_POLICY_BLOCKED", "terminal-with-fill must be separated from broad recovery");
 mustInclude(engine, "ENTRY_ORDER_TERMINATED_NO_FILL", "entry terminal no-fill must clear stale entry refs");
 mustInclude(engine, "[`${prefix}EntryOrderId`]: null", "entry terminal no-fill must clear only the scoped leg entry ref");
-mustInclude(engine, "truthSyncLiveGridRow({", "terminal-with-fill recovery must reuse existing truth-sync path");
+mustNotInclude(engine, "ORDER_TERMINAL_WITH_FILL_RECOVERY", "terminal partial must not route to broad truth-sync recovery");
 
 console.log("grid-targeted-truth-sync-closure-static-test PASS");
 setTimeout(() => process.exit(0), 100);

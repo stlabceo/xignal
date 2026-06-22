@@ -53,6 +53,7 @@ const PROTECTION_QUEUE_STATE = Object.freeze({
   PARTIAL: "PROTECTION_PARTIAL",
   FAILED: "PROTECTION_FAILED",
   BLOCKED_OWNERSHIP: "PROTECTION_BLOCKED_OWNERSHIP",
+  BLOCKED_PARTIAL_FILL: "PROTECTION_BLOCKED_PARTIAL_FILL",
   BLOCKED_REDIS: "PROTECTION_BLOCKED_REDIS",
   PROTECTED: "PROTECTION_PROTECTED",
 });
@@ -3769,6 +3770,29 @@ const dispatchGridProtectionCreateIntent = async ({
 const processGridProtectionCreateIntent = async (intent, options = {}) => {
   const env = options.env || process.env;
   const payload = intent?.payload?.protection || intent?.payload || {};
+  const fillEvidenceEndStatus = String(
+    payload?.fillEvidence?.endStatus ||
+    payload?.endStatus ||
+    payload?.orderStatus ||
+    ""
+  ).trim().toUpperCase();
+  if (fillEvidenceEndStatus === "PARTIALLY_FILLED") {
+    const reason = "GRID_PROTECTION_PARTIAL_FILL_ACTION_BLOCKED";
+    await orderIntentQueue.completeIntent({
+      id: intent.id,
+      status: orderIntentQueue.STATUS.BLOCKED,
+      result: buildBlockResult(reason, {
+        intentType: intent.intentType,
+        fifoKey: intent.fifoKey,
+        dispatchEntered: false,
+        projectionState: PROTECTION_QUEUE_STATE.BLOCKED_PARTIAL_FILL,
+        fillEvidence: payload.fillEvidence || null,
+      }),
+      errorCode: reason,
+      errorMessage: "Grid protection create blocked because entry fill evidence is PARTIALLY_FILLED.",
+    });
+    return { processed: true, status: orderIntentQueue.STATUS.BLOCKED, reason };
+  }
   const lockRedisClient = Object.prototype.hasOwnProperty.call(options, "redisClient")
     ? options.redisClient
     : redisClient;

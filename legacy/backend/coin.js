@@ -6769,15 +6769,16 @@ const recoverGridExternalManualCloseFromExchange = async ({
         return null;
     }
 
+    const normalizedRowSymbol = normalizeBinanceFuturesSymbol(row.symbol);
     const [ownerRows] = await db.query(
         `SELECT pid, strategyCategory, openQty
            FROM live_pid_position_snapshot
           WHERE uid = ?
-            AND symbol = ?
+            AND REPLACE(UPPER(symbol), '.P', '') = ?
             AND positionSide = ?
             AND status = 'OPEN'
             AND openQty > 0`,
-        [uid, row.symbol, normalizedLeg]
+        [uid, normalizedRowSymbol, normalizedLeg]
     );
     const owners = (ownerRows || []).filter((owner) => Number(owner?.openQty || 0) > 0);
     if(owners.length !== 1 || Number(owners[0]?.pid || 0) !== Number(row.id)){

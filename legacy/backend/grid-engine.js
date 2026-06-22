@@ -122,6 +122,13 @@ const buildPrivateSocketLatencyPayload = (reData = {}) => {
   };
 };
 
+const normalizeGridExchangeSymbol = (value = "") =>
+  String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/^[A-Z0-9_]+:/, "")
+    .replace(/\.P$/i, "");
+
 const withGridRuntimeTraceScope = async (handler, parsed, reData, worker) => {
   let outcome = "IGNORED";
   const tracePayload = buildGridRuntimeTracePayload(handler, parsed, reData);
@@ -1611,15 +1618,16 @@ const convergeLiveGridLegToExchangeFlat = async (
 
   const snapshotBeforeState = await loadLiveGridLegSnapshotState(current, leg);
   if (allowLocalFlatten && !recoveredExecution && snapshotBeforeState.qty > 0) {
+    const normalizedCurrentSymbol = normalizeGridExchangeSymbol(current.symbol);
     const [ownerRows] = await db.query(
       `SELECT pid, strategyCategory, openQty
          FROM live_pid_position_snapshot
         WHERE uid = ?
-          AND symbol = ?
+          AND REPLACE(UPPER(symbol), '.P', '') = ?
           AND positionSide = ?
           AND status = 'OPEN'
           AND openQty > 0`,
-      [current.uid, current.symbol, leg]
+      [current.uid, normalizedCurrentSymbol, leg]
     );
     const owners = (ownerRows || []).filter((owner) => toNumber(owner?.openQty) > 0);
     if (owners.length !== 1 || Number(owners[0]?.pid || 0) !== Number(current.id)) {
@@ -3091,6 +3099,27 @@ const applyGridEntryFillConvergence = async (row, leg, execution, issue = null, 
   }
 
   await syncGridLegSnapshot(row.id, normalizedLeg);
+  const fillEndStatus = String(
+    options.fillEvidence?.endStatus ||
+    execution.endStatus ||
+    execution.orderStatus ||
+    execution.status ||
+    ""
+  ).trim().toUpperCase();
+  const deferLifecycleAction =
+    options.deferLifecycleAction === true ||
+    fillEndStatus === "PARTIALLY_FILLED";
+  if (deferLifecycleAction) {
+    return {
+      converged: true,
+      lifecycleActionDeferred: true,
+      reason: "ENTRY_PARTIAL_FILL_LEDGER_ONLY",
+      appliedFillCount,
+      duplicateFillCount,
+      fillUnitCount: fillUnits.length,
+      source: options.source || "UNKNOWN",
+    };
+  }
   const restored = await restoreLiveGridLegAfterRecoveredEntryFill(row, normalizedLeg, execution, issue, options);
   return {
     converged: Boolean(restored),
@@ -5153,12 +5182,14 @@ const handleLiveGridEntryFill = async (parsed, reData) => {
         price: entryFillPrice,
         fee: reData.n,
         tradeTime: reData.T || null,
+        endStatus: reData.X || null,
       },
       {
         issues: ["SOCKET_ORDER_TRADE_UPDATE"],
       },
       {
         source: "SOCKET",
+        deferLifecycleAction: reData.X === "PARTIALLY_FILLED",
         eventType: "GRID_ENTRY_FILL",
         note: `grid-entry:${reData.X || "FILLED"}`,
         routePath: "grid-runtime-entry-fill",
@@ -5238,63 +5269,14 @@ const handleLiveGridTakeProfitFill = async (parsed, reData) => {
   await pidPositionLedger.syncGridLegSnapshot(row.id, parsed.leg);
 
   if (reData.X === "PARTIALLY_FILLED" && remainingQty > 0) {
-    const protectionBeforeCleanup = await loadLiveGridLegProtectionState(row, parsed.leg);
-    await cancelAllGridOrders("LIVE", row, buildSiblingProtectionCancelOptions({
-      leg: parsed.leg,
-      filledClientOrderId: parsed.clientOrderId,
-      activeReservations: protectionBeforeCleanup.activeReservations,
-      reason: "GRID_TP_SIBLING_PROTECTION_CLEANUP",
-    }));
-    const protection = await protectGridOpenLegOrClose({
-      row,
-      leg: parsed.leg,
-      qty: remainingQty,
-      entryPrice: remainingEntryPrice,
-      entryOrderId: row[`${getLegFieldPrefix(parsed.leg)}EntryOrderId`] || null,
-      sourceOrderId: reData.i || null,
-      sourceTradeId: reData.t || null,
-      routePath: "grid-tp-partial-reprotect",
-      failureLogCode: "TAKE_PROFIT_PARTIAL_REPROTECT_FAILED_CLOSED",
-      failureMessage: `leg:${parsed.leg}, remainingQty:${remainingQty}, reason:tp-partial-reprotect`,
-    });
-    if (protection.pending) {
-      await appendGridRuntimeLog(
-        row,
-        "gridLiveExit",
-        "TAKE_PROFIT_PARTIAL_REPROTECT_INTENT_PENDING",
-        `leg:${parsed.leg}, remainingQty:${remainingQty}, exitPrice:${toNumber(reData.L || reData.ap)}, intent:${protection.intentSummary?.intent?.intentKey || "NONE"}`,
-        parsed.leg
-      );
-      setOutcome("TP_PARTIAL_REPROTECT_INTENT_PENDING");
-      return true;
-    }
-    if (!protection.protected) {
-      setOutcome(protection.outcome.partial ? "TP_PARTIAL_REPROTECT_PARTIAL_CRITICAL" : "TP_PARTIAL_REPROTECT_FAILED");
-      return protection.closed;
-    }
-    const exits = protection.exits;
-    await applyGridPatch("live_grid_strategy_list", row.id, {
-      ...buildOpenLegPatch({
-        leg: parsed.leg,
-        entryOrderId: row[`${getLegFieldPrefix(parsed.leg)}EntryOrderId`],
-        entryPrice: remainingEntryPrice,
-        qty: remainingQty,
-        takeProfitPrice: exits.takeProfitPrice,
-        stopPrice: exits.stopPrice,
-        takeProfitOrderId: exits.takeProfitOrderId,
-        stopOrderId: exits.stopOrderId,
-        regimeStatus: row.regimeStatus,
-        regimeEndReason: row.regimeEndReason || null,
-      }),
-    });
     await appendGridRuntimeLog(
       row,
       "gridLiveExit",
-      "TAKE_PROFIT_PARTIAL",
-      `leg:${parsed.leg}, remainingQty:${remainingQty}, exitPrice:${toNumber(reData.L || reData.ap)}`,
+      "TAKE_PROFIT_PARTIAL_OBSERVED",
+      `leg:${parsed.leg}, remainingQty:${remainingQty}, exitPrice:${toNumber(reData.L || reData.ap)}, nextAction:N`,
       parsed.leg
     );
-    setOutcome("TP_PARTIAL");
+    setOutcome("TP_PARTIAL_OBSERVE_ONLY");
     return true;
   }
 
@@ -5433,6 +5415,18 @@ const handleLiveGridStopFill = async (parsed, reData) => {
   const remainingQty = toNumber(snapshot?.openQty);
   await pidPositionLedger.syncGridLegSnapshot(row.id, parsed.leg);
 
+  if (reData.X === "PARTIALLY_FILLED") {
+    await appendGridRuntimeLog(
+      row,
+      "gridLiveStop",
+      "STOP_PARTIAL_OBSERVED",
+      `leg:${parsed.leg}, remainingQty:${remainingQty}, stopPrice:${toNumber(reData.L || reData.ap)}, terminal:N, nextAction:N`,
+      parsed.leg
+    );
+    setOutcome("STOP_PARTIAL_OBSERVE_ONLY");
+    return true;
+  }
+
   const termination = await terminateLiveGridRegimeAfterStopFill({
     row,
     stoppedLeg: parsed.leg,
@@ -5559,18 +5553,14 @@ const handleLiveOrderTradeUpdate = async (uid, data) => {
       if (terminalExecutedQty > 0) {
         const row = await loadGridItem("LIVE", parsed.pid);
         if (row && row.uid === parsed.uid) {
-          const repairedRow = await truthSyncLiveGridRow({
-            row,
-            exchangeSnapshotCache: new Map(),
-          }).catch(() => null);
           await appendGridRuntimeLog(
-            repairedRow || row,
+            row,
             "gridRuntimeOrder",
-            "ORDER_TERMINAL_WITH_FILL_RECOVERY",
-            `leg:${parsed.leg}, type:${parsed.type}, status:${endStatus}, executedQty:${terminalExecutedQty}, clientOrderId:${parsed.clientOrderId}, repaired:${Boolean(repairedRow)}`,
+            "ORDER_TERMINAL_PARTIAL_POLICY_BLOCKED",
+            `leg:${parsed.leg}, type:${parsed.type}, status:${endStatus}, executedQty:${terminalExecutedQty}, clientOrderId:${parsed.clientOrderId}, nextAction:N`,
             parsed.leg
           );
-          setOutcome(`ORDER_${endStatus}_WITH_FILL_RECOVERY`);
+          setOutcome("ORDER_TERMINAL_PARTIAL_POLICY_BLOCKED");
           return true;
         }
       }
