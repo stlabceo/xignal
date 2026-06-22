@@ -2,6 +2,39 @@ import api from '../api';
 
 const USER_TRADING_API = '/user/api/trading';
 
+const normalizeCreateError = (error) => {
+	const data = error?.response?.data ?? error;
+	return {
+		ok: false,
+		code: data?.code || 'BOT_CREATE_FAILED',
+		status: error?.response?.status || data?.status || null,
+		message: data?.errors?.[0]?.msg || data?.message || data?.error || error?.message || 'Bot 생성 요청에 실패했습니다.',
+		raw: data || null
+	};
+};
+
+const normalizeCreateResponse = (response, botKind) => {
+	const data = response?.data ?? response;
+	const pid = Number(data?.pid || data?.id || 0);
+	if (!(pid > 0)) {
+		return {
+			ok: false,
+			code: 'BOT_CREATE_PID_MISSING',
+			botKind,
+			message: 'Bot 생성 응답에서 PID를 확인하지 못했습니다. 생성 여부를 목록에서 확인한 뒤 다시 시도해 주세요.',
+			raw: data ?? null
+		};
+	}
+	return {
+		...(data && typeof data === 'object' ? data : {}),
+		ok: true,
+		botKind,
+		id: pid,
+		pid,
+		enabled: data?.enabled || 'N'
+	};
+};
+
 export const trading = {
 	candle(params, callback) {
 		api.get(`${USER_TRADING_API}/candle/data`, {
@@ -85,10 +118,10 @@ export const trading = {
 	liveDetailUpload(body, params, callback) {
 		api.post(`${USER_TRADING_API}/live/add`, body, { params })
 			.then((res) => {
-				callback(res);
+				callback(normalizeCreateResponse(res, 'ALGORITHM'));
 			})
-			.catch((res) => {
-				callback(res.response.data.errors[0]);
+			.catch((error) => {
+				callback(normalizeCreateError(error));
 			});
 	},
 	liveDetailEdit(body, params, callback) {
@@ -177,10 +210,10 @@ export const trading = {
 	gridLiveDetailUpload(body, params, callback) {
 		api.post(`${USER_TRADING_API}/grid/live/add`, body, { params })
 			.then((res) => {
-				callback(res);
+				callback(normalizeCreateResponse(res, 'GRID'));
 			})
-			.catch((res) => {
-				callback(res.response?.data?.errors?.[0] || false);
+			.catch((error) => {
+				callback(normalizeCreateError(error));
 			});
 	},
 	gridLiveDetailEdit(body, params, callback) {

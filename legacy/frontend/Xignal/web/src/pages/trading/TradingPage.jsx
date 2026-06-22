@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { trading } from '../../services/trading';
 import { publicBacktest } from '../../services/publicBacktest';
 import { useAuthStore } from '../../store/authState';
@@ -51,6 +51,26 @@ const requestWithCallback = (requester, params = {}) =>
 			done(false);
 		}
 	});
+
+const fetchDashboardPayload = async (mode) => {
+	const isTestMode = mode === MODE.TEST;
+	const [signalPayload, gridPayload, trackPayload, performancePayload] = await Promise.all([
+		requestWithCallback(isTestMode ? trading.testList.bind(trading) : trading.liveList.bind(trading), isTestMode ? {} : { live: 'Y' }),
+		requestWithCallback(isTestMode ? trading.gridTestList.bind(trading) : trading.gridLiveList.bind(trading), {}),
+		requestWithCallback(isTestMode ? trading.getTestRuntimeTrackRecord.bind(trading) : trading.getRuntimeTrackRecord.bind(trading), {
+			page: 1,
+			size: 20,
+			status: 'completed'
+		}),
+		isTestMode ? Promise.resolve(null) : requestWithCallback(trading.performanceSummary.bind(trading), {})
+	]);
+	return {
+		signalRows: pickArray(signalPayload),
+		gridRows: pickArray(gridPayload),
+		trackRows: buildTrackRows(trackPayload),
+		performanceSummary: performancePayload && typeof performancePayload === 'object' ? performancePayload : null
+	};
+};
 
 const formatAmount = (value, suffix = '') => {
 	const numeric = toNumberOrNull(value);
@@ -120,6 +140,8 @@ const normalizeBotName = (row = {}, strategyCategory = 'SIGNAL') =>
 			(strategyCategory === 'GRID' ? 'Grid Bot' : 'Algorithm Bot')
 	);
 
+const makePidLabel = (strategyCategory, id) => `${strategyCategory === 'GRID' ? 'Grid' : 'Algorithm'} PID #${id || '-'}`;
+
 const normalizeWinRateNumber = (row = {}) => {
 	const direct = toNumberOrNull(firstValue(row.winRate, row.recentWinRate, row.runtimeWinRate, row.successRate));
 	if (direct !== null) return direct;
@@ -135,24 +157,6 @@ const normalizeProfitRateNumber = (row = {}) =>
 const getMargin = (row = {}) => toNumberOrNull(firstValue(row.margin, row.tradeValue, row.orderSize, row.assignedAmount, row.seedMoney));
 const getLeverage = (row = {}) => toNumberOrNull(firstValue(row.leverage, row.marginLeverage)) ?? 1;
 
-const STRATEGY_NAME_MAP = {
-	ATF_VIXFIX: 'ATF+VIXFIX',
-	'ATF+VIXFIX': 'ATF+VIXFIX',
-	NYBOX: 'NY Quiet Close Asia Box Grid',
-	NY_QUIET_CLOSE_ASIA_BOX: 'NY Quiet Close Asia Box Grid',
-	SQZ_GRID: 'SQZ+GRID',
-	'SQZ+GRID': 'SQZ+GRID'
-};
-
-const BACKTEST_STRATEGY_KEY_MAP = {
-	ATF_VIXFIX: 'ATF_VIXFIX',
-	'ATF+VIXFIX': 'ATF_VIXFIX',
-	NYBOX: 'NY_QUIET_CLOSE_ASIA_BOX',
-	NY_QUIET_CLOSE_ASIA_BOX: 'NY_QUIET_CLOSE_ASIA_BOX',
-	SQZ_GRID: 'NY_QUIET_CLOSE_ASIA_BOX',
-	'SQZ+GRID': 'NY_QUIET_CLOSE_ASIA_BOX'
-};
-
 const resolveStrategyName = (row = {}, strategyCategory = 'SIGNAL') => {
 	const rawName = firstValue(
 		row.strategyDisplayName,
@@ -165,14 +169,14 @@ const resolveStrategyName = (row = {}, strategyCategory = 'SIGNAL') => {
 	);
 	const key = String(rawName || '').trim();
 	if (!key) return '전략 이름 없음';
-	return STRATEGY_NAME_MAP[key] || key;
+	return key;
 };
 
 const resolveWebhookStrategyName = (row = {}, strategyCategory = 'SIGNAL') => {
 	const rawName = strategyCategory === 'GRID' ? row.strategySignal : firstValue(row.type, row.strategySignal);
 	const key = String(rawName || '').trim();
 	if (!key) return '전략 이름 없음';
-	return STRATEGY_NAME_MAP[key] || key;
+	return key;
 };
 
 const normalizeTradeAmount = (row = {}) => {
@@ -228,6 +232,7 @@ const buildBotRows = ({ signalRows = [], gridRows = [], mode, publicPrices = {} 
 			key: `signal-${mode}-${row.id}`,
 			strategyCategory: 'SIGNAL',
 			typeLabel: 'Algorithm',
+			pidLabel: makePidLabel('SIGNAL', row.id),
 			strategyName: resolveStrategyName(row, 'SIGNAL'),
 			webhookStrategyName: resolveWebhookStrategyName(row, 'SIGNAL'),
 			name: normalizeBotName(row, 'SIGNAL'),
@@ -251,6 +256,7 @@ const buildBotRows = ({ signalRows = [], gridRows = [], mode, publicPrices = {} 
 			key: `grid-${mode}-${row.id}`,
 			strategyCategory: 'GRID',
 			typeLabel: 'Grid',
+			pidLabel: makePidLabel('GRID', row.id),
 			strategyName: resolveStrategyName(row, 'GRID'),
 			webhookStrategyName: resolveWebhookStrategyName(row, 'GRID'),
 			name: normalizeBotName(row, 'GRID'),
@@ -446,20 +452,14 @@ const normalizeSignalTypeForBacktest = (direction) => {
 	return String(direction || '').toUpperCase();
 };
 
-const normalizeBacktestStrategyKey = (strategyKey, strategyCategory) => {
-	const fallback = strategyCategory === 'GRID' ? 'NY_QUIET_CLOSE_ASIA_BOX' : 'ATF_VIXFIX';
-	const rawKey = String(strategyKey || '').trim();
-	if (!rawKey) return fallback;
-	const upperKey = rawKey.toUpperCase();
-	return BACKTEST_STRATEGY_KEY_MAP[rawKey] || BACKTEST_STRATEGY_KEY_MAP[upperKey] || rawKey;
-};
-
 const getBotBacktestQuery = (bot) => {
 	if (!bot) return null;
-	const rawStrategyKey = bot.strategyCategory === 'GRID'
-		? firstValue(bot.raw.strategySignal, bot.raw.strategyName, 'NY_QUIET_CLOSE_ASIA_BOX')
-		: firstValue(bot.raw.type, bot.raw.strategySignal, 'ATF+VIXFIX');
-	const strategyKey = normalizeBacktestStrategyKey(rawStrategyKey, bot.strategyCategory);
+	const strategyKey = firstValue(
+		bot.raw.backtestStrategyId,
+		bot.raw.publicBacktestStrategyId,
+		bot.raw.backtest_strategy_id,
+		bot.raw.public_backtest_strategy_id
+	);
 	const symbol = normalizeSymbol(firstValue(bot.raw.symbol, bot.raw.r_symbol, bot.symbol)).replace('.P', '');
 	const bunbong = firstValue(bot.raw.bunbong, bot.raw.timeframe, bot.raw.interval);
 	const signalType = bot.strategyCategory === 'GRID' ? 'BOTH' : normalizeSignalTypeForBacktest(bot.direction);
@@ -724,33 +724,42 @@ const TradingPage = () => {
 	const [actionMessage, setActionMessage] = useState('');
 	const [isBotSetupOpen, setIsBotSetupOpen] = useState(false);
 
+	const applyDashboardPayload = useCallback((payload) => {
+		setSignalRows(payload.signalRows);
+		setGridRows(payload.gridRows);
+		setTrackRows(payload.trackRows);
+		setPerformanceSummary(payload.performanceSummary);
+	}, []);
+
 	useEffect(() => {
 		let canceled = false;
-		const loadDashboard = async () => {
-			setIsLoading(true);
-			const isTestMode = mode === MODE.TEST;
-			const [signalPayload, gridPayload, trackPayload, performancePayload] = await Promise.all([
-				requestWithCallback(isTestMode ? trading.testList.bind(trading) : trading.liveList.bind(trading), isTestMode ? {} : { live: 'Y' }),
-				requestWithCallback(isTestMode ? trading.gridTestList.bind(trading) : trading.gridLiveList.bind(trading), {}),
-				requestWithCallback(isTestMode ? trading.getTestRuntimeTrackRecord.bind(trading) : trading.getRuntimeTrackRecord.bind(trading), {
-					page: 1,
-					size: 20,
-					status: 'completed'
-				}),
-				isTestMode ? Promise.resolve(null) : requestWithCallback(trading.performanceSummary.bind(trading), {})
-			]);
+		setIsLoading(true);
+		fetchDashboardPayload(mode).then((payload) => {
 			if (canceled) return;
-			setSignalRows(pickArray(signalPayload));
-			setGridRows(pickArray(gridPayload));
-			setTrackRows(buildTrackRows(trackPayload));
-			setPerformanceSummary(performancePayload && typeof performancePayload === 'object' ? performancePayload : null);
+			applyDashboardPayload(payload);
 			setIsLoading(false);
-		};
-		loadDashboard();
+		});
 		return () => {
 			canceled = true;
 		};
-	}, [mode]);
+	}, [applyDashboardPayload, mode]);
+
+	const refreshAfterBotCreated = useCallback(async ({ category, response }) => {
+		const targetMode = MODE.LIVE;
+		if (mode !== targetMode) {
+			setMode(targetMode);
+		}
+		setIsLoading(true);
+		const dashboardPayload = await fetchDashboardPayload(targetMode);
+		applyDashboardPayload(dashboardPayload);
+		setIsLoading(false);
+		const responseData = response?.data ?? response;
+		const exactId = Number(responseData?.id || responseData?.pid || 0);
+		if (!(exactId > 0)) return null;
+		const rows = category === 'grid' ? dashboardPayload.gridRows : dashboardPayload.signalRows;
+		const createdRow = rows.find((row) => Number(row.id || 0) === exactId);
+		return createdRow ? { id: createdRow.id, row: createdRow } : null;
+	}, [applyDashboardPayload, mode]);
 
 	const rawBotRows = useMemo(() => buildBotRows({ signalRows, gridRows, mode, publicPrices }), [signalRows, gridRows, mode, publicPrices]);
 	const priceSymbols = useMemo(
@@ -895,7 +904,7 @@ const TradingPage = () => {
 									<tr><td colSpan={8} className="px-4 py-10 text-center text-sm text-[#64748B]">설치된 Bot이 없습니다.</td></tr>
 								) : botRows.map((row) => (
 									<tr key={row.key} onClick={() => setSelectedBot(row)} className={`h-16 cursor-pointer border-b border-[#E2E8F0] last:border-b-0 ${row.enabled ? 'border-l-4 border-l-[#2563EB] bg-white' : 'bg-[#F8FAFC] text-[#64748B] opacity-80'} hover:bg-[#EFF6FF]`}>
-										<td className="px-4 py-3"><div className="flex flex-col"><span className="text-sm font-semibold text-[#0F172A]">{row.name}</span><span className="mt-1 w-fit rounded-full bg-[#EFF6FF] px-2 py-0.5 text-[11px] font-semibold text-[#2563EB]">{row.strategyName}</span></div></td>
+										<td className="px-4 py-3"><div className="flex flex-col"><span className="text-sm font-semibold text-[#0F172A]">{row.name}</span><span className="mt-1 w-fit rounded-full bg-[#EFF6FF] px-2 py-0.5 text-[11px] font-semibold text-[#2563EB]">{row.strategyName}</span><span className="mt-1 text-[11px] font-semibold text-[#64748B]">{row.pidLabel}</span></div></td>
 										<td className="px-4 py-3 text-sm font-medium">{row.symbol}</td>
 										<td className="px-4 py-3 text-sm font-medium">{row.direction}</td>
 										<td className="whitespace-pre-line px-4 py-3 text-sm font-medium">{row.tradeAmount.label}</td>
@@ -918,7 +927,7 @@ const TradingPage = () => {
 						{botRows.map((row) => (
 							<div key={`${row.key}-mobile`} onClick={() => setSelectedBot(row)} className={`rounded-2xl border p-4 ${row.enabled ? 'border-[#BFDBFE] bg-white' : 'border-[#E2E8F0] bg-[#F8FAFC] opacity-80'}`}>
 								<div className="flex items-start justify-between gap-3">
-									<div><p className="text-base font-bold">{row.name}</p><p className="mt-1 text-sm text-[#64748B]">{row.symbol} · {row.direction}</p></div>
+									<div><p className="text-base font-bold">{row.name}</p><p className="mt-1 text-sm text-[#64748B]">{row.symbol} · {row.direction}</p><p className="mt-1 text-xs font-semibold text-[#64748B]">{row.pidLabel}</p></div>
 									<ToggleSwitch active={row.enabled} />
 								</div>
 								<div className="mt-4 grid grid-cols-2 gap-3 text-sm">
@@ -943,7 +952,7 @@ const TradingPage = () => {
 			{kpiModalTab ? <KpiModal activeTab={kpiModalTab} onClose={() => setKpiModalTab(null)} rows={kpiHistoryRows} /> : null}
 			<BotDetailModal bot={selectedBot} trackRows={trackRows} onClose={() => setSelectedBot(null)} />
 			{trackModalOpen ? <TrackRecordModal rows={trackRows} onClose={() => setTrackModalOpen(false)} /> : null}
-			<BotSetupModal isOpen={isBotSetupOpen} onClose={() => setIsBotSetupOpen(false)} source="dashboard" />
+			<BotSetupModal isOpen={isBotSetupOpen} onClose={() => setIsBotSetupOpen(false)} source="dashboard" onCreated={refreshAfterBotCreated} />
 		</div>
 	);
 };

@@ -109,6 +109,219 @@ const normalizeSignalRuntimeTypePayload = (body = {}) => {
   return body;
 };
 
+const normalizeBotCreateSymbol = (value = "") =>
+  String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/^[A-Z0-9_]+:/, "")
+    .replace(/\.P$/i, "");
+
+const normalizeBotCreateSymbolPayload = (body = {}) => {
+  body.symbol = normalizeBotCreateSymbol(body.symbol);
+  return body;
+};
+
+const BOT_DRAFT_CLEANUP_STATUS = "CANCELED_DRAFT";
+const BOT_CREATE_DUPLICATE_DRAFT_CODE = "BOT_CREATE_DUPLICATE_DRAFT";
+const LIVE_DRAFT_CLEANUP_ACTION = "USER_CLEANUP_DRAFT";
+
+const normalizeRuntimeCode = (value = "") => String(value || "").trim();
+const normalizeComparableSide = (value = "") => String(value || "").trim().toUpperCase();
+const toComparableNumber = (value) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+};
+
+const isDraftCleanupStatus = (value) =>
+  String(value || "").trim().toUpperCase() === BOT_DRAFT_CLEANUP_STATUS;
+
+const hasDraftCleanupStatus = (item = {}) =>
+  isDraftCleanupStatus(item.status) || isDraftCleanupStatus(item.regimeStatus);
+
+const sendDuplicateDraftResponse = (res, { botKind, existingPid }) =>
+  res.status(409).json({
+    ok: false,
+    success: false,
+    code: BOT_CREATE_DUPLICATE_DRAFT_CODE,
+    botKind,
+    existingPid: Number(existingPid || 0) || null,
+  });
+
+const ensureBotCreateCatalogContract = async (res, { uid, category, liveStrategyCode, runtimeStrategyCode }) => {
+  const normalizedLiveCode = normalizeRuntimeCode(liveStrategyCode);
+  const normalizedRuntimeCode = normalizeRuntimeCode(runtimeStrategyCode);
+  if (!normalizedLiveCode) {
+    sendRouteError(res, 400, "liveStrategyCode가 필요합니다. Bot 생성은 live strategy catalog 기준으로만 가능합니다.");
+    return false;
+  }
+
+  const items = await adminManagement.listUserSelectableStrategyCatalog({ uid, category });
+  const matched = (items || []).find(
+    (item) => normalizeRuntimeCode(item.liveStrategyCode || item.liveCode) === normalizedLiveCode
+  );
+
+  if (!matched) {
+    sendRouteError(res, 403, "선택 가능한 live strategy catalog 항목을 찾을 수 없습니다.");
+    return false;
+  }
+
+  if (matched.enabledForCreate === false || matched.userSelectable === false) {
+    sendRouteError(res, 403, "해당 전략은 Bot 생성 대상이 아닙니다.");
+    return false;
+  }
+
+  if (
+    matched.instrumentType !== adminManagement.BOT_CREATE_INSTRUMENT_TYPE ||
+    matched.marketType !== adminManagement.BOT_CREATE_MARKET_TYPE
+  ) {
+    sendRouteError(res, 400, "Bot 생성은 PERP/USD-M Futures instrument contract만 허용합니다.");
+    return false;
+  }
+
+  if (normalizeRuntimeCode(matched.runtimeStrategyCode || matched.runtimeCode) !== normalizedRuntimeCode) {
+    sendRouteError(res, 400, "live strategy catalog runtime code와 생성 payload가 일치하지 않습니다.");
+    return false;
+  }
+
+  return true;
+};
+
+const loadDraftDependencyCounts = async ({ uid, pid, strategyCategory }) => {
+  const normalizedCategory = String(strategyCategory || "").trim().toLowerCase();
+  const [queueRows, ledgerRows, snapshotRows, reservationRows, ownerRows] = await Promise.all([
+    db.query(
+      `SELECT COUNT(*) AS count
+         FROM order_intent_queue
+        WHERE uid = ?
+          AND pid = ?
+          AND strategyCategory = ?`,
+      [uid, pid, normalizedCategory]
+    ),
+    db.query(
+      `SELECT COUNT(*) AS count
+         FROM live_pid_position_ledger
+        WHERE uid = ?
+          AND pid = ?
+          AND strategyCategory = ?`,
+      [uid, pid, normalizedCategory]
+    ),
+    db.query(
+      `SELECT COUNT(*) AS count
+         FROM live_pid_position_snapshot
+        WHERE uid = ?
+          AND pid = ?
+          AND strategyCategory = ?`,
+      [uid, pid, normalizedCategory]
+    ),
+    db.query(
+      `SELECT COUNT(*) AS count
+         FROM live_pid_exit_reservation
+        WHERE uid = ?
+          AND pid = ?
+          AND strategyCategory = ?`,
+      [uid, pid, normalizedCategory]
+    ),
+    normalizedCategory === "grid"
+      ? db.query(
+          `SELECT COUNT(*) AS count
+             FROM live_position_bucket_owner
+            WHERE uid = ?
+              AND ownerPid = ?
+              AND ownerStrategyCategory = ?`,
+          [uid, pid, normalizedCategory]
+        )
+      : Promise.resolve([[{ count: 0 }]]),
+  ]);
+
+  return {
+    queue: Number(queueRows?.[0]?.[0]?.count || 0),
+    ledger: Number(ledgerRows?.[0]?.[0]?.count || 0),
+    snapshot: Number(snapshotRows?.[0]?.[0]?.count || 0),
+    reservation: Number(reservationRows?.[0]?.[0]?.count || 0),
+    owner: Number(ownerRows?.[0]?.[0]?.count || 0),
+  };
+};
+
+const hasNoDraftDependencies = (counts = {}) =>
+  !Object.values(counts).some((value) => Number(value || 0) > 0);
+
+const findDuplicateSignalDraft = async ({ uid, body }) => {
+  const [rows] = await db.query(
+    `SELECT *
+       FROM live_play_list
+      WHERE uid = ?
+        AND UPPER(COALESCE(enabled, 'N')) = 'N'
+        AND UPPER(COALESCE(status, 'READY')) = 'READY'
+        AND COALESCE(type, '') = ?
+        AND COALESCE(symbol, '') = ?
+        AND COALESCE(bunbong, '') = ?
+        AND UPPER(COALESCE(signalType, '')) = ?
+        AND ABS(COALESCE(leverage, 0) - ?) < 0.00000001
+        AND ABS(COALESCE(margin, 0) - ?) < 0.00000001
+      ORDER BY id DESC
+      LIMIT 5`,
+    [
+      uid,
+      normalizeRuntimeCode(body.type),
+      normalizeBotCreateSymbol(body.symbol),
+      String(body.bunbong || "").trim(),
+      normalizeComparableSide(body.signalType),
+      toComparableNumber(body.leverage),
+      toComparableNumber(body.margin),
+    ]
+  );
+
+  for (const row of rows || []) {
+    if (hasDraftCleanupStatus(row) || !canDeleteSignalItem(row)) {
+      continue;
+    }
+    const counts = await loadDraftDependencyCounts({ uid, pid: row.id, strategyCategory: "signal" });
+    if (hasNoDraftDependencies(counts)) {
+      return row;
+    }
+  }
+  return null;
+};
+
+const findDuplicateGridDraft = async ({ uid, payload }) => {
+  const [rows] = await db.query(
+    `SELECT *
+       FROM live_grid_strategy_list
+      WHERE uid = ?
+        AND UPPER(COALESCE(enabled, 'N')) = 'N'
+        AND UPPER(COALESCE(regimeStatus, 'READY')) <> ?
+        AND COALESCE(strategySignal, '') = ?
+        AND COALESCE(symbol, '') = ?
+        AND COALESCE(bunbong, '') = ?
+        AND ABS(COALESCE(leverage, 0) - ?) < 0.00000001
+        AND ABS(COALESCE(margin, 0) - ?) < 0.00000001
+        AND ABS(COALESCE(profit, 0) - ?) < 0.00000001
+      ORDER BY id DESC
+      LIMIT 5`,
+    [
+      uid,
+      BOT_DRAFT_CLEANUP_STATUS,
+      normalizeRuntimeCode(payload.strategySignal),
+      normalizeBotCreateSymbol(payload.symbol),
+      String(payload.bunbong || "").trim(),
+      toComparableNumber(payload.leverage),
+      toComparableNumber(payload.margin),
+      toComparableNumber(payload.profit),
+    ]
+  );
+
+  for (const row of rows || []) {
+    if (hasDraftCleanupStatus(row) || !canDeleteGridItem(row)) {
+      continue;
+    }
+    const counts = await loadDraftDependencyCounts({ uid, pid: row.id, strategyCategory: "grid" });
+    if (hasNoDraftDependencies(counts)) {
+      return row;
+    }
+  }
+  return null;
+};
+
 const PY_M2_EX = 3.3058;
 const M2_PY_EX = 0.3025;
 
@@ -3914,7 +4127,7 @@ const GRID_TABLE_MAP = {
 const normalizeGridPayload = (body = {}) => ({
   a_name: isEmpty3(body.a_name).trim(),
   strategySignal: isEmpty3(body.strategySignal).trim() || null,
-  symbol: gridRuntime.normalizeGridSymbol(body.symbol),
+  symbol: normalizeBotCreateSymbol(gridRuntime.normalizeGridSymbol(body.symbol)),
   bunbong: gridRuntime.normalizeGridBunbong(body.bunbong),
   marginType: "cross",
   margin: Number(body.margin || 0),
@@ -4254,7 +4467,10 @@ router.post("/member/keys/validate", async (req, res) => {
 
   const finalAppKey = inputAppKey || member.appKey || null;
   const finalAppSecret = inputAppSecret || member.appSecret || null;
-  const result = await coin.validateMemberApiKeys(finalAppKey, finalAppSecret);
+  const result = await coin.validateMemberApiKeys(finalAppKey, finalAppSecret, {
+    uid: userId,
+    persistAccountSnapshot: true,
+  });
 
   if (!result.ok) {
     return res.status(400).send(result);
@@ -4406,6 +4622,14 @@ router.post("/live/del", async (req, res) => {
         "포지션 또는 주문이 남아 있는 실거래 전략은 삭제할 수 없습니다. OFF 후 대기 상태에서 다시 시도해 주세요."
       );
     }
+    const dependencyCounts = await loadDraftDependencyCounts({ uid: userId, pid: id, strategyCategory: "signal" });
+    if (!hasNoDraftDependencies(dependencyCounts)) {
+      return sendRouteError(
+        res,
+        409,
+        "거래 이력이 있거나 처리 대기 상태가 남아 있는 실거래 전략은 draft cleanup 할 수 없습니다."
+      );
+    }
   }
 
   for (const target of idList) {
@@ -4417,23 +4641,35 @@ router.post("/live/del", async (req, res) => {
         strategyCategory: "signal",
         strategyMode: "live",
         pid: id,
-        actionCode: "USER_DELETE_STRATEGY",
+        actionCode: LIVE_DRAFT_CLEANUP_ACTION,
         previousEnabled: normalizeEnabledValue(item.enabled),
         nextEnabled: "N",
-        note: "algorithm-deleted",
+        note: "algorithm-draft-cleanup",
         metadata: {
+          cleanupMode: "SOFT_STATUS",
           status: item.status || null,
           signalType: item.signalType || null,
         },
       });
     }
     await db.query(
-      `DELETE FROM ${getSignalTableName("LIVE")} WHERE id = ? AND uid = ? LIMIT 1`,
-      [id, userId]
+      `UPDATE ${getSignalTableName("LIVE")}
+          SET enabled = 'N',
+              status = ?,
+              st = NULL,
+              autoST = NULL
+        WHERE id = ? AND uid = ?
+        LIMIT 1`,
+      [BOT_DRAFT_CLEANUP_STATUS, id, userId]
     );
   }
 
-  return res.send({ ok: true, deletedCount: idList.length });
+  return res.send({
+    ok: true,
+    cleanupMode: "SOFT_STATUS",
+    status: BOT_DRAFT_CLEANUP_STATUS,
+    cleanedCount: idList.length,
+  });
 });
 
 router.post("/test/del", async (req, res) => {
@@ -4555,7 +4791,8 @@ router.get("/live/list", async (req, res) => {
     userId
   ]);
 
-  return res.send(await decorateOwnedSignalCollection(reData, userId));
+  const items = await decorateOwnedSignalCollection(reData, userId);
+  return res.send((items || []).filter((item) => !hasDraftCleanupStatus(item)));
 });
 router.get("/live/detail", async (req, res) => {
   const userId = req.decoded.userId;
@@ -4703,9 +4940,18 @@ router.post('/live/edit', validateItemAdd, async function(req, res){
 router.post('/live/add', validateItemAdd, async function(req, res){
   const userId = req.decoded.userId;
   normalizeSignalRuntimeTypePayload(req.body);
+  normalizeBotCreateSymbolPayload(req.body);
   normalizeCurrentTradeFlowPayload(req.body);
   normalizeExitOptionPayload(req.body);
   const dryRun = isDryRunRequest(req);
+  if (!(await ensureBotCreateCatalogContract(res, {
+    uid: userId,
+    category: "signal",
+    liveStrategyCode: req.body.liveStrategyCode,
+    runtimeStrategyCode: req.body.type,
+  }))) {
+    return;
+  }
   let stoch_id = dryRun
     ? null
     : await resolveMarketStochId(
@@ -4796,6 +5042,14 @@ router.post('/live/add', validateItemAdd, async function(req, res){
     }
   }
 
+  const duplicateDraft = await findDuplicateSignalDraft({ uid: userId, body: req.body });
+  if (duplicateDraft) {
+    return sendDuplicateDraftResponse(res, {
+      botKind: "ALGORITHM",
+      existingPid: duplicateDraft.id,
+    });
+  }
+
   const reData = await dbcon.DBCall(`CALL SP_LIVE_PLAY_ADD(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[
     userId,
     stoch_id,
@@ -4826,6 +5080,10 @@ router.post('/live/add', validateItemAdd, async function(req, res){
   }
 
   const createdId = Number(firstProcedureRow(reData)?.id || 0);
+  if (!createdId) {
+    return sendSaveFailure(res, "실체결 전략 생성 PID를 확인하지 못했습니다. 다시 시도해 주세요.");
+  }
+
   if (!(await savePlayExitOptions("LIVE", createdId, req.body))) {
     return sendSaveFailure(res, "실체결 전략의 청산 옵션 저장에 실패했습니다. 다시 시도해 주세요.");
   }
@@ -4847,7 +5105,13 @@ router.post('/live/add', validateItemAdd, async function(req, res){
     },
   });
 
-  return res.send(true);
+  return res.send({
+    ok: true,
+    botKind: "ALGORITHM",
+    id: createdId,
+    pid: createdId,
+    enabled: "N",
+  });
 });
 
 
@@ -8037,7 +8301,8 @@ router.get("/grid/live/list", async (req, res) => {
     [userId]
   );
 
-  return res.send(await decorateOwnedGridCollection(rows, userId));
+  const items = await decorateOwnedGridCollection(rows, userId);
+  return res.send((items || []).filter((item) => !hasDraftCleanupStatus(item)));
 });
 
 router.get("/grid/test/list", async (req, res) => {
@@ -8313,6 +8578,14 @@ router.post("/deployable-flow/dry-run", async (req, res) => {
 router.post("/grid/live/add", validateGridItemAdd, async (req, res) => {
   const userId = req.decoded.userId;
   const payload = normalizeGridPayload(req.body);
+  if (!(await ensureBotCreateCatalogContract(res, {
+    uid: userId,
+    category: "grid",
+    liveStrategyCode: req.body.liveStrategyCode,
+    runtimeStrategyCode: payload.strategySignal,
+  }))) {
+    return;
+  }
   if (isDryRunRequest(req)) {
     const connection = await db.getConnection();
     try {
@@ -8387,6 +8660,14 @@ router.post("/grid/live/add", validateGridItemAdd, async (req, res) => {
     }
   }
 
+  const duplicateDraft = await findDuplicateGridDraft({ uid: userId, payload });
+  if (duplicateDraft) {
+    return sendDuplicateDraftResponse(res, {
+      botKind: "GRID",
+      existingPid: duplicateDraft.id,
+    });
+  }
+
   const [result] = await db.query(
     `INSERT INTO live_grid_strategy_list
       (uid, a_name, strategySignal, symbol, bunbong, marginType, margin, leverage, profit, tradeValue, st, autoST, enabled)
@@ -8419,7 +8700,13 @@ router.post("/grid/live/add", validateGridItemAdd, async (req, res) => {
     note: "grid-created-disabled",
   });
 
-  return res.send({ ok: true, id: result.insertId });
+  return res.send({
+    ok: true,
+    botKind: "GRID",
+    id: result.insertId,
+    pid: result.insertId,
+    enabled: "N",
+  });
 });
 
 router.post("/grid/test/add", validateGridItemAdd, async (req, res) => {
@@ -8674,6 +8961,14 @@ router.post("/grid/live/del", async (req, res) => {
         "주문 또는 포지션이 남아 있는 그리드 전략은 삭제할 수 없습니다. OFF 후 대기 상태에서 다시 시도해 주세요."
       );
     }
+    const dependencyCounts = await loadDraftDependencyCounts({ uid: userId, pid: id, strategyCategory: "grid" });
+    if (!hasNoDraftDependencies(dependencyCounts)) {
+      return sendRouteError(
+        res,
+        409,
+        "거래 이력이 있거나 처리 대기 상태가 남아 있는 그리드 전략은 draft cleanup 할 수 없습니다."
+      );
+    }
   }
 
   for (const target of idList) {
@@ -8685,22 +8980,36 @@ router.post("/grid/live/del", async (req, res) => {
         strategyCategory: "grid",
         strategyMode: "live",
         pid: id,
-        actionCode: "USER_DELETE_STRATEGY",
+        actionCode: LIVE_DRAFT_CLEANUP_ACTION,
         previousEnabled: normalizeEnabledValue(item.enabled),
         nextEnabled: "N",
-        note: "grid-deleted",
+        note: "grid-draft-cleanup",
         metadata: {
+          cleanupMode: "SOFT_STATUS",
           regimeStatus: item.regimeStatus || null,
         },
       });
     }
-    await db.query(`DELETE FROM ${getGridTableName("LIVE")} WHERE id = ? AND uid = ? LIMIT 1`, [
-      id,
-      userId,
-    ]);
+    await db.query(
+      `UPDATE ${getGridTableName("LIVE")}
+          SET enabled = 'N',
+              st = NULL,
+              autoST = NULL,
+              regimeStatus = ?,
+              regimeEndReason = 'DRAFT_CLEANUP',
+              updatedAt = NOW()
+        WHERE id = ? AND uid = ?
+        LIMIT 1`,
+      [BOT_DRAFT_CLEANUP_STATUS, id, userId]
+    );
   }
 
-  return res.send({ ok: true, deletedCount: idList.length });
+  return res.send({
+    ok: true,
+    cleanupMode: "SOFT_STATUS",
+    status: BOT_DRAFT_CLEANUP_STATUS,
+    cleanedCount: idList.length,
+  });
 });
 
 router.post("/grid/test/del", async (req, res) => {

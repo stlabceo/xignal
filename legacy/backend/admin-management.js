@@ -25,6 +25,66 @@ const MIN_REFERRAL_SHARE_RATE = 0.1;
 const MAX_REFERRAL_SHARE_RATE = 0.5;
 const EXCHANGE_SYMBOL_REFRESH_MS = 24 * 60 * 60 * 1000;
 const BINANCE_FUTURES_EXCHANGE_INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo";
+const BOT_CREATE_INSTRUMENT_TYPE = "PERP";
+const BOT_CREATE_MARKET_TYPE = "USD_M_FUTURES";
+const BOT_CREATE_VENUE = "BINANCE";
+const LIVE_STRATEGY_CONTRACTS = {
+  signal: {
+    "ATF+VIXFIX": {
+      liveCode: "ATF_VIXFIX_V1",
+      lane: "ALGORITHM",
+      instrumentType: BOT_CREATE_INSTRUMENT_TYPE,
+      marketType: BOT_CREATE_MARKET_TYPE,
+      venue: BOT_CREATE_VENUE,
+      enabledForCreate: true,
+    },
+    "SQZ+GRID+BREAKOUT": {
+      liveCode: "SQZ_GRID_BREAKOUT_V1",
+      lane: "ALGORITHM",
+      instrumentType: BOT_CREATE_INSTRUMENT_TYPE,
+      marketType: BOT_CREATE_MARKET_TYPE,
+      venue: BOT_CREATE_VENUE,
+      enabledForCreate: true,
+    },
+    SQZGBRK: {
+      liveCode: "SQZ_GRID_BREAKOUT_V1",
+      lane: "ALGORITHM",
+      instrumentType: BOT_CREATE_INSTRUMENT_TYPE,
+      marketType: BOT_CREATE_MARKET_TYPE,
+      venue: BOT_CREATE_VENUE,
+      enabledForCreate: true,
+    },
+  },
+  grid: {
+    "NY_BOX_GRID_50_50": {
+      liveCode: "NYBOX_GRID_50_50_V1",
+      lane: "GRID",
+      variant: "50_50",
+      instrumentType: BOT_CREATE_INSTRUMENT_TYPE,
+      marketType: BOT_CREATE_MARKET_TYPE,
+      venue: BOT_CREATE_VENUE,
+      enabledForCreate: true,
+    },
+    "NY_BOX_GRID_35_65": {
+      liveCode: "NYBOX_GRID_35_65_V1",
+      lane: "GRID",
+      variant: "35_65",
+      instrumentType: BOT_CREATE_INSTRUMENT_TYPE,
+      marketType: BOT_CREATE_MARKET_TYPE,
+      venue: BOT_CREATE_VENUE,
+      enabledForCreate: true,
+    },
+    "SQZ+GRID": {
+      liveCode: "SQZ_GRID_V1",
+      lane: "GRID",
+      variant: "BASE",
+      instrumentType: BOT_CREATE_INSTRUMENT_TYPE,
+      marketType: BOT_CREATE_MARKET_TYPE,
+      venue: BOT_CREATE_VENUE,
+      enabledForCreate: true,
+    },
+  },
+};
 
 let exchangeCatalogRefreshPromise = null;
 
@@ -67,6 +127,10 @@ const parseJsonArray = (value) => {
     }
   }
 
+  if (Number.isFinite(Number(value))) {
+    return [Number(value)];
+  }
+
   return [];
 };
 
@@ -74,6 +138,7 @@ const normalizeSymbol = (value) => {
   const normalized = String(value || "")
     .trim()
     .toUpperCase()
+    .replace(/^[A-Z0-9_]+:/, "")
     .replace(/\.P$/i, "");
 
   return normalized || null;
@@ -106,6 +171,28 @@ const normalizeStrategyCategory = (value) => {
     return "grid";
   }
   return "signal";
+};
+
+const resolveLiveStrategyContract = ({ strategyCategory, signalName, strategyCode } = {}) => {
+  const category = normalizeStrategyCategory(strategyCategory);
+  const runtimeCode = normalizeSignalName(strategyCode || signalName);
+  const contract = LIVE_STRATEGY_CONTRACTS[category]?.[runtimeCode] || null;
+  const fallbackLiveCode = runtimeCode
+    ? `${runtimeCode.replace(/[^A-Z0-9]+/gi, "_").replace(/^_+|_+$/g, "").toUpperCase()}_V1`
+    : null;
+
+  return {
+    liveCode: contract?.liveCode || fallbackLiveCode,
+    liveStrategyCode: contract?.liveCode || fallbackLiveCode,
+    runtimeCode,
+    runtimeStrategyCode: runtimeCode,
+    lane: contract?.lane || (category === "grid" ? "GRID" : "ALGORITHM"),
+    variant: contract?.variant || null,
+    instrumentType: contract?.instrumentType || BOT_CREATE_INSTRUMENT_TYPE,
+    marketType: contract?.marketType || BOT_CREATE_MARKET_TYPE,
+    venue: contract?.venue || BOT_CREATE_VENUE,
+    enabledForCreate: contract?.enabledForCreate !== false,
+  };
 };
 
 const normalizeTradeAccessMode = (value) => {
@@ -649,14 +736,29 @@ const parseCatalogRow = (row, memberMap) => {
           strategyCode: signalName,
           aliases: signalName ? [signalName] : [],
         };
+  const liveContract = resolveLiveStrategyContract({
+    strategyCategory,
+    signalName,
+    strategyCode: identity.strategyCode,
+  });
 
   return {
     id: Number(row.id),
     strategyCategory,
+    lane: liveContract.lane,
     strategyName: row.strategyName,
     signalName,
     displayName: identity.displayName,
     strategyCode: identity.strategyCode,
+    liveCode: liveContract.liveCode,
+    liveStrategyCode: liveContract.liveStrategyCode,
+    runtimeCode: liveContract.runtimeCode,
+    runtimeStrategyCode: liveContract.runtimeStrategyCode,
+    variant: liveContract.variant,
+    instrumentType: liveContract.instrumentType,
+    marketType: liveContract.marketType,
+    venue: liveContract.venue,
+    enabledForCreate: liveContract.enabledForCreate,
     runtimeType: identity.strategyCode,
     aliases: identity.aliases,
     strategyKey: normalizeStrategyKey(identity.strategyCode),
@@ -722,6 +824,7 @@ const listUserSelectableStrategyCatalog = async ({ uid = null, category = null }
     .filter((row) => row.permissionMode !== "SPECIFIC" || row.allowedMemberIds.includes(normalizedUid))
     .map((row) => ({
       ...row,
+      userSelectable: true,
       ...getStrategyCatalogCreateConstraint(row),
     }));
 };
@@ -1516,9 +1619,14 @@ module.exports = {
   KNOWN_TIMEFRAMES,
   SIGNAL_RUNTIME_TYPE_MAX_LENGTH,
   TRADE_ACCESS_MODES,
+  BOT_CREATE_INSTRUMENT_TYPE,
+  BOT_CREATE_MARKET_TYPE,
+  BOT_CREATE_VENUE,
+  LIVE_STRATEGY_CONTRACTS,
   normalizeSignalStrategyCode,
   normalizeSignalStrategyKey,
   resolveSignalStrategyIdentity,
+  resolveLiveStrategyContract,
   getStrategyCatalogCreateConstraint,
   loadExchangeSymbolCatalog,
   getExchangeSymbolRuleSummary,

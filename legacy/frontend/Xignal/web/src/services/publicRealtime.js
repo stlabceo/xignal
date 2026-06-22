@@ -1,4 +1,12 @@
+import { PERP_INSTRUMENT_TYPE, PERP_MARKET_TYPE, PERP_VENUE, normalizePerpNativeSymbol } from '../pages/trading/perpInstrument';
+
 const DEFAULT_PUBLIC_REALTIME_API_BASE = '';
+export const PUBLIC_REALTIME_UPSTREAM_CONTRACT = Object.freeze({
+	venue: PERP_VENUE,
+	instrumentType: PERP_INSTRUMENT_TYPE,
+	marketType: PERP_MARKET_TYPE,
+	sourceFamily: 'BINANCE_USD_M_FUTURES'
+});
 
 const getPublicRealtimeBase = () =>
 	(import.meta.env.VITE_PUBLIC_REALTIME_API_BASE || DEFAULT_PUBLIC_REALTIME_API_BASE).replace(/\/+$/, '');
@@ -11,10 +19,18 @@ const appendParams = (url, params = {}) => {
 	return url;
 };
 
+const withPerpInstrumentParams = (params = {}) => ({
+	...params,
+	venue: PUBLIC_REALTIME_UPSTREAM_CONTRACT.venue,
+	instrumentType: PUBLIC_REALTIME_UPSTREAM_CONTRACT.instrumentType,
+	marketType: PUBLIC_REALTIME_UPSTREAM_CONTRACT.marketType
+});
+
 const buildRequestUrl = (path, params = {}) => {
 	const base = getPublicRealtimeBase();
-	if (base) return appendParams(new URL(path, base), params).toString();
-	const url = appendParams(new URL(path, window.location.origin), params);
+	const instrumentParams = withPerpInstrumentParams(params);
+	if (base) return appendParams(new URL(path, base), instrumentParams).toString();
+	const url = appendParams(new URL(path, window.location.origin), instrumentParams);
 	return `${url.pathname}${url.search}`;
 };
 
@@ -23,6 +39,10 @@ const itemPath = {
 	fear_greed: 'fear-greed',
 	support_resistance: 'support-resistance'
 };
+
+const STREAM_INITIAL_RETRY_MS = 3000;
+const STREAM_MAX_RETRY_MS = 60000;
+const STREAM_MAX_CONSECUTIVE_FAILURES = 6;
 
 const requestPublicRealtime = async (path, params = {}) => {
 	const url = buildRequestUrl(path, params);
@@ -72,6 +92,7 @@ const createFetchItemStream = (url, handlers = {}) => {
 	let closed = false;
 	let controller = null;
 	let retryTimer = null;
+	let consecutiveFailures = 0;
 
 	const parseChunk = (buffer) => {
 		const events = buffer.split('\n\n');
@@ -97,6 +118,7 @@ const createFetchItemStream = (url, handlers = {}) => {
 				signal: controller.signal
 			});
 			if (!response.ok || !response.body) throw new Error(`Stream failed: ${response.status}`);
+			consecutiveFailures = 0;
 			handlers.onOpen?.();
 			const reader = response.body.getReader();
 			const decoder = new TextDecoder();
@@ -105,13 +127,21 @@ const createFetchItemStream = (url, handlers = {}) => {
 				if (done) break;
 				buffer = parseChunk(buffer + decoder.decode(value, { stream: true }));
 			}
-		} catch {
-			if (!closed) handlers.onError?.();
+		} catch (error) {
+			if (!closed) {
+				consecutiveFailures += 1;
+				handlers.onError?.(error);
+			}
 		}
 		if (!closed) {
+			if (consecutiveFailures >= STREAM_MAX_CONSECUTIVE_FAILURES) return;
+			const retryDelay = Math.min(
+				STREAM_MAX_RETRY_MS,
+				STREAM_INITIAL_RETRY_MS * 2 ** Math.max(0, consecutiveFailures - 1)
+			);
 			retryTimer = window.setTimeout(() => {
 				void connect();
-			}, 1500);
+			}, retryDelay);
 		}
 	};
 
@@ -128,27 +158,7 @@ const createItemStream = (itemType, params = {}, handlers = {}) => {
 	const path = itemPath[itemType];
 	if (!path) return () => {};
 	const url = buildRequestUrl(`/api/items/${path}/stream`, streamParamsForItem(itemType, params));
-	if (typeof EventSource === 'undefined') {
-		return createFetchItemStream(url, handlers);
-	}
-	const source = new EventSource(url);
-	let closed = false;
-	source.onopen = () => {
-		if (!closed) handlers.onOpen?.();
-	};
-	source.onerror = () => {
-		if (!closed) handlers.onError?.();
-	};
-	for (const eventName of ['snapshot', 'patch', 'heartbeat']) {
-		source.addEventListener(eventName, (message) => {
-			if (closed) return;
-			handlers.onEvent?.(JSON.parse(message.data));
-		});
-	}
-	return () => {
-		closed = true;
-		source.close();
-	};
+	return createFetchItemStream(url, handlers);
 };
 
 export const publicRealtime = {
@@ -156,19 +166,19 @@ export const publicRealtime = {
 		return requestPublicRealtime('/api/items/ny-box/snapshot', params);
 	},
 	nyBoxSymbol(symbol, params = {}) {
-		return requestPublicRealtime(`/api/items/ny-box/symbol/${encodeURIComponent(symbol)}`, params);
+		return requestPublicRealtime(`/api/items/ny-box/symbol/${encodeURIComponent(normalizePerpNativeSymbol(symbol))}`, params);
 	},
 	fearGreedSnapshot(params = {}) {
 		return requestPublicRealtime('/api/items/fear-greed/snapshot', params);
 	},
 	fearGreedSymbol(symbol, params = {}) {
-		return requestPublicRealtime(`/api/items/fear-greed/symbol/${encodeURIComponent(symbol)}`, params);
+		return requestPublicRealtime(`/api/items/fear-greed/symbol/${encodeURIComponent(normalizePerpNativeSymbol(symbol))}`, params);
 	},
 	supportResistanceSnapshot(params = {}) {
 		return requestPublicRealtime('/api/items/support-resistance/snapshot', params);
 	},
 	supportResistanceSymbol(symbol, params = {}) {
-		return requestPublicRealtime(`/api/items/support-resistance/symbol/${encodeURIComponent(symbol)}`, params);
+		return requestPublicRealtime(`/api/items/support-resistance/symbol/${encodeURIComponent(normalizePerpNativeSymbol(symbol))}`, params);
 	},
 	createItemStream
 };
